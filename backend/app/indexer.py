@@ -62,12 +62,12 @@ class Indexer:
             ]
             job.total = len(paths)
             for path in paths:
-                if self.store.needs_reindex(path):
-                    try:
+                try:
+                    if self.store.needs_reindex(path):
                         entry, embedding = self.process_image(path)
                         self.store.upsert(entry, embedding)
-                    except Exception as exc:
-                        print(f"skipping {path}: {exc}")
+                except Exception as exc:
+                    print(f"skipping {path}: {exc}")
                 job.processed += 1
             self.store.save()
         except Exception as exc:
