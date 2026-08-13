@@ -13,7 +13,10 @@ from .storage import IndexStore
 
 app = FastAPI(title="ImageFind")
 app.add_middleware(
-    CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"],
+    CORSMiddleware,
+    allow_origins=["http://localhost:5173"],
+    allow_methods=["*"],
+    allow_headers=["*"],
 )
 
 store = IndexStore(config.INDEX_DIR)
@@ -50,6 +53,8 @@ def similar_endpoint(image_id: str):
 
 @app.post("/reindex")
 def reindex_endpoint():
+    if any(not j.done for j in jobs.values()):
+        raise HTTPException(status_code=409, detail="a reindex job is already running")
     job = ReindexJob(id=uuid.uuid4().hex)
     jobs[job.id] = job
     thread = threading.Thread(target=indexer.run_reindex, args=(job,), daemon=True)

@@ -44,7 +44,14 @@ def detect_vocab_objects(image_path: Path, vocabulary: list[str], conf: float = 
     if not vocabulary:
         return []
     processor, model = _get_owl()
-    image = Image.open(image_path).convert("RGB")
+    with Image.open(image_path) as raw:
+        if raw.mode in ("RGBA", "LA", "P"):
+            rgba = raw.convert("RGBA")
+            bg = Image.new("RGB", rgba.size, (255, 255, 255))
+            bg.paste(rgba, mask=rgba.getchannel("A"))
+            image = bg
+        else:
+            image = raw.convert("RGB")
     inputs = processor(text=[vocabulary], images=image, return_tensors="pt").to(_device)
     with torch.no_grad():
         outputs = model(**inputs)

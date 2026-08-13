@@ -1,4 +1,5 @@
 import importlib
+import threading
 import time
 
 import numpy as np
@@ -35,6 +36,27 @@ def test_reindex_on_empty_folder_completes_immediately(tmp_path, monkeypatch):
         time.sleep(0.05)
 
     assert status == {"processed": 0, "total": 0, "done": True, "error": None}
+
+
+def test_second_reindex_while_one_is_running_returns_409(tmp_path, monkeypatch):
+    main, _ = _fresh_app(tmp_path, monkeypatch)
+    release = threading.Event()
+
+    def fake_run_reindex(job):
+        release.wait(timeout=5)
+        job.done = True
+
+    monkeypatch.setattr(main.indexer, "run_reindex", fake_run_reindex)
+    client = TestClient(main.app)
+
+    first = client.post("/reindex")
+    assert first.status_code == 200
+
+    try:
+        second = client.post("/reindex")
+        assert second.status_code == 409
+    finally:
+        release.set()
 
 
 def test_search_and_filters_use_prepopulated_store(tmp_path, monkeypatch):

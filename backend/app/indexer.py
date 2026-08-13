@@ -69,6 +69,9 @@ class Indexer:
                 except Exception as exc:
                     print(f"skipping {path}: {exc}")
                 job.processed += 1
+                if job.processed % 50 == 0:
+                    self.store.save()
+            self.store.prune({str(p) for p in paths})
             self.store.save()
         except Exception as exc:
             job.error = str(exc)

@@ -22,7 +22,14 @@ def _load():
 
 def embed_image(image: Image.Image) -> np.ndarray:
     model, preprocess, _ = _load()
-    tensor = preprocess(image.convert("RGB")).unsqueeze(0).to(_device)
+    if image.mode in ("RGBA", "LA", "P"):
+        rgba = image.convert("RGBA")
+        bg = Image.new("RGB", rgba.size, (255, 255, 255))
+        bg.paste(rgba, mask=rgba.getchannel("A"))
+        image = bg
+    else:
+        image = image.convert("RGB")
+    tensor = preprocess(image).unsqueeze(0).to(_device)
     with torch.no_grad():
         features = model.encode_image(tensor)
         features = features / features.norm(dim=-1, keepdim=True)
