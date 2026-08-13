@@ -1,14 +1,17 @@
 import { useEffect, useState } from "react";
-import { fetchColors, fetchObjects, SearchFilters as Filters } from "./api";
+import { fetchColors, fetchObjects, type SearchFilters as Filters } from "./api";
 
 interface Props {
   onChange: (filters: Filters) => void;
 }
 
+const DEBOUNCE_MS = 300;
+
 export function SearchFilters({ onChange }: Props) {
   const [colors, setColors] = useState<string[]>([]);
   const [objects, setObjects] = useState<string[]>([]);
   const [text, setText] = useState("");
+  const [debouncedText, setDebouncedText] = useState("");
   const [color, setColor] = useState<string | undefined>(undefined);
   const [object, setObject] = useState<string | undefined>(undefined);
 
@@ -17,9 +20,17 @@ export function SearchFilters({ onChange }: Props) {
     fetchObjects().then(setObjects);
   }, []);
 
+  // Debounce the free-text input only: every keystroke would otherwise trigger
+  // a real CLIP forward pass server-side, and slow responses for stale partial
+  // queries could race with (and overwrite) a later, more complete one.
   useEffect(() => {
-    onChange({ text: text || undefined, color, object });
-  }, [text, color, object]);
+    const handle = window.setTimeout(() => setDebouncedText(text), DEBOUNCE_MS);
+    return () => window.clearTimeout(handle);
+  }, [text]);
+
+  useEffect(() => {
+    onChange({ text: debouncedText || undefined, color, object });
+  }, [debouncedText, color, object]);
 
   return (
     <div className="search-filters">
