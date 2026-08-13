@@ -4,6 +4,7 @@ import uuid
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
+from pydantic import BaseModel
 
 from . import config
 from .indexer import Indexer, ReindexJob
@@ -52,12 +53,12 @@ def similar_endpoint(image_id: str):
 
 
 @app.post("/reindex")
-def reindex_endpoint():
+def reindex_endpoint(force: bool = False):
     if any(not j.done for j in jobs.values()):
         raise HTTPException(status_code=409, detail="a reindex job is already running")
     job = ReindexJob(id=uuid.uuid4().hex)
     jobs[job.id] = job
-    thread = threading.Thread(target=indexer.run_reindex, args=(job,), daemon=True)
+    thread = threading.Thread(target=indexer.run_reindex, args=(job, force), daemon=True)
     thread.start()
     return {"job_id": job.id}
 
@@ -86,3 +87,49 @@ def colors_endpoint():
 @app.get("/objects")
 def objects_endpoint():
     return sorted({o for e in store.all() for o in e.objects})
+
+
+class SettingsUpdate(BaseModel):
+    yolo_confidence: float | None = None
+    owl_confidence: float | None = None
+    text_similarity_threshold: float | None = None
+    color_clusters: int | None = None
+    color_min_share: float | None = None
+    vocabulary: list[str] | None = None
+
+
+def _settings_dict() -> dict:
+    return {
+        "yolo_confidence": config.YOLO_CONFIDENCE,
+        "owl_confidence": config.OWL_CONFIDENCE,
+        "text_similarity_threshold": config.TEXT_SIMILARITY_THRESHOLD,
+        "color_clusters": config.COLOR_CLUSTERS,
+        "color_min_share": config.COLOR_MIN_SHARE,
+        "vocabulary": config.VOCABULARY,
+    }
+
+
+@app.get("/settings")
+def get_settings():
+    return _settings_dict()
+
+
+@app.post("/settings")
+def update_settings(update: SettingsUpdate):
+    if update.yolo_confidence is not None:
+        config.YOLO_CONFIDENCE = update.yolo_confidence
+    if update.owl_confidence is not None:
+        config.OWL_CONFIDENCE = update.owl_confidence
+    if update.text_similarity_threshold is not None:
+        config.TEXT_SIMILARITY_THRESHOLD = update.text_similarity_threshold
+    if update.color_clusters is not None:
+        config.COLOR_CLUSTERS = update.color_clusters
+    if update.color_min_share is not None:
+        config.COLOR_MIN_SHARE = update.color_min_share
+    if update.vocabulary is not None:
+        config.VOCABULARY = update.vocabulary
+        # Indexer snapshots the vocabulary list at construction time, so a
+        # runtime change to config.VOCABULARY needs to be pushed to it
+        # explicitly to actually take effect on the next reindex.
+        indexer.vocabulary = update.vocabulary
+    return _settings_dict()

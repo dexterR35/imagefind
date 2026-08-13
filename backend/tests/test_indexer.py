@@ -84,6 +84,44 @@ def test_run_reindex_prunes_entries_for_deleted_files(tmp_path):
     assert store.embeddings.shape[0] == 1
 
 
+def test_run_reindex_force_reprocesses_unchanged_files(tmp_path, monkeypatch):
+    images_dir = tmp_path / "images"
+    _make_images(images_dir)
+
+    index_dir = tmp_path / "index"
+    store = IndexStore(index_dir, embedding_dim=512)
+    store.load()
+    indexer = Indexer(images_dir, index_dir, store, vocabulary=["clover"])
+
+    calls = []
+
+    def fake_process_image(path):
+        calls.append(path)
+        stat = path.stat()
+        entry = ImageEntry(
+            id=path.name, path=str(path),
+            thumbnail_path=str(index_dir / "thumbnails" / f"{path.name}.jpg"),
+            ocr_text="", colors=[], objects=[], mtime=stat.st_mtime, size=stat.st_size,
+        )
+        return entry, np.zeros(512, dtype=np.float32)
+
+    monkeypatch.setattr(indexer, "process_image", fake_process_image)
+
+    job = ReindexJob(id="job1")
+    indexer.run_reindex(job)
+    assert len(calls) == 2
+    assert len(store.all()) == 2
+
+    job2 = ReindexJob(id="job2")
+    indexer.run_reindex(job2)
+    assert len(calls) == 2, "unchanged files should be skipped without force"
+
+    job3 = ReindexJob(id="job3")
+    indexer.run_reindex(job3, force=True)
+    assert len(calls) == 4, "force=True should reprocess unchanged files too"
+    assert len(store.all()) == 2
+
+
 def test_run_reindex_saves_periodically_not_just_at_the_end(tmp_path, monkeypatch):
     images_dir = tmp_path / "images"
     _make_images(images_dir, count=125)

@@ -54,7 +54,7 @@ class Indexer:
         )
         return entry, embedding
 
-    def run_reindex(self, job: ReindexJob) -> None:
+    def run_reindex(self, job: ReindexJob, force: bool = False) -> None:
         try:
             paths = [
                 p for p in sorted(self.images_dir.rglob("*"))
@@ -63,7 +63,7 @@ class Indexer:
             job.total = len(paths)
             for path in paths:
                 try:
-                    if self.store.needs_reindex(path):
+                    if force or self.store.needs_reindex(path):
                         entry, embedding = self.process_image(path)
                         self.store.upsert(entry, embedding)
                 except Exception as exc:
