@@ -1,4 +1,4 @@
-import { useRef, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { fetchReindexStatus, startReindex, type ReindexStatus } from "./api";
 
 interface Props {
@@ -9,6 +9,14 @@ export function ReindexButton({ onComplete }: Props) {
   const [status, setStatus] = useState<ReindexStatus | null>(null);
   const [running, setRunning] = useState(false);
   const pollRef = useRef<number | null>(null);
+
+  useEffect(() => {
+    return () => {
+      if (pollRef.current !== null) {
+        window.clearInterval(pollRef.current);
+      }
+    };
+  }, []);
 
   async function handleClick() {
     setRunning(true);
