@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
-import { findSimilar, search } from "./api";
+import { findSimilar, search, startReindex, updateSettings } from "./api";
 
 describe("search", () => {
   it("builds query params only for provided filters", async () => {
@@ -52,5 +52,36 @@ describe("findSimilar", () => {
     const results = await findSimilar("a1");
 
     expect(results[0].thumbnail_url).toBe("http://localhost:8000/thumbnail/b1");
+  });
+});
+
+describe("startReindex", () => {
+  it("passes force=true through as a query param", async () => {
+    const mockFetch = vi.fn().mockResolvedValue({ ok: true, json: async () => ({ job_id: "j1" }) });
+    vi.stubGlobal("fetch", mockFetch);
+
+    await startReindex(true);
+
+    expect(mockFetch).toHaveBeenCalledWith("http://localhost:8000/reindex?force=true", { method: "POST" });
+  });
+});
+
+describe("updateSettings", () => {
+  it("POSTs the full settings object as JSON", async () => {
+    const settings = {
+      yolo_confidence: 0.4, owl_confidence: 0.05, text_similarity_threshold: 0.2,
+      color_clusters: 4, color_min_share: 0.08, vocabulary: ["diamond"],
+    };
+    const mockFetch = vi.fn().mockResolvedValue({ ok: true, json: async () => settings });
+    vi.stubGlobal("fetch", mockFetch);
+
+    const result = await updateSettings(settings);
+
+    expect(mockFetch).toHaveBeenCalledWith("http://localhost:8000/settings", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(settings),
+    });
+    expect(result).toEqual(settings);
   });
 });

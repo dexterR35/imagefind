@@ -4,6 +4,7 @@ import { ImageGrid } from "./ImageGrid";
 import { ImageModal } from "./ImageModal";
 import { ReindexButton } from "./ReindexButton";
 import { SearchFilters } from "./SearchFilters";
+import { Settings } from "./Settings";
 import "./App.css";
 
 export default function App() {
@@ -45,7 +46,10 @@ export default function App() {
     <div className="app">
       <h1>ImageFind</h1>
       <SearchFilters onChange={runSearch} />
-      <ReindexButton onComplete={() => runSearch(filters)} />
+      <div className="toolbar">
+        <ReindexButton onComplete={() => runSearch(filters)} />
+        <Settings onReindexComplete={() => runSearch(filters)} />
+      </div>
       {error && <p className="error-banner">{error}</p>}
       <ImageGrid images={images} onSelect={setSelected} />
       {selected && (

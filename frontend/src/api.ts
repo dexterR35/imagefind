@@ -20,6 +20,15 @@ export interface ReindexStatus {
   error: string | null;
 }
 
+export interface Settings {
+  yolo_confidence: number;
+  owl_confidence: number;
+  text_similarity_threshold: number;
+  color_clusters: number;
+  color_min_share: number;
+  vocabulary: string[];
+}
+
 const BASE_URL = "http://localhost:8000";
 
 export async function fetchColors(): Promise<string[]> {
@@ -56,8 +65,8 @@ export async function findSimilar(imageId: string): Promise<ImageResult[]> {
   return toAbsolute(data);
 }
 
-export async function startReindex(): Promise<string> {
-  const res = await fetch(`${BASE_URL}/reindex`, { method: "POST" });
+export async function startReindex(force = false): Promise<string> {
+  const res = await fetch(`${BASE_URL}/reindex?force=${force}`, { method: "POST" });
   if (!res.ok) throw new Error(`start reindex failed: ${res.status}`);
   const data = await res.json();
   return data.job_id;
@@ -66,5 +75,21 @@ export async function startReindex(): Promise<string> {
 export async function fetchReindexStatus(jobId: string): Promise<ReindexStatus> {
   const res = await fetch(`${BASE_URL}/reindex/status/${jobId}`);
   if (!res.ok) throw new Error(`fetch reindex status failed: ${res.status}`);
+  return res.json();
+}
+
+export async function fetchSettings(): Promise<Settings> {
+  const res = await fetch(`${BASE_URL}/settings`);
+  if (!res.ok) throw new Error(`fetch settings failed: ${res.status}`);
+  return res.json();
+}
+
+export async function updateSettings(settings: Settings): Promise<Settings> {
+  const res = await fetch(`${BASE_URL}/settings`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(settings),
+  });
+  if (!res.ok) throw new Error(`update settings failed: ${res.status}`);
   return res.json();
 }
