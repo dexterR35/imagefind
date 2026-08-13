@@ -20,7 +20,9 @@ def _get_yolo():
     return _yolo_model
 
 
-def detect_yolo_objects(image_path: Path, conf: float = config.YOLO_CONFIDENCE) -> list[str]:
+def detect_yolo_objects(image_path: Path, conf: float | None = None) -> list[str]:
+    if conf is None:
+        conf = config.YOLO_CONFIDENCE
     model = _get_yolo()
     results = model.predict(source=str(image_path), conf=conf, device=_device, verbose=False)
     labels = set()
@@ -42,7 +44,13 @@ def _get_owl():
     return _owl_processor, _owl_model
 
 
-def detect_vocab_objects(image_path: Path, vocabulary: list[str], conf: float = config.OWL_CONFIDENCE) -> list[str]:
+def detect_vocab_objects(image_path: Path, vocabulary: list[str], conf: float | None = None) -> list[str]:
+    # conf defaults to None (read from config inside the function) rather than
+    # config.OWL_CONFIDENCE directly, because a default argument value is
+    # evaluated once at import time — it would freeze in the startup value
+    # and never see runtime settings changes made via POST /settings.
+    if conf is None:
+        conf = config.OWL_CONFIDENCE
     if not vocabulary:
         return []
     processor, model = _get_owl()

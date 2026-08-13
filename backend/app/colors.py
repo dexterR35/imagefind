@@ -40,9 +40,13 @@ def _hsv_to_name(h: float, s: float, v: float) -> str:
 
 def extract_dominant_colors(
     image: Image.Image,
-    k: int = config.COLOR_CLUSTERS,
-    min_share: float = config.COLOR_MIN_SHARE,
+    k: int | None = None,
+    min_share: float | None = None,
 ) -> list[str]:
+    if k is None:
+        k = config.COLOR_CLUSTERS
+    if min_share is None:
+        min_share = config.COLOR_MIN_SHARE
     rgba = image.convert("RGBA")
     arr = np.asarray(rgba).reshape(-1, 4)
     opaque = arr[arr[:, 3] > 10]
