@@ -5,6 +5,8 @@ from PIL import Image
 from transformers import Owlv2ForObjectDetection, Owlv2Processor
 from ultralytics import YOLO
 
+from . import config
+
 _device = "cuda" if torch.cuda.is_available() else "cpu"
 _yolo_model = None
 _owl_processor = None
@@ -18,7 +20,7 @@ def _get_yolo():
     return _yolo_model
 
 
-def detect_yolo_objects(image_path: Path, conf: float = 0.4) -> list[str]:
+def detect_yolo_objects(image_path: Path, conf: float = config.YOLO_CONFIDENCE) -> list[str]:
     model = _get_yolo()
     results = model.predict(source=str(image_path), conf=conf, device=_device, verbose=False)
     labels = set()
@@ -40,7 +42,7 @@ def _get_owl():
     return _owl_processor, _owl_model
 
 
-def detect_vocab_objects(image_path: Path, vocabulary: list[str], conf: float = 0.15) -> list[str]:
+def detect_vocab_objects(image_path: Path, vocabulary: list[str], conf: float = config.OWL_CONFIDENCE) -> list[str]:
     if not vocabulary:
         return []
     processor, model = _get_owl()

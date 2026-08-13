@@ -31,14 +31,24 @@ def test_search_filters_by_color_and_object_with_and_logic(tmp_path):
     assert [e.id for e in result] == ["a"]
 
 
-def test_search_text_ranks_ocr_match_above_unrelated(tmp_path, monkeypatch):
+def test_search_text_ranks_ocr_match_above_semantic_only_match(tmp_path, monkeypatch):
+    store = _store_with(tmp_path, [
+        (_entry("a", ocr_text="NETBET BONUS"), [1.0, 0.0]),
+        (_entry("b", ocr_text=""), [0.3, 0.0]),
+    ])
+    monkeypatch.setattr(embeddings, "embed_text", lambda q: np.array([1.0, 0.0], dtype=np.float32))
+    result = search(store, text="netbet")
+    assert [e.id for e in result] == ["a", "b"]
+
+
+def test_search_text_filters_out_unrelated_images(tmp_path, monkeypatch):
     store = _store_with(tmp_path, [
         (_entry("a", ocr_text="NETBET BONUS"), [1.0, 0.0]),
         (_entry("b", ocr_text="unrelated"), [0.0, 1.0]),
     ])
     monkeypatch.setattr(embeddings, "embed_text", lambda q: np.array([1.0, 0.0], dtype=np.float32))
     result = search(store, text="netbet")
-    assert [e.id for e in result] == ["a", "b"]
+    assert [e.id for e in result] == ["a"]
 
 
 def test_find_similar_excludes_self_and_orders_by_similarity(tmp_path):

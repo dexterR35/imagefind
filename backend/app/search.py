@@ -1,4 +1,4 @@
-from . import embeddings
+from . import config, embeddings
 from .storage import ImageEntry, IndexStore
 
 
@@ -22,12 +22,16 @@ def search(
             text_lower = text.lower()
             text_matches = {i for i in candidates if text_lower in entries[i].ocr_text.lower()}
             query_embedding = embeddings.embed_text(text)
-            scores = {}
-            for i in candidates:
-                sim = embeddings.cosine_similarity(query_embedding, store.embeddings[i])
-                bonus = 0.25 if i in text_matches else 0.0
-                scores[i] = sim + bonus
-            ranked = sorted(candidates, key=lambda i: scores[i], reverse=True)
+            scores = {i: embeddings.cosine_similarity(query_embedding, store.embeddings[i]) for i in candidates}
+            matched = [
+                i for i in candidates
+                if i in text_matches or scores[i] >= config.TEXT_SIMILARITY_THRESHOLD
+            ]
+            ranked = sorted(
+                matched,
+                key=lambda i: scores[i] + (0.25 if i in text_matches else 0.0),
+                reverse=True,
+            )
         else:
             ranked = candidates
 
