@@ -1,0 +1,9 @@
+.superpowers/
+.venv/
+__pycache__/
+*.pyc
+node_modules/
+dist/
+.index/
+*.egg-info/
+.DS_Store
