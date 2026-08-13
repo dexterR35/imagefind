@@ -4,6 +4,8 @@ import numpy as np
 from PIL import Image
 from sklearn.cluster import KMeans
 
+from . import config
+
 COLOR_NAMES = [
     "red", "orange", "yellow", "gold", "green", "blue", "purple",
     "pink", "brown", "black", "white", "gray",
@@ -36,7 +38,11 @@ def _hsv_to_name(h: float, s: float, v: float) -> str:
     return "pink"
 
 
-def extract_dominant_colors(image: Image.Image, k: int = 4, min_share: float = 0.08) -> list[str]:
+def extract_dominant_colors(
+    image: Image.Image,
+    k: int = config.COLOR_CLUSTERS,
+    min_share: float = config.COLOR_MIN_SHARE,
+) -> list[str]:
     rgba = image.convert("RGBA")
     arr = np.asarray(rgba).reshape(-1, 4)
     opaque = arr[arr[:, 3] > 10]
