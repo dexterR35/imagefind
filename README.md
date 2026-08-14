@@ -47,12 +47,12 @@ so it stays fast even with a large, growing collection.
 - Search only shows results it can actually explain — if it doesn't recognize
   something or the word doesn't appear anywhere in the image, it won't guess.
 
-## Example
+## Examples
+
+Two real images from the app, with nothing typed in by hand — everything shown
+below each one was figured out automatically just by looking at the picture.
 
 <img src="example/1.png" width="320" alt="A red pouch full of fruit, a gold lucky 7, and clovers, spilling coins">
-
-Here's a real image from the app, with nothing typed in by hand — everything below
-was figured out automatically just by looking at the picture:
 
 > **Colors noticed:** red, white, gold
 > **Things recognized:** a bag/pouch, coins, a clover, a diamond, fruit (banana,
@@ -60,3 +60,15 @@ was figured out automatically just by looking at the picture:
 
 Typing **"clover"** into search finds this image immediately, because the app
 already recognized a clover in the picture on its own.
+
+<img src="example/2.png" width="320" alt="A promotional storyboard collage of a woman, with a long paragraph of text underneath it">
+
+> **Colors noticed:** black, orange, brown
+> **Things recognized:** a photo, a computer/cinema screen, a logo, a hat, a
+> diamond, a person, a woman
+> **Text read from the image:** an entire paragraph of ad-script copy, in
+> Romanian — "NETBET TRAIESTE MOMENTUL CONCEPT: Net Bet Pentru cont nou...", read
+> word for word even though it's dense, small, and spans the whole image
+
+Typing **"netbet"** — or any other word from that paragraph — into search finds
+this image immediately, because the app already read every word printed on it.
