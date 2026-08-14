@@ -53,14 +53,27 @@ export function Settings({ onReindexComplete }: Props) {
       .map((v) => v.trim())
       .filter(Boolean);
 
-    let jobId: string;
+    // Split into two stages so a failure after settings were already saved
+    // (e.g. a reindex is already running elsewhere, giving a 409) reports
+    // accurately instead of implying nothing happened at all.
     try {
       const saved = await updateSettings({ ...settings, vocabulary });
       setSettings(saved);
+    } catch {
+      setSaving(false);
+      setStatus({ processed: 0, total: 0, failed: 0, done: true, error: "Failed to save settings." });
+      return;
+    }
+
+    let jobId: string;
+    try {
       jobId = await startReindex(true);
     } catch {
       setSaving(false);
-      setStatus({ processed: 0, total: 0, done: true, error: "Failed to save settings or start reindex." });
+      setStatus({
+        processed: 0, total: 0, failed: 0, done: true,
+        error: "Settings saved, but failed to start reindex (a reindex may already be running).",
+      });
       return;
     }
 
@@ -76,7 +89,10 @@ export function Settings({ onReindexComplete }: Props) {
       } catch {
         stopPolling();
         setSaving(false);
-        setStatus({ processed: 0, total: 0, done: true, error: "Lost connection while checking reindex status." });
+        setStatus({
+          processed: 0, total: 0, failed: 0, done: true,
+          error: "Lost connection while checking reindex status.",
+        });
       }
     }, 500);
   }
@@ -158,6 +174,9 @@ export function Settings({ onReindexComplete }: Props) {
             <span>
               {status.processed} / {status.total}
             </span>
+          )}
+          {status?.done && status.failed > 0 && (
+            <span className="reindex-error">{status.failed} image(s) failed to index — check server logs.</span>
           )}
           {status?.error && <span className="reindex-error">{status.error}</span>}
         </div>

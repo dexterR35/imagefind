@@ -38,7 +38,7 @@ describe("Settings", () => {
       vocabulary: ["clover", "diamond"],
     });
     const reindexSpy = vi.spyOn(api, "startReindex").mockResolvedValue("job1");
-    vi.spyOn(api, "fetchReindexStatus").mockResolvedValue({ processed: 1, total: 1, done: true, error: null });
+    vi.spyOn(api, "fetchReindexStatus").mockResolvedValue({ processed: 1, total: 1, failed: 0, done: true, error: null });
     const onReindexComplete = vi.fn();
 
     render(<Settings onReindexComplete={onReindexComplete} />);
@@ -78,6 +78,29 @@ describe("Settings", () => {
 
     await waitFor(() => expect(screen.getByText(/failed to save settings/i)).toBeInTheDocument());
     expect(reindexSpy).not.toHaveBeenCalled();
+    expect(screen.getByText("Save & Reindex")).not.toBeDisabled();
+  });
+
+  it("reports that settings were saved even if starting the reindex then fails", async () => {
+    // Regression test: a single try/catch around both calls used to report
+    // a generic "failed to save settings or start reindex" even when the
+    // save half had actually already succeeded (e.g. a 409 because another
+    // reindex was already running).
+    vi.spyOn(api, "fetchSettings").mockResolvedValue(sampleSettings);
+    const updateSpy = vi.spyOn(api, "updateSettings").mockResolvedValue(sampleSettings);
+    vi.spyOn(api, "startReindex").mockRejectedValue(new Error("409 already running"));
+
+    render(<Settings onReindexComplete={vi.fn()} />);
+    fireEvent.click(screen.getByText("Settings"));
+    await waitFor(() => expect(screen.getByDisplayValue("0.15")).toBeInTheDocument());
+
+    fireEvent.click(screen.getByText("Save & Reindex"));
+    await vi.advanceTimersByTimeAsync(0);
+
+    await waitFor(() => expect(updateSpy).toHaveBeenCalled());
+    await waitFor(() =>
+      expect(screen.getByText(/settings saved, but failed to start reindex/i)).toBeInTheDocument()
+    );
     expect(screen.getByText("Save & Reindex")).not.toBeDisabled();
   });
 });
