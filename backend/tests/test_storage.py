@@ -114,3 +114,14 @@ def test_concurrent_upsert_keeps_entries_and_embeddings_aligned(tmp_path):
 
     assert errors == []
     assert len(store.all()) == store.embeddings.shape[0] == 200
+
+
+def test_corrupt_db_resets_to_empty(tmp_path):
+    (tmp_path / "index.db").write_bytes(b"not a real sqlite database")
+
+    store = IndexStore(tmp_path, embedding_dim=4)
+    store.load()
+
+    assert store.all() == []
+    assert store.embeddings.shape == (0, 4)
+    assert store.get("a1") is None
