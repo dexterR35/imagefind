@@ -114,6 +114,13 @@ class Indexer:
                 job.processed += 1
                 if job.processed % 50 == 0:
                     self.store.save()
+            # images_dir may be a network mount (e.g. a NAS share) that can
+            # disappear out from under the app - Path.rglob() on a missing
+            # directory silently returns [] rather than raising, which would
+            # otherwise look identical to "the folder is genuinely empty" and
+            # prune() would then wipe every existing entry. Abort instead.
+            if not self.images_dir.is_dir():
+                raise RuntimeError(f"images_dir {self.images_dir} is not reachable - skipping prune")
             # Re-list rather than reusing `paths`: a file deleted mid-scan
             # (after being listed but before its turn in the loop) must not
             # survive pruning just because it was present at the start.
