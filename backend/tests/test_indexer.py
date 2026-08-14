@@ -1,6 +1,7 @@
 import numpy as np
 from PIL import Image
 
+from app import config
 from app.indexer import Indexer, ReindexJob
 from app.storage import ImageEntry, IndexStore
 
@@ -10,6 +11,19 @@ def _make_images(images_dir, count=2):
     for i in range(count):
         color = (200, 30, 30) if i % 2 == 0 else (30, 200, 30)
         Image.new("RGB", (64, 64), color).save(images_dir / f"img{i:03d}.png")
+
+
+def _fake_process_image(index_dir):
+    def process(path, settings):
+        stat = path.stat()
+        entry = ImageEntry(
+            id=path.name, path=str(path),
+            thumbnail_path=str(index_dir / "thumbnails" / f"{path.name}.jpg"),
+            ocr_text="", colors=[], objects=[], mtime=stat.st_mtime, size=stat.st_size,
+        )
+        return entry, np.zeros(512, dtype=np.float32)
+
+    return process
 
 
 def test_run_reindex_processes_new_and_skips_unchanged(tmp_path, monkeypatch):
@@ -26,12 +40,13 @@ def test_run_reindex_processes_new_and_skips_unchanged(tmp_path, monkeypatch):
 
     assert job.processed == 2
     assert job.total == 2
+    assert job.failed == 0
     assert job.done is True
     assert len(store.all()) == 2
 
     calls = []
     original = indexer.process_image
-    monkeypatch.setattr(indexer, "process_image", lambda p: (calls.append(p), original(p))[1])
+    monkeypatch.setattr(indexer, "process_image", lambda p, s: (calls.append(p), original(p, s))[1])
 
     job2 = ReindexJob(id="job2")
     indexer.run_reindex(job2)
@@ -55,6 +70,7 @@ def test_run_reindex_skips_corrupt_image_without_aborting(tmp_path):
     indexer.run_reindex(job)
 
     assert job.processed == 3
+    assert job.failed == 1
     assert job.done is True
     assert len(store.all()) == 2
 
@@ -84,6 +100,45 @@ def test_run_reindex_prunes_entries_for_deleted_files(tmp_path):
     assert store.embeddings.shape[0] == 1
 
 
+def test_run_reindex_prunes_files_deleted_during_the_scan(tmp_path, monkeypatch):
+    images_dir = tmp_path / "images"
+    _make_images(images_dir, count=3)
+
+    index_dir = tmp_path / "index"
+    store = IndexStore(index_dir, embedding_dim=512)
+    store.load()
+    indexer = Indexer(images_dir, index_dir, store, vocabulary=["clover"])
+
+    fake_process = _fake_process_image(index_dir)
+    monkeypatch.setattr(indexer, "process_image", fake_process)
+
+    job = ReindexJob(id="job1")
+    indexer.run_reindex(job)
+    assert len(store.all()) == 3
+
+    # img000 is changed so it gets reprocessed; while it's being reprocessed,
+    # img002 (unchanged, so it's never reprocessed itself) is deleted from
+    # disk — simulating a file vanishing mid-scan, after run_reindex's
+    # initial directory listing but before its own turn in the loop.
+    (images_dir / "img000.png").write_bytes(b"changed bytes to force reprocessing")
+
+    def process_and_delete_another(path, settings):
+        (images_dir / "img002.png").unlink(missing_ok=True)
+        return fake_process(path, settings)
+
+    monkeypatch.setattr(indexer, "process_image", process_and_delete_another)
+
+    job2 = ReindexJob(id="job2")
+    indexer.run_reindex(job2)
+
+    remaining_paths = {e.path for e in store.all()}
+    assert str(images_dir / "img002.png") not in remaining_paths
+    assert len(store.all()) == 2
+    # needs_reindex(img002) hits a missing file mid-loop (it was already
+    # deleted) — caught per-image rather than aborting the batch.
+    assert job2.failed == 1
+
+
 def test_run_reindex_force_reprocesses_unchanged_files(tmp_path, monkeypatch):
     images_dir = tmp_path / "images"
     _make_images(images_dir)
@@ -94,18 +149,13 @@ def test_run_reindex_force_reprocesses_unchanged_files(tmp_path, monkeypatch):
     indexer = Indexer(images_dir, index_dir, store, vocabulary=["clover"])
 
     calls = []
+    fake_process = _fake_process_image(index_dir)
 
-    def fake_process_image(path):
+    def counting_process(path, settings):
         calls.append(path)
-        stat = path.stat()
-        entry = ImageEntry(
-            id=path.name, path=str(path),
-            thumbnail_path=str(index_dir / "thumbnails" / f"{path.name}.jpg"),
-            ocr_text="", colors=[], objects=[], mtime=stat.st_mtime, size=stat.st_size,
-        )
-        return entry, np.zeros(512, dtype=np.float32)
+        return fake_process(path, settings)
 
-    monkeypatch.setattr(indexer, "process_image", fake_process_image)
+    monkeypatch.setattr(indexer, "process_image", counting_process)
 
     job = ReindexJob(id="job1")
     indexer.run_reindex(job)
@@ -131,16 +181,7 @@ def test_run_reindex_saves_periodically_not_just_at_the_end(tmp_path, monkeypatc
     store.load()
     indexer = Indexer(images_dir, index_dir, store, vocabulary=["clover"])
 
-    def fake_process_image(path):
-        stat = path.stat()
-        entry = ImageEntry(
-            id=path.name, path=str(path),
-            thumbnail_path=str(index_dir / "thumbnails" / f"{path.name}.jpg"),
-            ocr_text="", colors=[], objects=[], mtime=stat.st_mtime, size=stat.st_size,
-        )
-        return entry, np.zeros(512, dtype=np.float32)
-
-    monkeypatch.setattr(indexer, "process_image", fake_process_image)
+    monkeypatch.setattr(indexer, "process_image", _fake_process_image(index_dir))
 
     save_call_count = 0
     original_save = store.save
@@ -160,3 +201,33 @@ def test_run_reindex_saves_periodically_not_just_at_the_end(tmp_path, monkeypatc
     # 125 images with a save every 50 processed (at 50, 100) plus the final save
     # after the loop == at least 3 saves, not just the one at the very end.
     assert save_call_count >= 3
+
+
+def test_run_reindex_snapshots_settings_once_at_start(tmp_path, monkeypatch):
+    images_dir = tmp_path / "images"
+    _make_images(images_dir, count=1)
+
+    index_dir = tmp_path / "index"
+    store = IndexStore(index_dir, embedding_dim=512)
+    store.load()
+    indexer = Indexer(images_dir, index_dir, store, vocabulary=["clover"])
+
+    original_clusters = config.COLOR_CLUSTERS
+    fake_process = _fake_process_image(index_dir)
+    captured = []
+
+    def process_and_mutate_config(path, settings):
+        captured.append(settings)
+        # A settings change "arriving" mid-run must not affect a snapshot
+        # already taken at the start of run_reindex.
+        monkeypatch.setattr(config, "COLOR_CLUSTERS", 999)
+        return fake_process(path, settings)
+
+    monkeypatch.setattr(indexer, "process_image", process_and_mutate_config)
+
+    job = ReindexJob(id="job1")
+    indexer.run_reindex(job)
+
+    assert len(captured) == 1
+    assert captured[0].color_clusters == original_clusters
+    assert captured[0].vocabulary == ["clover"]

@@ -6,6 +6,7 @@ import numpy as np
 from PIL import Image
 
 from . import colors as colors_mod
+from . import config
 from . import embeddings
 from . import objects as objects_mod
 from . import ocr
@@ -20,8 +21,22 @@ class ReindexJob:
     id: str
     total: int = 0
     processed: int = 0
+    failed: int = 0
     done: bool = False
     error: str | None = None
+
+
+@dataclass
+class ReindexSettings:
+    """A snapshot of the tunable settings, taken once at the start of a
+    reindex run, so a POST /settings call arriving mid-run can't make one
+    run process some images with old values and some with new ones."""
+
+    vocabulary: list[str]
+    yolo_confidence: float
+    owl_confidence: float
+    color_clusters: int
+    color_min_share: float
 
 
 class Indexer:
@@ -31,7 +46,16 @@ class Indexer:
         self.store = store
         self.vocabulary = vocabulary
 
-    def process_image(self, path: Path) -> tuple[ImageEntry, np.ndarray]:
+    def _current_settings(self) -> ReindexSettings:
+        return ReindexSettings(
+            vocabulary=self.vocabulary,
+            yolo_confidence=config.YOLO_CONFIDENCE,
+            owl_confidence=config.OWL_CONFIDENCE,
+            color_clusters=config.COLOR_CLUSTERS,
+            color_min_share=config.COLOR_MIN_SHARE,
+        )
+
+    def process_image(self, path: Path, settings: ReindexSettings) -> tuple[ImageEntry, np.ndarray]:
         stat = path.stat()
         existing = self.store.get_by_path(str(path))
         image_id = existing.id if existing else uuid.uuid4().hex
@@ -41,11 +65,16 @@ class Indexer:
 
         with Image.open(path) as img:
             img = img.convert("RGBA")
-            color_names = colors_mod.extract_dominant_colors(img)
+            color_names = colors_mod.extract_dominant_colors(
+                img, k=settings.color_clusters, min_share=settings.color_min_share
+            )
             embedding = embeddings.embed_image(img)
 
         text = ocr.extract_text(path)
-        object_labels = objects_mod.detect_all_objects(path, self.vocabulary)
+        object_labels = objects_mod.detect_all_objects(
+            path, settings.vocabulary,
+            yolo_conf=settings.yolo_confidence, owl_conf=settings.owl_confidence,
+        )
 
         entry = ImageEntry(
             id=image_id, path=str(path), thumbnail_path=str(thumb_path),
@@ -54,24 +83,33 @@ class Indexer:
         )
         return entry, embedding
 
+    def _list_image_paths(self) -> list[Path]:
+        return [
+            p for p in sorted(self.images_dir.rglob("*"))
+            if p.suffix.lower() in IMAGE_EXTENSIONS
+        ]
+
     def run_reindex(self, job: ReindexJob, force: bool = False) -> None:
         try:
-            paths = [
-                p for p in sorted(self.images_dir.rglob("*"))
-                if p.suffix.lower() in IMAGE_EXTENSIONS
-            ]
+            settings = self._current_settings()
+            paths = self._list_image_paths()
             job.total = len(paths)
             for path in paths:
                 try:
                     if force or self.store.needs_reindex(path):
-                        entry, embedding = self.process_image(path)
+                        entry, embedding = self.process_image(path, settings)
                         self.store.upsert(entry, embedding)
                 except Exception as exc:
+                    job.failed += 1
                     print(f"skipping {path}: {exc}")
                 job.processed += 1
                 if job.processed % 50 == 0:
                     self.store.save()
-            self.store.prune({str(p) for p in paths})
+            # Re-list rather than reusing `paths`: a file deleted mid-scan
+            # (after being listed but before its turn in the loop) must not
+            # survive pruning just because it was present at the start.
+            current_paths = {str(p) for p in self._list_image_paths()}
+            self.store.prune(current_paths)
             self.store.save()
         except Exception as exc:
             job.error = str(exc)
