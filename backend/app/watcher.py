@@ -1,12 +1,17 @@
 import logging
+import threading
 import time
 from pathlib import Path
+from typing import TYPE_CHECKING, Callable
 
 from watchdog.events import FileSystemEventHandler
 from watchdog.observers import Observer
 
 from .indexer import IMAGE_EXTENSIONS, Indexer
 from .storage import IndexStore
+
+if TYPE_CHECKING:
+    from .indexer import ReindexJob
 
 logger = logging.getLogger(__name__)
 
@@ -74,3 +79,22 @@ def start_watcher(indexer: Indexer, store: IndexStore) -> Observer:
     observer.schedule(_Handler(indexer, store), str(indexer.images_dir), recursive=True)
     observer.start()
     return observer
+
+
+def start_reconciliation_loop(
+    indexer: Indexer,
+    job_factory: Callable[[], "ReindexJob"],
+    interval_seconds: float,
+    stop_event: threading.Event,
+) -> threading.Thread:
+    def loop():
+        while not stop_event.wait(interval_seconds):
+            job = job_factory()
+            try:
+                indexer.run_reindex(job)
+            except Exception:
+                logger.warning("reconciliation: run_reindex failed", exc_info=True)
+
+    thread = threading.Thread(target=loop, daemon=True)
+    thread.start()
+    return thread

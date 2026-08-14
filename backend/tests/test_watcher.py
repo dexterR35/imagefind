@@ -1,3 +1,4 @@
+import threading
 import time
 from pathlib import Path
 from types import SimpleNamespace
@@ -6,9 +7,9 @@ from unittest.mock import patch
 import numpy as np
 from PIL import Image
 
-from app.indexer import Indexer
+from app.indexer import Indexer, ReindexJob
 from app.storage import IndexStore
-from app.watcher import _Handler, _wait_until_stable
+from app.watcher import _Handler, _wait_until_stable, start_reconciliation_loop
 
 
 def _fake_event(path, is_directory=False):
@@ -105,3 +106,26 @@ def test_handler_on_deleted_removes_entry(tmp_path):
     handler.on_deleted(_fake_event(img_path))
 
     assert store.get_by_path(str(img_path)) is None
+
+
+def test_reconciliation_loop_calls_run_reindex_on_interval(tmp_path, monkeypatch):
+    images_dir = tmp_path / "images"
+    images_dir.mkdir()
+    index_dir = tmp_path / "index"
+    store = IndexStore(index_dir, embedding_dim=512)
+    store.load()
+    indexer = Indexer(images_dir, index_dir, store)
+
+    calls = []
+    monkeypatch.setattr(indexer, "run_reindex", lambda job, force=False: calls.append(job))
+
+    stop_event = threading.Event()
+    thread = start_reconciliation_loop(
+        indexer, lambda: ReindexJob(id="r1"), interval_seconds=0.01, stop_event=stop_event
+    )
+    time.sleep(0.05)
+    stop_event.set()
+    thread.join(timeout=2)
+
+    assert len(calls) >= 1
+    assert not thread.is_alive()

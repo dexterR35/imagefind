@@ -59,6 +59,12 @@ def test_second_reindex_while_one_is_running_returns_409(tmp_path, monkeypatch):
         release.set()
 
 
+def test_watcher_disabled_by_default(tmp_path, monkeypatch):
+    main, _ = _fresh_app(tmp_path, monkeypatch)
+    assert main._watcher_observer is None
+    assert main._reconciliation_thread is None
+
+
 def test_search_and_filters_use_prepopulated_store(tmp_path, monkeypatch):
     main, _ = _fresh_app(tmp_path, monkeypatch)
     from app.storage import ImageEntry

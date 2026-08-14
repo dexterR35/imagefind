@@ -27,6 +27,31 @@ indexer = Indexer(config.IMAGES_DIR, config.INDEX_DIR, store, config.RAM_CUSTOM_
 jobs: dict[str, ReindexJob] = {}
 MAX_JOB_HISTORY = 10
 
+_watcher_observer = None
+_reconciliation_stop = threading.Event()
+_reconciliation_thread = None
+
+if config.ENABLE_WATCHER:
+    from .watcher import start_reconciliation_loop, start_watcher
+
+    _watcher_observer = start_watcher(indexer, store)
+    _reconciliation_thread = start_reconciliation_loop(
+        indexer,
+        lambda: ReindexJob(id=uuid.uuid4().hex),
+        config.RECONCILE_INTERVAL_SECONDS,
+        _reconciliation_stop,
+    )
+
+
+@app.on_event("shutdown")
+def _stop_watcher():
+    if _watcher_observer is not None:
+        _watcher_observer.stop()
+        _watcher_observer.join(timeout=5)
+    _reconciliation_stop.set()
+    if _reconciliation_thread is not None:
+        _reconciliation_thread.join(timeout=5)
+
 
 def _entry_to_dict(e) -> dict:
     return {

@@ -81,3 +81,9 @@ ENABLE_WATCHER = os.environ.get("ENABLE_WATCHER", "false").lower() == "true"
 # treats a create/modify event as "the write is finished" and processes it —
 # guards against reading a file mid-copy over the NAS.
 WATCHER_STABLE_CHECK_SECONDS = float(os.environ.get("WATCHER_STABLE_CHECK_SECONDS", "1.0"))
+# Backstop for the real-time watcher: catches anything a missed file-system
+# event didn't (e.g. SMB change-notifications aren't 100% guaranteed for
+# writes from other machines onto the same NAS share). This is a full
+# needs_reindex()-gated scan, same as the manual Reindex button, just run on
+# a low-frequency timer instead of only on click.
+RECONCILE_INTERVAL_SECONDS = float(os.environ.get("RECONCILE_INTERVAL_SECONDS", str(4 * 60 * 60)))
