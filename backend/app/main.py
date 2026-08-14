@@ -157,5 +157,9 @@ def update_settings(update: SettingsUpdate):
     if update.images_dir is not None:
         config.IMAGES_DIR = Path(update.images_dir)
         indexer.images_dir = config.IMAGES_DIR
-        config.save_images_dir(config.IMAGES_DIR)
+    # Persists the full current snapshot (not just whichever field this call
+    # touched) so ram_confidence/ram_custom_tags survive a restart the same
+    # way images_dir already did, regardless of which fields this particular
+    # request set.
+    config.save_settings(config.IMAGES_DIR, config.RAM_CONFIDENCE, config.RAM_CUSTOM_TAGS)
     return _settings_dict()

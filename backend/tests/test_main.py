@@ -140,6 +140,24 @@ def test_persisted_images_dir_survives_restart(tmp_path, monkeypatch):
     assert main.indexer.images_dir == other_dir
 
 
+def test_persisted_ram_settings_survive_restart(tmp_path, monkeypatch):
+    main, _ = _fresh_app(tmp_path, monkeypatch)
+    client = TestClient(main.app)
+    assert client.post("/settings", json={
+        "ram_confidence": 0.33,
+        "ram_custom_tags": ["zeus", "lightning"],
+    }).status_code == 200
+
+    # Simulate a fresh process: env vars don't set these, but the persisted
+    # settings file should be picked back up on import, same as images_dir.
+    importlib.reload(main.config)
+    importlib.reload(main)
+
+    assert main.config.RAM_CONFIDENCE == 0.33
+    assert main.config.RAM_CUSTOM_TAGS == ["zeus", "lightning"]
+    assert main.indexer.custom_tags == ["zeus", "lightning"]
+
+
 def test_post_settings_updates_config_and_indexer_custom_tags(tmp_path, monkeypatch):
     main, _ = _fresh_app(tmp_path, monkeypatch)
     client = TestClient(main.app)

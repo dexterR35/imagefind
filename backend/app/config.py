@@ -6,20 +6,35 @@ INDEX_DIR = Path(os.environ.get("INDEX_DIR", "./.index"))
 SETTINGS_FILE = INDEX_DIR / "settings.json"
 
 
-def _persisted_images_dir() -> Path | None:
+def _load_persisted_settings() -> dict:
     try:
-        data = json.loads(SETTINGS_FILE.read_text())
+        return json.loads(SETTINGS_FILE.read_text())
     except (OSError, json.JSONDecodeError):
-        return None
-    value = data.get("images_dir")
-    return Path(value) if value else None
+        return {}
 
 
-def save_images_dir(images_dir: Path) -> None:
-    SETTINGS_FILE.write_text(json.dumps({"images_dir": str(images_dir)}))
+_persisted = _load_persisted_settings()
 
 
-IMAGES_DIR = _persisted_images_dir() or Path(os.environ.get("IMAGES_DIR", "./images"))
+def save_settings(images_dir: Path, ram_confidence: float | None, ram_custom_tags: list[str]) -> None:
+    """Overwrites the whole settings file with the current live values every
+    call (rather than merging in just the field that changed) so it always
+    mirrors _settings_dict() exactly - the same source of truth main.py's
+    GET /settings reads from in memory."""
+    SETTINGS_FILE.parent.mkdir(parents=True, exist_ok=True)
+    tmp = SETTINGS_FILE.with_suffix(".json.tmp")
+    tmp.write_text(json.dumps({
+        "images_dir": str(images_dir),
+        "ram_confidence": ram_confidence,
+        "ram_custom_tags": ram_custom_tags,
+    }))
+    os.replace(tmp, SETTINGS_FILE)
+
+
+IMAGES_DIR = (
+    Path(_persisted["images_dir"]) if _persisted.get("images_dir")
+    else Path(os.environ.get("IMAGES_DIR", "./images"))
+)
 
 # RAM++ (Recognize Anything Model) — automatic open-set tagger, no vocabulary needed.
 # Its checkpoint ships with per-tag tuned thresholds, so RAM_CONFIDENCE defaults to
@@ -27,14 +42,20 @@ IMAGES_DIR = _persisted_images_dir() or Path(os.environ.get("IMAGES_DIR", "./ima
 # set it only to override every tag's threshold uniformly.
 RAM_CHECKPOINT_PATH = Path(os.environ.get("RAM_CHECKPOINT_PATH", "pretrained/ram_plus_swin_large_14m.pth"))
 RAM_IMAGE_SIZE = int(os.environ.get("RAM_IMAGE_SIZE", "384"))
-_ram_confidence_env = os.environ.get("RAM_CONFIDENCE")
-RAM_CONFIDENCE = float(_ram_confidence_env) if _ram_confidence_env else None
+if "ram_confidence" in _persisted:
+    # A persisted explicit null must stay None, not fall through to the env
+    # var default - same "explicit null is meaningful" rule as main.py's
+    # SettingsUpdate uses for the live /settings endpoint.
+    RAM_CONFIDENCE = _persisted["ram_confidence"]
+else:
+    _ram_confidence_env = os.environ.get("RAM_CONFIDENCE")
+    RAM_CONFIDENCE = float(_ram_confidence_env) if _ram_confidence_env else None
 
 # Extra words to look for on top of RAM++'s automatic tags — matched via CLIP
 # image/text cosine similarity (the same CLIP model used for "Find Similar"
 # in embeddings.py), not RAM++'s own open-set mode (which needs a separate
 # CLIP package and replaces the whole tag vocabulary rather than adding to it).
-RAM_CUSTOM_TAGS: list[str] = []
+RAM_CUSTOM_TAGS: list[str] = _persisted.get("ram_custom_tags", [])
 RAM_CUSTOM_TAG_THRESHOLD = float(os.environ.get("RAM_CUSTOM_TAG_THRESHOLD", "0.22"))
 
 # Optional reference images for a custom tag, for named entities/characters CLIP's
