@@ -53,8 +53,8 @@ class IndexStore:
 
     def _open_db(self) -> sqlite3.Connection:
         conn = sqlite3.connect(str(self.db_path), check_same_thread=False)
-        conn.execute("PRAGMA journal_mode=WAL")
         try:
+            conn.execute("PRAGMA journal_mode=WAL")
             conn.execute(_SCHEMA)
             conn.commit()
         except sqlite3.DatabaseError:
