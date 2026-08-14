@@ -105,6 +105,14 @@ export function Settings({ onReindexComplete }: Props) {
       {open && settings && (
         <div className="settings-panel">
           <label>
+            Image folder path
+            <input
+              type="text"
+              value={settings.images_dir}
+              onChange={(e) => updateField("images_dir", e.target.value)}
+            />
+          </label>
+          <label>
             Object confidence (blank uses model defaults)
             <input
               type="number"

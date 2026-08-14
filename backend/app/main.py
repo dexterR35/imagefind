@@ -1,5 +1,6 @@
 import threading
 import uuid
+from pathlib import Path
 
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
@@ -101,6 +102,14 @@ def objects_endpoint():
 class SettingsUpdate(BaseModel):
     ram_confidence: float | None = Field(default=None, ge=0.0, le=1.0)
     ram_custom_tags: list[str] | None = None
+    images_dir: str | None = None
+
+    @field_validator("images_dir")
+    @classmethod
+    def _reject_missing_dir(cls, value: str | None) -> str | None:
+        if value is not None and not Path(value).is_dir():
+            raise ValueError(f"images_dir {value!r} is not an existing directory")
+        return value
 
     @field_validator("ram_custom_tags")
     @classmethod
@@ -120,6 +129,7 @@ def _settings_dict() -> dict:
     return {
         "ram_confidence": config.RAM_CONFIDENCE,
         "ram_custom_tags": config.RAM_CUSTOM_TAGS,
+        "images_dir": str(config.IMAGES_DIR),
     }
 
 
@@ -144,4 +154,8 @@ def update_settings(update: SettingsUpdate):
         # change to config.RAM_CUSTOM_TAGS needs to be pushed to it
         # explicitly to actually take effect on the next reindex.
         indexer.custom_tags = update.ram_custom_tags
+    if update.images_dir is not None:
+        config.IMAGES_DIR = Path(update.images_dir)
+        indexer.images_dir = config.IMAGES_DIR
+        config.save_images_dir(config.IMAGES_DIR)
     return _settings_dict()

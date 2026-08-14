@@ -1,8 +1,25 @@
+import json
 import os
 from pathlib import Path
 
-IMAGES_DIR = Path(os.environ.get("IMAGES_DIR", "./images"))
 INDEX_DIR = Path(os.environ.get("INDEX_DIR", "./.index"))
+SETTINGS_FILE = INDEX_DIR / "settings.json"
+
+
+def _persisted_images_dir() -> Path | None:
+    try:
+        data = json.loads(SETTINGS_FILE.read_text())
+    except (OSError, json.JSONDecodeError):
+        return None
+    value = data.get("images_dir")
+    return Path(value) if value else None
+
+
+def save_images_dir(images_dir: Path) -> None:
+    SETTINGS_FILE.write_text(json.dumps({"images_dir": str(images_dir)}))
+
+
+IMAGES_DIR = _persisted_images_dir() or Path(os.environ.get("IMAGES_DIR", "./images"))
 
 # RAM++ (Recognize Anything Model) — automatic open-set tagger, no vocabulary needed.
 # Its checkpoint ships with per-tag tuned thresholds, so RAM_CONFIDENCE defaults to

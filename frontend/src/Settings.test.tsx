@@ -6,6 +6,7 @@ import { Settings } from "./Settings";
 const sampleSettings: api.Settings = {
   ram_confidence: 0.15,
   ram_custom_tags: ["zeus", "lightning"],
+  images_dir: "/photos",
 };
 
 describe("Settings", () => {
@@ -24,6 +25,28 @@ describe("Settings", () => {
 
     await waitFor(() => expect(screen.getByDisplayValue("0.15")).toBeInTheDocument());
     expect(screen.getByDisplayValue("zeus, lightning")).toBeInTheDocument();
+    expect(screen.getByDisplayValue("/photos")).toBeInTheDocument();
+  });
+
+  it("includes the edited image folder path when saving", async () => {
+    vi.spyOn(api, "fetchSettings").mockResolvedValue(sampleSettings);
+    const updateSpy = vi.spyOn(api, "updateSettings").mockResolvedValue({
+      ...sampleSettings,
+      images_dir: "/other-photos",
+    });
+    vi.spyOn(api, "startReindex").mockResolvedValue("job1");
+    vi.spyOn(api, "fetchReindexStatus").mockResolvedValue({ processed: 1, total: 1, failed: 0, done: true, error: null });
+
+    render(<Settings onReindexComplete={vi.fn()} />);
+    fireEvent.click(screen.getByText("Settings"));
+    await waitFor(() => expect(screen.getByDisplayValue("/photos")).toBeInTheDocument());
+
+    fireEvent.change(screen.getByDisplayValue("/photos"), { target: { value: "/other-photos" } });
+    fireEvent.click(screen.getByText("Save & Reindex"));
+
+    await waitFor(() =>
+      expect(updateSpy).toHaveBeenCalledWith(expect.objectContaining({ images_dir: "/other-photos" }))
+    );
   });
 
   it("saves edited settings, triggers a forced reindex, and polls to completion", async () => {

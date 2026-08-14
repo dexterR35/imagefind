@@ -68,7 +68,7 @@ describe("startReindex", () => {
 
 describe("updateSettings", () => {
   it("POSTs the full settings object as JSON", async () => {
-    const settings = { ram_confidence: 0.05, ram_custom_tags: ["zeus"] };
+    const settings = { ram_confidence: 0.05, ram_custom_tags: ["zeus"], images_dir: "/photos" };
     const mockFetch = vi.fn().mockResolvedValue({ ok: true, json: async () => settings });
     vi.stubGlobal("fetch", mockFetch);
 

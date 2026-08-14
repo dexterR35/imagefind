@@ -92,7 +92,52 @@ def test_get_settings_returns_current_config_values(tmp_path, monkeypatch):
     assert settings == {
         "ram_confidence": main.config.RAM_CONFIDENCE,
         "ram_custom_tags": main.config.RAM_CUSTOM_TAGS,
+        "images_dir": str(main.config.IMAGES_DIR),
     }
+
+
+def test_post_settings_updates_images_dir_and_indexer(tmp_path, monkeypatch):
+    main, _ = _fresh_app(tmp_path, monkeypatch)
+    client = TestClient(main.app)
+    other_dir = tmp_path / "other_images"
+    other_dir.mkdir()
+
+    response = client.post("/settings", json={"images_dir": str(other_dir)})
+
+    assert response.status_code == 200
+    assert response.json()["images_dir"] == str(other_dir)
+    assert main.config.IMAGES_DIR == other_dir
+    # Indexer snapshots images_dir at construction time, so a runtime change
+    # needs to be pushed to it explicitly, same as custom_tags.
+    assert main.indexer.images_dir == other_dir
+
+
+def test_post_settings_rejects_nonexistent_images_dir(tmp_path, monkeypatch):
+    main, images_dir = _fresh_app(tmp_path, monkeypatch)
+    client = TestClient(main.app)
+    missing_dir = tmp_path / "does_not_exist"
+
+    response = client.post("/settings", json={"images_dir": str(missing_dir)})
+
+    assert response.status_code == 422
+    assert main.config.IMAGES_DIR == images_dir
+    assert main.indexer.images_dir == images_dir
+
+
+def test_persisted_images_dir_survives_restart(tmp_path, monkeypatch):
+    main, _ = _fresh_app(tmp_path, monkeypatch)
+    client = TestClient(main.app)
+    other_dir = tmp_path / "other_images"
+    other_dir.mkdir()
+    assert client.post("/settings", json={"images_dir": str(other_dir)}).status_code == 200
+
+    # Simulate a fresh process: the IMAGES_DIR env var still points at the
+    # original folder, but the persisted settings file should take priority.
+    importlib.reload(main.config)
+    importlib.reload(main)
+
+    assert main.config.IMAGES_DIR == other_dir
+    assert main.indexer.images_dir == other_dir
 
 
 def test_post_settings_updates_config_and_indexer_custom_tags(tmp_path, monkeypatch):

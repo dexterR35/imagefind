@@ -30,7 +30,7 @@ export function SearchFilters({ onChange }: Props) {
 
   useEffect(() => {
     onChange({ text: debouncedText || undefined, color, object });
-  }, [debouncedText, color, object]);
+  }, [debouncedText, color, object, onChange]);
 
   return (
     <div className="search-filters">

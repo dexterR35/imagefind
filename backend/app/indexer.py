@@ -1,3 +1,4 @@
+import logging
 import uuid
 from dataclasses import dataclass
 from pathlib import Path
@@ -14,6 +15,8 @@ from . import thumbnails
 from .storage import ImageEntry, IndexStore
 
 IMAGE_EXTENSIONS = {".png", ".jpg", ".jpeg", ".webp", ".bmp"}
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass
@@ -107,7 +110,7 @@ class Indexer:
                         self.store.upsert(entry, embedding)
                 except Exception as exc:
                     job.failed += 1
-                    print(f"skipping {path}: {exc}")
+                    logger.warning("skipping %s: %s", path, exc)
                 job.processed += 1
                 if job.processed % 50 == 0:
                     self.store.save()

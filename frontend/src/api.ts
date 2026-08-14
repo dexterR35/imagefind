@@ -24,6 +24,7 @@ export interface ReindexStatus {
 export interface Settings {
   ram_confidence: number | null;
   ram_custom_tags: string[];
+  images_dir: string;
 }
 
 const BASE_URL = "http://localhost:8000";

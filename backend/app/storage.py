@@ -88,15 +88,24 @@ class IndexStore:
         return entry.mtime != stat.st_mtime or entry.size != stat.st_size
 
     def upsert(self, entry: ImageEntry, embedding: np.ndarray) -> None:
+        # Updates _by_id/_by_path directly instead of calling _reindex_lookup()
+        # (an O(n) full rebuild of both dicts) on every single call - a full
+        # reindex upserts once per image, so that would make the bookkeeping
+        # alone O(n^2) over a whole library.
         with self.lock:
             if entry.path in self._by_path:
                 i = self._by_path[entry.path]
+                old_id = self.entries[i].id
                 self.entries[i] = entry
                 self.embeddings[i] = embedding
+                if old_id != entry.id:
+                    del self._by_id[old_id]
             else:
+                i = len(self.entries)
                 self.entries.append(entry)
                 self.embeddings = np.vstack([self.embeddings, embedding[None, :]])
-            self._reindex_lookup()
+                self._by_path[entry.path] = i
+            self._by_id[entry.id] = i
 
     def prune(self, keep_paths: set[str]) -> None:
         """Remove entries whose path is not in keep_paths, keeping entries/embeddings aligned."""

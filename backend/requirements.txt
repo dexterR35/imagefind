@@ -1,11 +1,11 @@
 fastapi==0.115.0
 uvicorn[standard]==0.32.0
-python-multipart==0.0.12
 numpy==1.26.4
 pillow==10.4.0
-opencv-python-headless==4.10.0.84
 scikit-learn==1.5.2
 open-clip-torch==2.26.1
+# Pulls in opencv-python-headless as its own transitive dependency — no need
+# to pin that separately, and app/ never imports cv2 directly.
 easyocr==1.7.2
 # fairscale and transformers aren't imported directly anywhere in app/ — they're
 # used internally by the ram package (ram/models/bert.py, vit.py) and aren't
