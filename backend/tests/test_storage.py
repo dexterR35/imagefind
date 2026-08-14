@@ -63,25 +63,6 @@ def test_upsert_replaces_existing_entry_for_same_path(tmp_path):
     assert store.get_embedding("a1").tolist() == [0, 1.0, 0, 0]
 
 
-def test_load_resets_to_empty_on_entries_embeddings_length_mismatch(tmp_path):
-    store = IndexStore(tmp_path, embedding_dim=4)
-    store.load()
-    store.upsert(_entry(), np.array([1.0, 0.0, 0.0, 0.0], dtype=np.float32))
-    store.save()
-
-    # Simulate a desynced pair, e.g. from a crash between the two os.replace()
-    # calls in save(), or embeddings.npy being deleted/replaced by hand.
-    np.save(tmp_path / "embeddings.npy", np.zeros((0, 4), dtype=np.float32))
-
-    reloaded = IndexStore(tmp_path, embedding_dim=4)
-    reloaded.load()
-
-    assert reloaded.all() == []
-    assert reloaded.embeddings.shape == (0, 4)
-    # Reading after the reset must not raise, unlike the desynced state would.
-    assert reloaded.get("a1") is None
-
-
 def test_prune_removes_missing_entries_and_keeps_embeddings_aligned(tmp_path):
     store = IndexStore(tmp_path, embedding_dim=4)
     store.load()

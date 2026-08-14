@@ -1,13 +1,27 @@
 import json
 import logging
-import os
+import sqlite3
 import threading
-from dataclasses import asdict, dataclass, fields
+from dataclasses import dataclass, fields
 from pathlib import Path
 
 import numpy as np
 
 logger = logging.getLogger(__name__)
+
+_SCHEMA = """
+CREATE TABLE IF NOT EXISTS images (
+    id TEXT PRIMARY KEY,
+    path TEXT UNIQUE NOT NULL,
+    thumbnail_path TEXT NOT NULL,
+    ocr_text TEXT NOT NULL,
+    colors TEXT NOT NULL,
+    objects TEXT NOT NULL,
+    mtime REAL NOT NULL,
+    size INTEGER NOT NULL,
+    embedding BLOB NOT NULL
+)
+"""
 
 
 @dataclass
@@ -26,42 +40,57 @@ class IndexStore:
     def __init__(self, index_dir: Path, embedding_dim: int = 512):
         self.index_dir = Path(index_dir)
         self.index_dir.mkdir(parents=True, exist_ok=True)
-        self.index_path = self.index_dir / "index.json"
-        self.embeddings_path = self.index_dir / "embeddings.npy"
+        self.db_path = self.index_dir / "index.db"
+        self.legacy_index_path = self.index_dir / "index.json"
+        self.legacy_embeddings_path = self.index_dir / "embeddings.npy"
         self.embedding_dim = embedding_dim
         self.entries: list[ImageEntry] = []
         self.embeddings: np.ndarray = np.zeros((0, embedding_dim), dtype=np.float32)
         self._by_id: dict[str, int] = {}
         self._by_path: dict[str, int] = {}
         self.lock = threading.RLock()
+        self._conn = self._open_db()
+
+    def _open_db(self) -> sqlite3.Connection:
+        conn = sqlite3.connect(str(self.db_path), check_same_thread=False)
+        conn.execute("PRAGMA journal_mode=WAL")
+        try:
+            conn.execute(_SCHEMA)
+            conn.commit()
+        except sqlite3.DatabaseError:
+            logger.warning(
+                "IndexStore: %s is corrupt, resetting to a fresh empty index", self.db_path
+            )
+            conn.close()
+            self.db_path.unlink(missing_ok=True)
+            conn = sqlite3.connect(str(self.db_path), check_same_thread=False)
+            conn.execute("PRAGMA journal_mode=WAL")
+            conn.execute(_SCHEMA)
+            conn.commit()
+        return conn
 
     def load(self) -> None:
         with self.lock:
-            if self.index_path.exists():
-                data = json.loads(self.index_path.read_text())
-                # Filter to known fields so an index.json written by an older/newer
-                # schema (e.g. a since-removed objects_by_model key) doesn't crash
-                # the load with an unexpected-keyword-argument error.
-                known_fields = {f.name for f in fields(ImageEntry)}
-                self.entries = [
-                    ImageEntry(**{k: v for k, v in e.items() if k in known_fields}) for e in data
-                ]
-            else:
-                self.entries = []
-            if self.embeddings_path.exists():
-                self.embeddings = np.load(self.embeddings_path)
-            else:
-                self.embeddings = np.zeros((0, self.embedding_dim), dtype=np.float32)
+            rows = self._conn.execute(
+                "SELECT id, path, thumbnail_path, ocr_text, colors, objects, "
+                "mtime, size, embedding FROM images ORDER BY rowid"
+            ).fetchall()
 
-            if len(self.entries) != self.embeddings.shape[0]:
-                logger.warning(
-                    "IndexStore: entries/embeddings length mismatch (%d entries vs %d "
-                    "embeddings) — resetting index to empty",
-                    len(self.entries), self.embeddings.shape[0],
-                )
-                self.entries = []
-                self.embeddings = np.zeros((0, self.embedding_dim), dtype=np.float32)
+            self.entries = []
+            embeddings = []
+            for (id_, path, thumbnail_path, ocr_text, colors_json, objects_json,
+                 mtime, size, embedding_blob) in rows:
+                self.entries.append(ImageEntry(
+                    id=id_, path=path, thumbnail_path=thumbnail_path,
+                    ocr_text=ocr_text, colors=json.loads(colors_json),
+                    objects=json.loads(objects_json), mtime=mtime, size=size,
+                ))
+                embeddings.append(np.frombuffer(embedding_blob, dtype=np.float32))
 
+            self.embeddings = (
+                np.vstack(embeddings) if embeddings
+                else np.zeros((0, self.embedding_dim), dtype=np.float32)
+            )
             self._reindex_lookup()
 
     def _reindex_lookup(self) -> None:
@@ -70,13 +99,7 @@ class IndexStore:
 
     def save(self) -> None:
         with self.lock:
-            tmp_index = self.index_path.with_suffix(".json.tmp")
-            tmp_index.write_text(json.dumps([asdict(e) for e in self.entries]))
-            os.replace(tmp_index, self.index_path)
-
-            tmp_emb = self.embeddings_path.with_suffix(".tmp.npy")
-            np.save(tmp_emb, self.embeddings)
-            os.replace(tmp_emb, self.embeddings_path)
+            self._conn.commit()
 
     def needs_reindex(self, path: Path) -> bool:
         with self.lock:
@@ -88,11 +111,18 @@ class IndexStore:
         return entry.mtime != stat.st_mtime or entry.size != stat.st_size
 
     def upsert(self, entry: ImageEntry, embedding: np.ndarray) -> None:
-        # Updates _by_id/_by_path directly instead of calling _reindex_lookup()
-        # (an O(n) full rebuild of both dicts) on every single call - a full
-        # reindex upserts once per image, so that would make the bookkeeping
-        # alone O(n^2) over a whole library.
         with self.lock:
+            self._conn.execute(
+                "INSERT OR REPLACE INTO images "
+                "(id, path, thumbnail_path, ocr_text, colors, objects, mtime, size, embedding) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                (
+                    entry.id, entry.path, entry.thumbnail_path, entry.ocr_text,
+                    json.dumps(entry.colors), json.dumps(entry.objects),
+                    entry.mtime, entry.size,
+                    np.asarray(embedding, dtype=np.float32).tobytes(),
+                ),
+            )
             if entry.path in self._by_path:
                 i = self._by_path[entry.path]
                 old_id = self.entries[i].id
@@ -108,8 +138,16 @@ class IndexStore:
             self._by_id[entry.id] = i
 
     def prune(self, keep_paths: set[str]) -> None:
-        """Remove entries whose path is not in keep_paths, keeping entries/embeddings aligned."""
         with self.lock:
+            self._conn.execute("CREATE TEMP TABLE IF NOT EXISTS keep_paths (path TEXT PRIMARY KEY)")
+            self._conn.execute("DELETE FROM keep_paths")
+            self._conn.executemany(
+                "INSERT INTO keep_paths (path) VALUES (?)", [(p,) for p in keep_paths]
+            )
+            self._conn.execute("DELETE FROM images WHERE path NOT IN (SELECT path FROM keep_paths)")
+            self._conn.execute("DROP TABLE keep_paths")
+            self._conn.commit()
+
             keep_indices = [i for i, e in enumerate(self.entries) if e.path in keep_paths]
             self.entries = [self.entries[i] for i in keep_indices]
             if keep_indices:
