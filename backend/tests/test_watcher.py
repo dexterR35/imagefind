@@ -81,3 +81,27 @@ def test_handler_ignores_non_image_and_directory_events(tmp_path, monkeypatch):
     handler.on_modified(_fake_event(images_dir / "subfolder", is_directory=True))
 
     assert calls == []
+
+
+def test_handler_on_deleted_removes_entry(tmp_path):
+    images_dir = tmp_path / "images"
+    images_dir.mkdir()
+    index_dir = tmp_path / "index"
+    img_path = images_dir / "gone.png"
+
+    store = IndexStore(index_dir, embedding_dim=512)
+    store.load()
+    from app.storage import ImageEntry
+    store.upsert(
+        ImageEntry(
+            id="gone1", path=str(img_path), thumbnail_path=str(index_dir / "t.jpg"),
+            ocr_text="", colors=[], objects=[], mtime=0.0, size=0,
+        ),
+        np.zeros(512, dtype=np.float32),
+    )
+    indexer = Indexer(images_dir, index_dir, store)
+
+    handler = _Handler(indexer, store)
+    handler.on_deleted(_fake_event(img_path))
+
+    assert store.get_by_path(str(img_path)) is None
