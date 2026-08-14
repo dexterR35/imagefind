@@ -1,3 +1,4 @@
+import json
 import threading
 
 import numpy as np
@@ -125,3 +126,20 @@ def test_corrupt_db_resets_to_empty(tmp_path):
     assert store.all() == []
     assert store.embeddings.shape == (0, 4)
     assert store.get("a1") is None
+
+
+def test_migrates_legacy_json_and_npy_on_first_load(tmp_path):
+    legacy_entry = {
+        "id": "a1", "path": "/imgs/a.png", "thumbnail_path": "/thumbs/a1.jpg",
+        "ocr_text": "NETBET", "colors": ["green"], "objects": ["clover"],
+        "mtime": 123.0, "size": 456,
+    }
+    (tmp_path / "index.json").write_text(json.dumps([legacy_entry]))
+    np.save(tmp_path / "embeddings.npy", np.array([[1.0, 0.0, 0.0, 0.0]], dtype=np.float32))
+
+    store = IndexStore(tmp_path, embedding_dim=4)
+    store.load()
+
+    assert store.get("a1").ocr_text == "NETBET"
+    assert store.get_embedding("a1").tolist() == [1.0, 0.0, 0.0, 0.0]
+    assert store.get_by_path("/imgs/a.png").id == "a1"

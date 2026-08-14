@@ -69,8 +69,48 @@ class IndexStore:
             conn.commit()
         return conn
 
+    def _migrate_from_legacy_files(self) -> None:
+        try:
+            data = json.loads(self.legacy_index_path.read_text())
+        except (OSError, json.JSONDecodeError):
+            logger.warning("IndexStore: legacy index.json unreadable, skipping migration")
+            return
+        try:
+            legacy_embeddings = np.load(self.legacy_embeddings_path)
+        except OSError:
+            logger.warning("IndexStore: legacy embeddings.npy unreadable, skipping migration")
+            return
+        if len(data) != legacy_embeddings.shape[0]:
+            logger.warning(
+                "IndexStore: legacy entries/embeddings length mismatch, skipping migration"
+            )
+            return
+
+        known_fields = {f.name for f in fields(ImageEntry)}
+        rows = []
+        for i, e in enumerate(data):
+            entry = ImageEntry(**{k: v for k, v in e.items() if k in known_fields})
+            rows.append((
+                entry.id, entry.path, entry.thumbnail_path, entry.ocr_text,
+                json.dumps(entry.colors), json.dumps(entry.objects),
+                entry.mtime, entry.size,
+                legacy_embeddings[i].astype(np.float32).tobytes(),
+            ))
+        self._conn.executemany(
+            "INSERT OR REPLACE INTO images "
+            "(id, path, thumbnail_path, ocr_text, colors, objects, mtime, size, embedding) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            rows,
+        )
+        self._conn.commit()
+
     def load(self) -> None:
         with self.lock:
+            if self.legacy_index_path.exists():
+                count = self._conn.execute("SELECT COUNT(*) FROM images").fetchone()[0]
+                if count == 0:
+                    self._migrate_from_legacy_files()
+
             rows = self._conn.execute(
                 "SELECT id, path, thumbnail_path, ocr_text, colors, objects, "
                 "mtime, size, embedding FROM images ORDER BY rowid"
