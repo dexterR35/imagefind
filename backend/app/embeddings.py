@@ -5,6 +5,8 @@ import open_clip
 import torch
 from PIL import Image
 
+from .image_utils import flatten_to_rgb
+
 _device = "cuda" if torch.cuda.is_available() else "cpu"
 _model = None
 _preprocess = None
@@ -29,13 +31,7 @@ def _load():
 
 def embed_image(image: Image.Image) -> np.ndarray:
     model, preprocess, _ = _load()
-    if image.mode in ("RGBA", "LA", "P"):
-        rgba = image.convert("RGBA")
-        bg = Image.new("RGB", rgba.size, (255, 255, 255))
-        bg.paste(rgba, mask=rgba.getchannel("A"))
-        image = bg
-    else:
-        image = image.convert("RGB")
+    image = flatten_to_rgb(image)
     tensor = preprocess(image).unsqueeze(0).to(_device)
     with torch.no_grad():
         features = model.encode_image(tensor)

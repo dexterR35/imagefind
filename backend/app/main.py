@@ -4,7 +4,7 @@ import uuid
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 
 from . import config
 from .indexer import Indexer, ReindexJob
@@ -102,6 +102,19 @@ class SettingsUpdate(BaseModel):
     ram_confidence: float | None = Field(default=None, ge=0.0, le=1.0)
     ram_custom_tags: list[str] | None = None
 
+    @field_validator("ram_custom_tags")
+    @classmethod
+    def _reject_path_like_tags(cls, value: list[str] | None) -> list[str] | None:
+        # ram_custom_tags feeds directly into a filesystem path lookup
+        # (objects.py's reference-image directory), so a tag containing a
+        # path separator or ".." must never be accepted here at all.
+        if value is None:
+            return value
+        for tag in value:
+            if "/" in tag or "\\" in tag or ".." in tag:
+                raise ValueError(f"invalid custom tag {tag!r}: must not contain path separators")
+        return value
+
 
 def _settings_dict() -> dict:
     return {
@@ -117,7 +130,13 @@ def get_settings():
 
 @app.post("/settings")
 def update_settings(update: SettingsUpdate):
-    if update.ram_confidence is not None:
+    # model_fields_set (not "is not None") distinguishes "field present in the
+    # request body, even as an explicit null" from "field omitted entirely" —
+    # ram_confidence needs that distinction since null is how the frontend
+    # clears it back to "use the model's own defaults", which is a real,
+    # meaningful value here, not the same thing as "leave it untouched".
+    fields_set = update.model_fields_set
+    if "ram_confidence" in fields_set:
         config.RAM_CONFIDENCE = update.ram_confidence
     if update.ram_custom_tags is not None:
         config.RAM_CUSTOM_TAGS = update.ram_custom_tags

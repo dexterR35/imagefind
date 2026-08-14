@@ -2,6 +2,7 @@ import numpy as np
 from PIL import Image
 
 from app import config
+from app import objects as objects_mod
 from app.indexer import Indexer, ReindexJob
 from app.storage import ImageEntry, IndexStore
 
@@ -256,3 +257,23 @@ def test_run_reindex_snapshots_custom_tags_once_at_start(tmp_path, monkeypatch):
 
     assert len(captured) == 1
     assert captured[0].custom_tags == ["zeus"]
+
+
+def test_run_reindex_clears_custom_tag_embedding_cache_at_start(tmp_path, monkeypatch):
+    images_dir = tmp_path / "images"
+    _make_images(images_dir, count=1)
+
+    index_dir = tmp_path / "index"
+    store = IndexStore(index_dir, embedding_dim=512)
+    store.load()
+    indexer = Indexer(images_dir, index_dir, store)
+
+    monkeypatch.setattr(indexer, "process_image", _fake_process_image(index_dir))
+    objects_mod._tag_embedding_cache["zeus"] = "stale-cached-value"
+
+    job = ReindexJob(id="job1")
+    indexer.run_reindex(job)
+
+    # Otherwise adding/changing reference images for an existing custom tag
+    # and reindexing wouldn't actually pick them up until a full restart.
+    assert "zeus" not in objects_mod._tag_embedding_cache

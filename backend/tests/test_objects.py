@@ -95,6 +95,39 @@ def test_get_tag_embedding_blends_text_with_reference_images(tmp_path, monkeypat
     assert np.allclose(result, expected, atol=1e-5)
 
 
+def test_clear_custom_tag_cache_forces_recomputation(monkeypatch):
+    calls = []
+    monkeypatch.setattr(
+        objects_mod.embeddings, "embed_text",
+        lambda tag: calls.append(tag) or np.array([1.0, 0.0], dtype=np.float32),
+    )
+    objects_mod._tag_embedding_cache.clear()
+
+    objects_mod._get_tag_embedding("zeus")
+    objects_mod._get_tag_embedding("zeus")
+    assert calls == ["zeus"]  # second call was a cache hit
+
+    objects_mod.clear_custom_tag_cache()
+    objects_mod._get_tag_embedding("zeus")
+    assert calls == ["zeus", "zeus"]  # cache was cleared, so it re-embedded
+
+
+def test_get_tag_embedding_rejects_path_traversal_in_tag_name(tmp_path, monkeypatch):
+    # Defense in depth: even if a path-traversal-shaped tag somehow ended up in
+    # config.RAM_CUSTOM_TAGS (the Settings API is supposed to reject these —
+    # see test_main.py), it must never cause a lookup outside the configured
+    # reference directory.
+    outside_dir = tmp_path / "outside"
+    outside_dir.mkdir()
+    Image.new("RGB", (8, 8), (200, 0, 0)).save(outside_dir / "secret.png")
+
+    reference_dir = tmp_path / "reference_tags"
+    reference_dir.mkdir()
+    monkeypatch.setattr(objects_mod.config, "RAM_CUSTOM_TAG_REFERENCE_DIR", reference_dir)
+
+    assert objects_mod._load_reference_embeddings("../outside") == []
+
+
 def test_get_tag_embedding_skips_unreadable_reference_file(tmp_path, monkeypatch):
     monkeypatch.setattr(objects_mod.embeddings, "embed_text", lambda tag: np.array([1.0, 0.0], dtype=np.float32))
     objects_mod._tag_embedding_cache.clear()
@@ -110,12 +143,13 @@ def test_get_tag_embedding_skips_unreadable_reference_file(tmp_path, monkeypatch
     assert np.allclose(result, np.array([1.0, 0.0], dtype=np.float32), atol=1e-5)
 
 
-def test_detect_ram_objects_overrides_class_threshold_only_when_conf_given(tmp_path, monkeypatch):
+def test_detect_ram_objects_restores_default_threshold_when_conf_goes_back_to_none(tmp_path, monkeypatch):
     img = Image.new("RGB", (416, 416), (200, 200, 200))
     path = tmp_path / "blank.png"
     img.save(path)
 
-    fake_model = type("FakeModel", (), {"class_threshold": torch.zeros(3)})()
+    default_threshold = torch.tensor([0.1, 0.2, 0.3])
+    fake_model = type("FakeModel", (), {"class_threshold": default_threshold.clone()})()
 
     def fake_get_ram():
         return (lambda image: torch.zeros(3, 4, 4)), fake_model
@@ -125,12 +159,17 @@ def test_detect_ram_objects_overrides_class_threshold_only_when_conf_given(tmp_p
 
     monkeypatch.setattr(objects_mod, "_get_ram", fake_get_ram)
     monkeypatch.setattr(objects_mod, "_ram_inference", fake_inference)
+    monkeypatch.setattr(objects_mod, "_ram_default_class_threshold", default_threshold)
 
-    detect_ram_objects(path)
-    assert torch.equal(fake_model.class_threshold, torch.zeros(3))
-
+    # An explicit conf overrides every tag's threshold uniformly...
     detect_ram_objects(path, conf=0.7)
     assert torch.equal(fake_model.class_threshold, torch.full((3,), 0.7))
+
+    # ...and conf=None must restore the checkpoint's original per-tag
+    # thresholds, not just leave the previous override permanently in place.
+    monkeypatch.setattr(objects_mod.config, "RAM_CONFIDENCE", None)
+    detect_ram_objects(path)
+    assert torch.equal(fake_model.class_threshold, default_threshold)
 
 
 def test_detect_ram_objects_handles_transparent_rgba_image(tmp_path):

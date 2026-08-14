@@ -94,6 +94,10 @@ class Indexer:
     def run_reindex(self, job: ReindexJob, force: bool = False) -> None:
         try:
             settings = self._current_settings()
+            # Every reindex re-embeds custom tags from scratch, so adding or
+            # changing reference images for a tag between runs actually takes
+            # effect instead of silently reusing a stale cached embedding.
+            objects_mod.clear_custom_tag_cache()
             paths = self._list_image_paths()
             job.total = len(paths)
             for path in paths:

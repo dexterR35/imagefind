@@ -8,10 +8,12 @@ from ram import get_transform, inference_ram as _ram_inference
 from ram.models import ram_plus
 
 from . import config, embeddings
+from .image_utils import flatten_to_rgb
 
 _device = "cuda" if torch.cuda.is_available() else "cpu"
 _ram_model = None
 _ram_transform = None
+_ram_default_class_threshold = None
 _load_lock = threading.Lock()
 _tag_embedding_cache: dict[str, np.ndarray] = {}
 _tag_cache_lock = threading.Lock()
@@ -20,16 +22,11 @@ _REFERENCE_IMAGE_EXTENSIONS = {".png", ".jpg", ".jpeg", ".webp", ".bmp"}
 
 def _load_rgb(image_path: Path) -> Image.Image:
     with Image.open(image_path) as raw:
-        if raw.mode in ("RGBA", "LA", "P"):
-            rgba = raw.convert("RGBA")
-            bg = Image.new("RGB", rgba.size, (255, 255, 255))
-            bg.paste(rgba, mask=rgba.getchannel("A"))
-            return bg
-        return raw.convert("RGB")
+        return flatten_to_rgb(raw)
 
 
 def _get_ram():
-    global _ram_model, _ram_transform
+    global _ram_model, _ram_transform, _ram_default_class_threshold
     if _ram_model is None:
         # Double-checked locking: the reindex background thread and a
         # /search-triggered request thread can both race to lazy-load the
@@ -43,7 +40,12 @@ def _get_ram():
                     image_size=config.RAM_IMAGE_SIZE,
                     vit="swin_l",
                 )
-                _ram_model = model.eval().to(_device)
+                model = model.eval().to(_device)
+                # Saved once here so a later conf override can be undone: the
+                # checkpoint's per-tag tuned thresholds only exist in this one
+                # in-memory copy, nowhere else to recover them from otherwise.
+                _ram_default_class_threshold = model.class_threshold.clone()
+                _ram_model = model
     return _ram_transform, _ram_model
 
 
@@ -57,15 +59,41 @@ def detect_ram_objects(image_path: Path, conf: float | None = None) -> list[str]
     transform, model = _get_ram()
     image = _load_rgb(image_path)
     tensor = transform(image).unsqueeze(0).to(_device)
-    if conf is not None:
-        model.class_threshold = torch.ones_like(model.class_threshold) * conf
+    # Always explicitly set the threshold (override or restore) rather than only
+    # mutating it when conf is not None — model.class_threshold is a shared,
+    # mutable array on the process-lifetime singleton model, so a previous call's
+    # override would otherwise silently stick around forever once conf goes back
+    # to None, even though that's supposed to mean "use the model's own defaults".
+    model.class_threshold = (
+        torch.ones_like(model.class_threshold) * conf if conf is not None
+        else _ram_default_class_threshold
+    )
     with torch.no_grad():
         tags, _ = _ram_inference(tensor, model)
     return sorted({t.strip() for t in tags.split("|") if t.strip()})
 
 
+def clear_custom_tag_cache() -> None:
+    """Called at the start of every reindex run so a tag's embedding is always
+    recomputed fresh — otherwise adding/changing reference images for an
+    already-cached tag would silently keep using the stale prototype vector
+    until the backend process itself restarted."""
+    with _tag_cache_lock:
+        _tag_embedding_cache.clear()
+
+
 def _load_reference_embeddings(tag: str) -> list[np.ndarray]:
-    tag_dir = config.RAM_CUSTOM_TAG_REFERENCE_DIR / tag
+    # Defense in depth against a custom tag containing path-traversal segments
+    # (e.g. "../../Desktop") or an absolute path that would otherwise make the
+    # `/` join below escape RAM_CUSTOM_TAG_REFERENCE_DIR entirely — resolve
+    # both sides and verify tag_dir is genuinely inside the reference root
+    # before ever touching the filesystem. SettingsUpdate already rejects
+    # tags like this at the API boundary, but this holds regardless of how
+    # a tag value got into config.RAM_CUSTOM_TAGS.
+    base = config.RAM_CUSTOM_TAG_REFERENCE_DIR.resolve()
+    tag_dir = (base / tag).resolve()
+    if tag_dir == base or base not in tag_dir.parents:
+        return []
     if not tag_dir.is_dir():
         return []
     vectors = []

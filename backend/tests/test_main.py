@@ -126,6 +126,43 @@ def test_post_settings_rejects_out_of_range_values(tmp_path, monkeypatch):
     assert response.status_code == 422
 
 
+def test_post_settings_explicit_null_clears_ram_confidence(tmp_path, monkeypatch):
+    main, _ = _fresh_app(tmp_path, monkeypatch)
+    client = TestClient(main.app)
+
+    client.post("/settings", json={"ram_confidence": 0.6})
+    assert main.config.RAM_CONFIDENCE == 0.6
+
+    # An explicit null (what the Settings UI sends when the field is blanked
+    # to mean "use the model's own defaults") must actually clear it, not be
+    # treated the same as the field being omitted from the request entirely.
+    response = client.post("/settings", json={"ram_confidence": None})
+    assert response.status_code == 200
+    assert response.json()["ram_confidence"] is None
+    assert main.config.RAM_CONFIDENCE is None
+
+
+def test_post_settings_omitted_field_leaves_ram_confidence_untouched(tmp_path, monkeypatch):
+    main, _ = _fresh_app(tmp_path, monkeypatch)
+    client = TestClient(main.app)
+
+    client.post("/settings", json={"ram_confidence": 0.6})
+    response = client.post("/settings", json={"ram_custom_tags": ["zeus"]})
+
+    assert response.status_code == 200
+    assert main.config.RAM_CONFIDENCE == 0.6
+
+
+def test_post_settings_rejects_path_like_custom_tags(tmp_path, monkeypatch):
+    main, _ = _fresh_app(tmp_path, monkeypatch)
+    client = TestClient(main.app)
+
+    for bad_tag in ["../etc", "a/b", "a\\b", "..", "foo/../bar"]:
+        response = client.post("/settings", json={"ram_custom_tags": [bad_tag]})
+        assert response.status_code == 422, bad_tag
+    assert main.config.RAM_CUSTOM_TAGS == []
+
+
 def test_reindex_force_param_is_passed_through_to_indexer(tmp_path, monkeypatch):
     main, _ = _fresh_app(tmp_path, monkeypatch)
     calls = []

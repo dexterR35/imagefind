@@ -3,7 +3,7 @@
   "private": true,
   "scripts": {
     "start": "concurrently -n backend,frontend -c blue,green \"npm:start:backend\" \"npm:start:frontend\"",
-    "start:backend": "set \"IMAGES_DIR=D:\\images\" && cd backend && .venv\\Scripts\\python.exe -m uvicorn app.main:app --reload --port 8000",
+    "start:backend": "(if not defined IMAGES_DIR set \"IMAGES_DIR=D:\\images\") && cd backend && .venv\\Scripts\\python.exe -m uvicorn app.main:app --reload --port 8000",
     "start:frontend": "cd frontend && npm run dev"
   },
   "devDependencies": {
