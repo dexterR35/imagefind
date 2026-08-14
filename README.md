@@ -6,10 +6,9 @@ scrolling through folders looking for the one you remember.
 
 ## What it does
 
-- **Looks at every image and figures out what's in it** — objects, scenes, people,
-  animals, materials — automatically, with no manual labeling.
-- **Reads any text written on the image** — logos, signs, banners, watermarks —
-  so you can search for words that appear on a picture, not just in its filename.
+- **Recognizes what's in each image** — objects, scenes, people, animals,
+  materials — automatically, with no manual labeling.
+- **Reads any text written on the image** — logos, signs, banners, watermarks.
 - **Notices the main colors** in each image, so you can filter by "red", "gold",
   "blue", and so on.
 - **Finds images that look alike** — click a picture and it pulls up other images
@@ -19,33 +18,19 @@ scrolling through folders looking for the one you remember.
 
 ## How it works
 
-The first time (and any time you add new pictures), you run **Reindex**. The app
-goes through the folder and looks at every image once, remembering:
+Run **Reindex** once (and again any time you add new pictures). The app looks at
+every image and remembers what it recognized in it, any text written on it, its
+main colors, and a "fingerprint" used later for "find similar." After that, search
+is instant — new photos only need reindexing once, the rest stays cached.
 
-- what it recognized in the picture
-- any text written on it
-- its main colors
-- a "fingerprint" of what it generally looks like, used later for "find similar"
+## Tools used
 
-That's it — after that, search is instant, because the app already knows what's in
-every picture. Adding new photos later and reindexing only looks at the new ones,
-so it stays fast even with a large, growing collection.
-
-## When it works well — and when it doesn't
-
-- It's very good at recognizing **general things**: people, animals, food, sports
-  equipment, furniture, vehicles, common objects and scenes.
-- It reads **printed text** reliably when the text is reasonably clear.
-- It can tell you two images **look similar**, even if neither has obvious matching
-  words.
-- It's **not** good at recognizing specific named people or characters by default
-  (for example, it can tell a picture shows a statue, but it won't automatically
-  know it's a statue of *Zeus* specifically) — it only knows general categories out
-  of the box. If you have specific names or characters you care about, they can be
-  taught to the app, and giving it a few example pictures of that specific
-  character makes it noticeably better at recognizing it.
-- Search only shows results it can actually explain — if it doesn't recognize
-  something or the word doesn't appear anywhere in the image, it won't guess.
+| Tool | What it's for |
+|---|---|
+| RAM++ | Recognizes what's in each picture — objects, scenes, animals, materials |
+| CLIP | Powers "find similar" and matching custom words/characters you add yourself |
+| EasyOCR | Reads text printed on an image |
+| K-means | Groups each image's pixels into a few dominant colors |
 
 ## Examples
 
