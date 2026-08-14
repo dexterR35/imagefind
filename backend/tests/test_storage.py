@@ -222,3 +222,21 @@ def test_migration_skips_on_missing_required_field(tmp_path):
 
     assert store.all() == []
     assert store.embeddings.shape == (0, 4)
+
+
+def test_delete_by_path_removes_entry_and_keeps_embeddings_aligned(tmp_path):
+    store = IndexStore(tmp_path, embedding_dim=4)
+    store.load()
+    store.upsert(_entry(id="a1", path="/imgs/a.png"), np.array([1, 0, 0, 0], dtype=np.float32))
+    store.upsert(_entry(id="b1", path="/imgs/b.png"), np.array([0, 1, 0, 0], dtype=np.float32))
+
+    store.delete_by_path("/imgs/a.png")
+
+    assert store.get("a1") is None
+    assert [e.id for e in store.all()] == ["b1"]
+    assert store.embeddings.shape[0] == 1
+    assert store.get_embedding("b1").tolist() == [0, 1, 0, 0]
+
+    reloaded = IndexStore(tmp_path, embedding_dim=4)
+    reloaded.load()
+    assert reloaded.get("a1") is None

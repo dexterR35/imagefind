@@ -218,3 +218,14 @@ class IndexStore:
     def all(self) -> list[ImageEntry]:
         with self.lock:
             return list(self.entries)
+
+    def delete_by_path(self, path: str) -> None:
+        with self.lock:
+            self._conn.execute("DELETE FROM images WHERE path = ?", (path,))
+            self._conn.commit()
+            i = self._by_path.get(path)
+            if i is None:
+                return
+            del self.entries[i]
+            self.embeddings = np.delete(self.embeddings, i, axis=0)
+            self._reindex_lookup()
