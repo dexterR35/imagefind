@@ -79,12 +79,15 @@ def test_find_similar_unknown_id_returns_none(tmp_path):
 
 def test_find_similar_respects_limit_with_many_entries(tmp_path):
     entries_and_vecs = [(_entry("query"), [1.0, 0.0])]
-    # 50 entries with descending similarity to the query vector [1,0],
-    # so the correct top-5 (excluding the query itself) is deterministic.
-    for i in range(50):
-        angle_component = i / 100.0
+    # Create 50 entries with known similarities to the query vector [1,0].
+    # Insert them in reverse order (e49, e48, ..., e0) so that storage order
+    # is decoupled from similarity rank — a broken implementation that merely
+    # returned the first k non-self entries in storage order would return
+    # ["e49", "e48", "e47", "e46", "e45"] and fail the test.
+    for i in range(50, 0, -1):
+        angle_component = (i - 1) / 100.0
         entries_and_vecs.append(
-            (_entry(f"e{i}"), [1.0 - angle_component, angle_component])
+            (_entry(f"e{i-1}"), [1.0 - angle_component, angle_component])
         )
     store = _store_with(tmp_path, entries_and_vecs)
 
