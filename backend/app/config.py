@@ -71,3 +71,13 @@ RAM_CUSTOM_TAG_REFERENCE_DIR = Path(os.environ.get("RAM_CUSTOM_TAG_REFERENCE_DIR
 # (e.g. a green accent) don't get merged away or filtered out.
 COLOR_CLUSTERS = int(os.environ.get("COLOR_CLUSTERS", "4"))
 COLOR_MIN_SHARE = float(os.environ.get("COLOR_MIN_SHARE", "0.08"))
+
+# DAM-style real-time indexing: a watchdog observer processes new/changed
+# files as they land instead of waiting for a manual reindex. Off by default
+# so tests (which reload config/main repeatedly) never spin up real
+# background threads/OS file watchers; set true in the actual deployment.
+ENABLE_WATCHER = os.environ.get("ENABLE_WATCHER", "false").lower() == "true"
+# How long a file's size must stay unchanged across polls before the watcher
+# treats a create/modify event as "the write is finished" and processes it —
+# guards against reading a file mid-copy over the NAS.
+WATCHER_STABLE_CHECK_SECONDS = float(os.environ.get("WATCHER_STABLE_CHECK_SECONDS", "1.0"))
