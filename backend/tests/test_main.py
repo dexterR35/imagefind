@@ -35,7 +35,7 @@ def test_reindex_on_empty_folder_completes_immediately(tmp_path, monkeypatch):
             break
         time.sleep(0.05)
 
-    assert status == {"processed": 0, "total": 0, "done": True, "error": None}
+    assert status == {"processed": 0, "total": 0, "failed": 0, "done": True, "error": None}
 
 
 def test_second_reindex_while_one_is_running_returns_409(tmp_path, monkeypatch):
@@ -119,6 +119,28 @@ def test_post_settings_updates_config_and_indexer_vocabulary(tmp_path, monkeypat
     assert main.config.YOLO_CONFIDENCE == 0.4
 
 
+def test_post_settings_rejects_out_of_range_values(tmp_path, monkeypatch):
+    main, _ = _fresh_app(tmp_path, monkeypatch)
+    client = TestClient(main.app)
+
+    # color_clusters=0 would crash sklearn's KMeans on every image during
+    # the next reindex if it were ever allowed through.
+    response = client.post("/settings", json={"color_clusters": 0})
+    assert response.status_code == 422
+    assert main.config.COLOR_CLUSTERS != 0
+
+    response = client.post("/settings", json={"color_min_share": 1.5})
+    assert response.status_code == 422
+
+    response = client.post("/settings", json={"owl_confidence": -0.1})
+    assert response.status_code == 422
+
+    # Config is untouched by a rejected request.
+    assert main.config.COLOR_CLUSTERS == 4
+    assert main.config.COLOR_MIN_SHARE == 0.08
+    assert main.config.OWL_CONFIDENCE == 0.15
+
+
 def test_reindex_force_param_is_passed_through_to_indexer(tmp_path, monkeypatch):
     main, _ = _fresh_app(tmp_path, monkeypatch)
     calls = []
@@ -141,6 +163,22 @@ def test_reindex_force_param_is_passed_through_to_indexer(tmp_path, monkeypatch)
     run_and_wait(force="true")
 
     assert calls == [False, True]
+
+
+def test_jobs_history_is_capped_on_a_long_running_server(tmp_path, monkeypatch):
+    main, _ = _fresh_app(tmp_path, monkeypatch)
+
+    def instant_run_reindex(job, force=False):
+        job.done = True
+
+    monkeypatch.setattr(main.indexer, "run_reindex", instant_run_reindex)
+    client = TestClient(main.app)
+
+    for _ in range(main.MAX_JOB_HISTORY + 5):
+        response = client.post("/reindex")
+        assert response.status_code == 200
+
+    assert len(main.jobs) <= main.MAX_JOB_HISTORY
 
 
 def test_thumbnail_serves_cached_file(tmp_path, monkeypatch):

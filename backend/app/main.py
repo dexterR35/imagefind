@@ -4,7 +4,7 @@ import uuid
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 from . import config
 from .indexer import Indexer, ReindexJob
@@ -24,6 +24,7 @@ store = IndexStore(config.INDEX_DIR)
 store.load()
 indexer = Indexer(config.IMAGES_DIR, config.INDEX_DIR, store, config.VOCABULARY)
 jobs: dict[str, ReindexJob] = {}
+MAX_JOB_HISTORY = 10
 
 
 def _entry_to_dict(e) -> dict:
@@ -46,9 +47,9 @@ def search_endpoint(text: str | None = None, color: str | None = None, object: s
 
 @app.get("/search/similar/{image_id}")
 def similar_endpoint(image_id: str):
-    if store.get(image_id) is None:
-        raise HTTPException(status_code=404, detail="image not found")
     results = run_find_similar(store, image_id)
+    if results is None:
+        raise HTTPException(status_code=404, detail="image not found")
     return [_entry_to_dict(e) for e in results]
 
 
@@ -56,6 +57,11 @@ def similar_endpoint(image_id: str):
 def reindex_endpoint(force: bool = False):
     if any(not j.done for j in jobs.values()):
         raise HTTPException(status_code=409, detail="a reindex job is already running")
+    # Evict the oldest completed jobs so `jobs` doesn't grow unbounded on a
+    # long-running server where reindex gets triggered repeatedly.
+    if len(jobs) >= MAX_JOB_HISTORY:
+        for old_id in list(jobs.keys())[: len(jobs) - MAX_JOB_HISTORY + 1]:
+            del jobs[old_id]
     job = ReindexJob(id=uuid.uuid4().hex)
     jobs[job.id] = job
     thread = threading.Thread(target=indexer.run_reindex, args=(job, force), daemon=True)
@@ -68,7 +74,10 @@ def reindex_status(job_id: str):
     job = jobs.get(job_id)
     if job is None:
         raise HTTPException(status_code=404, detail="job not found")
-    return {"processed": job.processed, "total": job.total, "done": job.done, "error": job.error}
+    return {
+        "processed": job.processed, "total": job.total, "failed": job.failed,
+        "done": job.done, "error": job.error,
+    }
 
 
 @app.get("/thumbnail/{image_id}")
@@ -90,11 +99,11 @@ def objects_endpoint():
 
 
 class SettingsUpdate(BaseModel):
-    yolo_confidence: float | None = None
-    owl_confidence: float | None = None
-    text_similarity_threshold: float | None = None
-    color_clusters: int | None = None
-    color_min_share: float | None = None
+    yolo_confidence: float | None = Field(default=None, ge=0.0, le=1.0)
+    owl_confidence: float | None = Field(default=None, ge=0.0, le=1.0)
+    text_similarity_threshold: float | None = Field(default=None, ge=0.0, le=1.0)
+    color_clusters: int | None = Field(default=None, ge=1, le=20)
+    color_min_share: float | None = Field(default=None, ge=0.0, le=1.0)
     vocabulary: list[str] | None = None
 
 
