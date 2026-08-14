@@ -15,6 +15,7 @@ _ram_transform = None
 _load_lock = threading.Lock()
 _tag_embedding_cache: dict[str, np.ndarray] = {}
 _tag_cache_lock = threading.Lock()
+_REFERENCE_IMAGE_EXTENSIONS = {".png", ".jpg", ".jpeg", ".webp", ".bmp"}
 
 
 def _load_rgb(image_path: Path) -> Image.Image:
@@ -63,15 +64,40 @@ def detect_ram_objects(image_path: Path, conf: float | None = None) -> list[str]
     return sorted({t.strip() for t in tags.split("|") if t.strip()})
 
 
+def _load_reference_embeddings(tag: str) -> list[np.ndarray]:
+    tag_dir = config.RAM_CUSTOM_TAG_REFERENCE_DIR / tag
+    if not tag_dir.is_dir():
+        return []
+    vectors = []
+    for p in sorted(tag_dir.iterdir()):
+        if p.suffix.lower() not in _REFERENCE_IMAGE_EXTENSIONS:
+            continue
+        try:
+            with Image.open(p) as img:
+                vectors.append(embeddings.embed_image(img))
+        except Exception:
+            # An unreadable/corrupt reference photo shouldn't take down tag
+            # matching for every image in the library — skip it and keep going.
+            continue
+    return vectors
+
+
 def _get_tag_embedding(tag: str) -> np.ndarray:
+    # Blends the bare text embedding with any reference-image embeddings found in
+    # RAM_CUSTOM_TAG_REFERENCE_DIR/<tag>/ into a single averaged, re-normalized
+    # "prototype" vector — a few real example photos anchor a specific named
+    # entity (e.g. "zeus") far better than the word alone. With no reference
+    # images present, this is identical to the old text-only behavior.
     with _tag_cache_lock:
         cached = _tag_embedding_cache.get(tag)
     if cached is not None:
         return cached
-    embedding = embeddings.embed_text(tag)
+    vectors = [embeddings.embed_text(tag), *_load_reference_embeddings(tag)]
+    centroid = np.mean(vectors, axis=0).astype(np.float32)
+    centroid = centroid / np.linalg.norm(centroid)
     with _tag_cache_lock:
-        _tag_embedding_cache[tag] = embedding
-    return embedding
+        _tag_embedding_cache[tag] = centroid
+    return centroid
 
 
 def detect_custom_tags(

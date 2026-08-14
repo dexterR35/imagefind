@@ -20,6 +20,12 @@ RAM_CONFIDENCE = float(_ram_confidence_env) if _ram_confidence_env else None
 RAM_CUSTOM_TAGS: list[str] = []
 RAM_CUSTOM_TAG_THRESHOLD = float(os.environ.get("RAM_CUSTOM_TAG_THRESHOLD", "0.22"))
 
+# Optional reference images for a custom tag, for named entities/characters CLIP's
+# bare text embedding alone may not pin down well (e.g. "zeus"): drop a few example
+# photos in RAM_CUSTOM_TAG_REFERENCE_DIR/<tag name>/ and they're blended in with the
+# text embedding to build a more accurate match target for that tag.
+RAM_CUSTOM_TAG_REFERENCE_DIR = Path(os.environ.get("RAM_CUSTOM_TAG_REFERENCE_DIR", "reference_tags"))
+
 # How many dominant-color clusters to look for per image, and how big a
 # share of the image a color must cover to be reported. Busy images (many
 # small UI elements/icons of different colors) benefit from a higher

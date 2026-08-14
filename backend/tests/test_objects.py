@@ -65,6 +65,51 @@ def test_detect_custom_tags_applies_threshold_and_caches_tag_embeddings(monkeypa
     assert calls == ["match", "no-match"]
 
 
+def test_get_tag_embedding_falls_back_to_text_only_with_no_reference_dir(tmp_path, monkeypatch):
+    def fake_embed_text(tag):
+        return np.array([3.0, 4.0], dtype=np.float32)  # not unit-length, to prove normalization happens
+
+    monkeypatch.setattr(objects_mod.embeddings, "embed_text", fake_embed_text)
+    objects_mod._tag_embedding_cache.clear()
+    monkeypatch.setattr(objects_mod.config, "RAM_CUSTOM_TAG_REFERENCE_DIR", tmp_path / "does-not-exist")
+
+    result = objects_mod._get_tag_embedding("zeus")
+
+    assert np.allclose(result, np.array([0.6, 0.8], dtype=np.float32), atol=1e-5)
+
+
+def test_get_tag_embedding_blends_text_with_reference_images(tmp_path, monkeypatch):
+    monkeypatch.setattr(objects_mod.embeddings, "embed_text", lambda tag: np.array([1.0, 0.0], dtype=np.float32))
+    monkeypatch.setattr(objects_mod.embeddings, "embed_image", lambda img: np.array([0.0, 1.0], dtype=np.float32))
+    objects_mod._tag_embedding_cache.clear()
+
+    tag_dir = tmp_path / "reference_tags" / "zeus"
+    tag_dir.mkdir(parents=True)
+    Image.new("RGB", (8, 8), (200, 0, 0)).save(tag_dir / "ref1.png")
+    monkeypatch.setattr(objects_mod.config, "RAM_CUSTOM_TAG_REFERENCE_DIR", tmp_path / "reference_tags")
+
+    result = objects_mod._get_tag_embedding("zeus")
+
+    expected = np.array([1.0, 1.0], dtype=np.float32)
+    expected = expected / np.linalg.norm(expected)
+    assert np.allclose(result, expected, atol=1e-5)
+
+
+def test_get_tag_embedding_skips_unreadable_reference_file(tmp_path, monkeypatch):
+    monkeypatch.setattr(objects_mod.embeddings, "embed_text", lambda tag: np.array([1.0, 0.0], dtype=np.float32))
+    objects_mod._tag_embedding_cache.clear()
+
+    tag_dir = tmp_path / "reference_tags" / "zeus"
+    tag_dir.mkdir(parents=True)
+    (tag_dir / "corrupt.png").write_bytes(b"not a real image")
+    monkeypatch.setattr(objects_mod.config, "RAM_CUSTOM_TAG_REFERENCE_DIR", tmp_path / "reference_tags")
+
+    result = objects_mod._get_tag_embedding("zeus")
+
+    # The corrupt file is skipped entirely, leaving a pure text-only embedding.
+    assert np.allclose(result, np.array([1.0, 0.0], dtype=np.float32), atol=1e-5)
+
+
 def test_detect_ram_objects_overrides_class_threshold_only_when_conf_given(tmp_path, monkeypatch):
     img = Image.new("RGB", (416, 416), (200, 200, 200))
     path = tmp_path / "blank.png"

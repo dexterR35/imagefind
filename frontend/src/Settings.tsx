@@ -116,7 +116,9 @@ export function Settings({ onReindexComplete }: Props) {
             />
           </label>
           <label>
-            Custom tags to also look for (comma-separated)
+            Custom tags to also look for (comma-separated). For named entities/
+            characters, add example photos in backend/reference_tags/&lt;tag&gt;/
+            for better matching.
             <input
               type="text"
               value={customTagsText}
