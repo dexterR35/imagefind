@@ -9,6 +9,12 @@ def search(
     obj: str | None = None,
     limit: int = 60,
 ) -> list[ImageEntry]:
+    # embed_text is a standalone CLIP forward pass that never touches the
+    # store, so it's computed before acquiring the lock — otherwise it would
+    # hold store.lock for the duration of a slow model call, stalling any
+    # concurrent reindex upsert/save or other search/thumbnail request.
+    query_embedding = embeddings.embed_text(text) if text else None
+
     with store.lock:
         entries = store.all()
         candidates = list(range(len(entries)))
@@ -21,7 +27,6 @@ def search(
         if text:
             text_lower = text.lower()
             text_matches = {i for i in candidates if text_lower in entries[i].ocr_text.lower()}
-            query_embedding = embeddings.embed_text(text)
             scores = {i: embeddings.cosine_similarity(query_embedding, store.embeddings[i]) for i in candidates}
             matched = [
                 i for i in candidates
@@ -38,11 +43,18 @@ def search(
         return [entries[i] for i in ranked[:limit]]
 
 
-def find_similar(store: IndexStore, image_id: str, limit: int = 20) -> list[ImageEntry]:
+def find_similar(store: IndexStore, image_id: str, limit: int = 20) -> list[ImageEntry] | None:
+    """Returns None if image_id doesn't exist, distinct from an empty list
+    (which means it exists but has no similar images) — the caller (the
+    /search/similar/{id} endpoint) needs that distinction to return 404 vs
+    200, and doing the existence check and the lookup under the same lock
+    acquisition (rather than as two separate store.get() calls at different
+    times) avoids a race where a concurrent prune removes the entry between
+    them."""
     with store.lock:
         entry = store.get(image_id)
         if entry is None:
-            return []
+            return None
         query_embedding = store.get_embedding(image_id)
         entries = store.all()
         scored = []

@@ -1,3 +1,5 @@
+import threading
+
 import numpy as np
 
 from app import embeddings
@@ -61,6 +63,35 @@ def test_find_similar_excludes_self_and_orders_by_similarity(tmp_path):
     assert [e.id for e in result] == ["b", "c"]
 
 
-def test_find_similar_unknown_id_returns_empty(tmp_path):
+def test_search_does_not_hold_lock_during_embed_text_call(tmp_path, monkeypatch):
+    # embed_text is a standalone CLIP call with no store access; holding
+    # store.lock during it would stall a concurrent reindex's upsert/save.
+    # RLock lets the *same* thread re-acquire freely, so contention must be
+    # checked from a genuinely different thread.
+    store = _store_with(tmp_path, [(_entry("a", ocr_text="x"), [1.0, 0.0])])
+    lock_was_free: dict[str, bool] = {}
+
+    def fake_embed_text(q):
+        def check():
+            acquired = store.lock.acquire(blocking=False)
+            lock_was_free["value"] = acquired
+            if acquired:
+                store.lock.release()
+
+        checker = threading.Thread(target=check)
+        checker.start()
+        checker.join(timeout=2)
+        return np.array([1.0, 0.0], dtype=np.float32)
+
+    monkeypatch.setattr(embeddings, "embed_text", fake_embed_text)
+    search(store, text="x")
+
+    assert lock_was_free.get("value") is True
+
+
+def test_find_similar_unknown_id_returns_none(tmp_path):
+    # None (not []) distinguishes "no such image" from "image exists but has
+    # no similar results" — the /search/similar/{id} endpoint needs that
+    # distinction to return 404 vs 200.
     store = _store_with(tmp_path, [(_entry("a"), [1.0, 0.0])])
-    assert find_similar(store, "missing") == []
+    assert find_similar(store, "missing") is None
