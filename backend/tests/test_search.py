@@ -75,3 +75,20 @@ def test_find_similar_unknown_id_returns_none(tmp_path):
     # distinction to return 404 vs 200.
     store = _store_with(tmp_path, [(_entry("a"), [1.0, 0.0])])
     assert find_similar(store, "missing") is None
+
+
+def test_find_similar_respects_limit_with_many_entries(tmp_path):
+    entries_and_vecs = [(_entry("query"), [1.0, 0.0])]
+    # 50 entries with descending similarity to the query vector [1,0],
+    # so the correct top-5 (excluding the query itself) is deterministic.
+    for i in range(50):
+        angle_component = i / 100.0
+        entries_and_vecs.append(
+            (_entry(f"e{i}"), [1.0 - angle_component, angle_component])
+        )
+    store = _store_with(tmp_path, entries_and_vecs)
+
+    result = find_similar(store, "query", limit=5)
+
+    assert len(result) == 5
+    assert [e.id for e in result] == ["e0", "e1", "e2", "e3", "e4"]

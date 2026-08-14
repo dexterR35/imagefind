@@ -1,4 +1,5 @@
-from . import embeddings
+import numpy as np
+
 from .storage import ImageEntry, IndexStore
 
 
@@ -42,18 +43,26 @@ def find_similar(store: IndexStore, image_id: str, limit: int = 20) -> list[Imag
     200, and doing the existence check and the lookup under the same lock
     acquisition (rather than as two separate store.get() calls at different
     times) avoids a race where a concurrent prune removes the entry between
-    them."""
+    them.
+
+    Similarity is one vectorized matrix-vector product against every stored
+    embedding, not a per-entry Python loop — at hundreds of thousands of
+    entries the loop was the actual bottleneck, not model inference."""
     with store.lock:
         entry = store.get(image_id)
         if entry is None:
             return None
+        self_index = store._by_id[image_id]
         query_embedding = store.get_embedding(image_id)
         entries = store.all()
-        scored = []
-        for i, other in enumerate(entries):
-            if other.id == image_id:
-                continue
-            sim = embeddings.cosine_similarity(query_embedding, store.embeddings[i])
-            scored.append((sim, i))
-        scored.sort(key=lambda x: x[0], reverse=True)
-        return [entries[i] for _, i in scored[:limit]]
+
+        if len(entries) <= 1:
+            return []
+
+        sims = store.embeddings @ query_embedding
+        sims[self_index] = -np.inf
+
+        k = min(limit, len(entries) - 1)
+        top = np.argpartition(-sims, k - 1)[:k]
+        top = top[np.argsort(-sims[top])]
+        return [entries[i] for i in top]
