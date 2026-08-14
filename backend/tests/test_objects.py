@@ -1,5 +1,6 @@
 from PIL import Image
 
+from app import objects as objects_mod
 from app.objects import detect_all_objects, detect_vocab_objects
 
 
@@ -29,3 +30,27 @@ def test_detect_vocab_objects_handles_transparent_rgba_image(tmp_path):
 
     assert isinstance(result, list)
     assert result == sorted(set(result))
+
+
+def test_detect_all_objects_passes_explicit_confidence_overrides_through(tmp_path, monkeypatch):
+    img = Image.new("RGB", (416, 416), (200, 200, 200))
+    path = tmp_path / "blank.png"
+    img.save(path)
+
+    captured = {}
+
+    def fake_yolo(image_path, conf=None):
+        captured["yolo_conf"] = conf
+        return []
+
+    def fake_owl(image_path, vocabulary, conf=None):
+        captured["owl_conf"] = conf
+        return []
+
+    monkeypatch.setattr(objects_mod, "detect_yolo_objects", fake_yolo)
+    monkeypatch.setattr(objects_mod, "detect_vocab_objects", fake_owl)
+
+    detect_all_objects(path, vocabulary=["clover"], yolo_conf=0.9, owl_conf=0.01)
+
+    assert captured["yolo_conf"] == 0.9
+    assert captured["owl_conf"] == 0.01

@@ -1,3 +1,4 @@
+import threading
 from pathlib import Path
 
 import torch
@@ -11,12 +12,19 @@ _device = "cuda" if torch.cuda.is_available() else "cpu"
 _yolo_model = None
 _owl_processor = None
 _owl_model = None
+_load_lock = threading.Lock()
 
 
 def _get_yolo():
     global _yolo_model
     if _yolo_model is None:
-        _yolo_model = YOLO("yolov8n.pt")
+        # Double-checked locking: the reindex background thread and a
+        # /search-triggered request thread can both race to lazy-load the
+        # model on first use, so the actual load must happen under a lock,
+        # with the outer unlocked check kept only as a fast path afterward.
+        with _load_lock:
+            if _yolo_model is None:
+                _yolo_model = YOLO("yolov8n.pt")
     return _yolo_model
 
 
@@ -35,12 +43,14 @@ def detect_yolo_objects(image_path: Path, conf: float | None = None) -> list[str
 def _get_owl():
     global _owl_processor, _owl_model
     if _owl_model is None:
-        _owl_processor = Owlv2Processor.from_pretrained("google/owlv2-base-patch16-ensemble")
-        _owl_model = (
-            Owlv2ForObjectDetection.from_pretrained("google/owlv2-base-patch16-ensemble")
-            .to(_device)
-            .eval()
-        )
+        with _load_lock:
+            if _owl_model is None:
+                _owl_processor = Owlv2Processor.from_pretrained("google/owlv2-base-patch16-ensemble")
+                _owl_model = (
+                    Owlv2ForObjectDetection.from_pretrained("google/owlv2-base-patch16-ensemble")
+                    .to(_device)
+                    .eval()
+                )
     return _owl_processor, _owl_model
 
 
@@ -73,6 +83,14 @@ def detect_vocab_objects(image_path: Path, vocabulary: list[str], conf: float | 
     return sorted(labels)
 
 
-def detect_all_objects(image_path: Path, vocabulary: list[str]) -> list[str]:
-    found = set(detect_yolo_objects(image_path)) | set(detect_vocab_objects(image_path, vocabulary))
+def detect_all_objects(
+    image_path: Path,
+    vocabulary: list[str],
+    yolo_conf: float | None = None,
+    owl_conf: float | None = None,
+) -> list[str]:
+    found = (
+        set(detect_yolo_objects(image_path, conf=yolo_conf))
+        | set(detect_vocab_objects(image_path, vocabulary, conf=owl_conf))
+    )
     return sorted(found)
