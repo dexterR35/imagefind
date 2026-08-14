@@ -77,7 +77,7 @@ class IndexStore:
             return
         try:
             legacy_embeddings = np.load(self.legacy_embeddings_path)
-        except OSError:
+        except (OSError, ValueError):
             logger.warning("IndexStore: legacy embeddings.npy unreadable, skipping migration")
             return
         if len(data) != legacy_embeddings.shape[0]:
@@ -88,14 +88,18 @@ class IndexStore:
 
         known_fields = {f.name for f in fields(ImageEntry)}
         rows = []
-        for i, e in enumerate(data):
-            entry = ImageEntry(**{k: v for k, v in e.items() if k in known_fields})
-            rows.append((
-                entry.id, entry.path, entry.thumbnail_path, entry.ocr_text,
-                json.dumps(entry.colors), json.dumps(entry.objects),
-                entry.mtime, entry.size,
-                legacy_embeddings[i].astype(np.float32).tobytes(),
-            ))
+        try:
+            for i, e in enumerate(data):
+                entry = ImageEntry(**{k: v for k, v in e.items() if k in known_fields})
+                rows.append((
+                    entry.id, entry.path, entry.thumbnail_path, entry.ocr_text,
+                    json.dumps(entry.colors), json.dumps(entry.objects),
+                    entry.mtime, entry.size,
+                    legacy_embeddings[i].astype(np.float32).tobytes(),
+                ))
+        except (TypeError, ValueError, KeyError) as exc:
+            logger.warning("IndexStore: legacy entry construction failed, skipping migration: %s", exc)
+            return
         self._conn.executemany(
             "INSERT OR REPLACE INTO images "
             "(id, path, thumbnail_path, ocr_text, colors, objects, mtime, size, embedding) "

@@ -143,3 +143,82 @@ def test_migrates_legacy_json_and_npy_on_first_load(tmp_path):
     assert store.get("a1").ocr_text == "NETBET"
     assert store.get_embedding("a1").tolist() == [1.0, 0.0, 0.0, 0.0]
     assert store.get_by_path("/imgs/a.png").id == "a1"
+
+
+def test_migration_skips_on_unreadable_json(tmp_path):
+    (tmp_path / "index.json").write_bytes(b"not valid json")
+    np.save(tmp_path / "embeddings.npy", np.array([[1.0, 0.0, 0.0, 0.0]], dtype=np.float32))
+
+    store = IndexStore(tmp_path, embedding_dim=4)
+    store.load()
+
+    assert store.all() == []
+    assert store.embeddings.shape == (0, 4)
+
+
+def test_migration_skips_on_corrupted_embeddings_npy(tmp_path):
+    legacy_entry = {
+        "id": "a1", "path": "/imgs/a.png", "thumbnail_path": "/thumbs/a1.jpg",
+        "ocr_text": "NETBET", "colors": ["green"], "objects": ["clover"],
+        "mtime": 123.0, "size": 456,
+    }
+    (tmp_path / "index.json").write_text(json.dumps([legacy_entry]))
+    (tmp_path / "embeddings.npy").write_bytes(b"corrupted npy data")
+
+    store = IndexStore(tmp_path, embedding_dim=4)
+    store.load()
+
+    assert store.all() == []
+    assert store.embeddings.shape == (0, 4)
+
+
+def test_migration_skips_on_truncated_embeddings_npy(tmp_path):
+    legacy_entry = {
+        "id": "a1", "path": "/imgs/a.png", "thumbnail_path": "/thumbs/a1.jpg",
+        "ocr_text": "NETBET", "colors": ["green"], "objects": ["clover"],
+        "mtime": 123.0, "size": 456,
+    }
+    (tmp_path / "index.json").write_text(json.dumps([legacy_entry]))
+    # Write a partial/truncated npy file (start of valid npy but incomplete)
+    (tmp_path / "embeddings.npy").write_bytes(b"\x93NUMPY\x01\x00")
+
+    store = IndexStore(tmp_path, embedding_dim=4)
+    store.load()
+
+    assert store.all() == []
+    assert store.embeddings.shape == (0, 4)
+
+
+def test_migration_skips_on_length_mismatch(tmp_path):
+    legacy_entry = {
+        "id": "a1", "path": "/imgs/a.png", "thumbnail_path": "/thumbs/a1.jpg",
+        "ocr_text": "NETBET", "colors": ["green"], "objects": ["clover"],
+        "mtime": 123.0, "size": 456,
+    }
+    (tmp_path / "index.json").write_text(json.dumps([legacy_entry]))
+    # Save 2 embeddings but only 1 entry
+    np.save(tmp_path / "embeddings.npy", np.array([[1.0, 0, 0, 0], [0, 1.0, 0, 0]], dtype=np.float32))
+
+    store = IndexStore(tmp_path, embedding_dim=4)
+    store.load()
+
+    assert store.all() == []
+    assert store.embeddings.shape == (0, 4)
+
+
+def test_migration_skips_on_missing_required_field(tmp_path):
+    # Entry missing 'size' field which is required
+    legacy_entry = {
+        "id": "a1", "path": "/imgs/a.png", "thumbnail_path": "/thumbs/a1.jpg",
+        "ocr_text": "NETBET", "colors": ["green"], "objects": ["clover"],
+        "mtime": 123.0,
+        # 'size' is missing!
+    }
+    (tmp_path / "index.json").write_text(json.dumps([legacy_entry]))
+    np.save(tmp_path / "embeddings.npy", np.array([[1.0, 0.0, 0.0, 0.0]], dtype=np.float32))
+
+    store = IndexStore(tmp_path, embedding_dim=4)
+    store.load()
+
+    assert store.all() == []
+    assert store.embeddings.shape == (0, 4)
