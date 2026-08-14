@@ -1,3 +1,5 @@
+import threading
+
 import numpy as np
 import open_clip
 import torch
@@ -7,16 +9,21 @@ _device = "cuda" if torch.cuda.is_available() else "cpu"
 _model = None
 _preprocess = None
 _tokenizer = None
+_load_lock = threading.Lock()
 
 
 def _load():
     global _model, _preprocess, _tokenizer
     if _model is None:
-        _model, _, _preprocess = open_clip.create_model_and_transforms(
-            "ViT-B-32", pretrained="openai"
-        )
-        _model = _model.to(_device).eval()
-        _tokenizer = open_clip.get_tokenizer("ViT-B-32")
+        # Double-checked locking: a reindex thread and a search request can
+        # both race to lazy-load the model on first use.
+        with _load_lock:
+            if _model is None:
+                _model, _, _preprocess = open_clip.create_model_and_transforms(
+                    "ViT-B-32", pretrained="openai"
+                )
+                _model = _model.to(_device).eval()
+                _tokenizer = open_clip.get_tokenizer("ViT-B-32")
     return _model, _preprocess, _tokenizer
 
 
