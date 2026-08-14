@@ -16,6 +16,7 @@ export interface SearchFilters {
 export interface ReindexStatus {
   processed: number;
   total: number;
+  failed: number;
   done: boolean;
   error: string | null;
 }

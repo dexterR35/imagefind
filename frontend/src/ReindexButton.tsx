@@ -9,6 +9,16 @@ export function ReindexButton({ onComplete }: Props) {
   const [status, setStatus] = useState<ReindexStatus | null>(null);
   const [running, setRunning] = useState(false);
   const pollRef = useRef<number | null>(null);
+  // handleClick's setInterval callback closes over whatever it captures at
+  // click time and keeps using that for the whole poll — a plain `onComplete`
+  // reference would go stale if the parent passes a new one (e.g. because
+  // search filters changed) before the job finishes. Routing through a ref
+  // that's kept current on every render means the interval always calls
+  // whichever onComplete is newest when it actually fires.
+  const onCompleteRef = useRef(onComplete);
+  useEffect(() => {
+    onCompleteRef.current = onComplete;
+  }, [onComplete]);
 
   useEffect(() => {
     return () => stopPolling();
@@ -30,7 +40,7 @@ export function ReindexButton({ onComplete }: Props) {
     } catch {
       // startReindex itself failed, so no polling ever starts — without this
       // catch the button would stay disabled ("Reindexing...") forever.
-      setStatus({ processed: 0, total: 0, done: true, error: "Failed to start reindex." });
+      setStatus({ processed: 0, total: 0, failed: 0, done: true, error: "Failed to start reindex." });
       setRunning(false);
       return;
     }
@@ -42,12 +52,15 @@ export function ReindexButton({ onComplete }: Props) {
         if (s.done) {
           stopPolling();
           setRunning(false);
-          onComplete();
+          onCompleteRef.current();
         }
       } catch {
         stopPolling();
         setRunning(false);
-        setStatus({ processed: 0, total: 0, done: true, error: "Lost connection while checking reindex status." });
+        setStatus({
+          processed: 0, total: 0, failed: 0, done: true,
+          error: "Lost connection while checking reindex status.",
+        });
       }
     }, 500);
   }
@@ -61,6 +74,9 @@ export function ReindexButton({ onComplete }: Props) {
         <span>
           {status.processed} / {status.total}
         </span>
+      )}
+      {status?.done && status.failed > 0 && (
+        <span className="reindex-error">{status.failed} image(s) failed to index — check server logs.</span>
       )}
       {status?.error && <span className="reindex-error">{status.error}</span>}
     </div>
