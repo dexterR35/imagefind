@@ -65,17 +65,21 @@ def test_search_and_filters_use_prepopulated_store(tmp_path, monkeypatch):
 
     entry = ImageEntry(
         id="a1", path="/imgs/a.png", thumbnail_path=str(tmp_path / "a1.jpg"),
-        ocr_text="NETBET", colors=["green"], objects=["clover"], mtime=0.0, size=0,
+        ocr_text="NETBET", colors=["green"], objects=["clover", "person"], mtime=0.0, size=0,
     )
     (tmp_path / "a1.jpg").write_bytes(b"fake-jpg-bytes")
     main.store.upsert(entry, np.ones(512, dtype=np.float32))
 
     client = TestClient(main.app)
     assert client.get("/colors").json() == ["green"]
-    assert client.get("/objects").json() == ["clover"]
+    assert client.get("/objects").json() == ["clover", "person"]
 
     result = client.get("/search", params={"color": "green"}).json()
     assert [r["id"] for r in result] == ["a1"]
+
+    result = client.get("/search", params={"object": "clover"}).json()
+    assert [r["id"] for r in result] == ["a1"]
+    assert client.get("/search", params={"object": "missing"}).json() == []
 
     assert client.get("/search/similar/a1").json() == []
     assert client.get("/search/similar/missing").status_code == 404
@@ -86,59 +90,40 @@ def test_get_settings_returns_current_config_values(tmp_path, monkeypatch):
     client = TestClient(main.app)
     settings = client.get("/settings").json()
     assert settings == {
-        "yolo_confidence": main.config.YOLO_CONFIDENCE,
-        "owl_confidence": main.config.OWL_CONFIDENCE,
-        "text_similarity_threshold": main.config.TEXT_SIMILARITY_THRESHOLD,
-        "color_clusters": main.config.COLOR_CLUSTERS,
-        "color_min_share": main.config.COLOR_MIN_SHARE,
-        "vocabulary": main.config.VOCABULARY,
+        "ram_confidence": main.config.RAM_CONFIDENCE,
+        "ram_custom_tags": main.config.RAM_CUSTOM_TAGS,
     }
 
 
-def test_post_settings_updates_config_and_indexer_vocabulary(tmp_path, monkeypatch):
+def test_post_settings_updates_config_and_indexer_custom_tags(tmp_path, monkeypatch):
     main, _ = _fresh_app(tmp_path, monkeypatch)
     client = TestClient(main.app)
 
     response = client.post("/settings", json={
-        "owl_confidence": 0.05,
-        "color_min_share": 0.03,
-        "vocabulary": ["diamond", "scatter"],
+        "ram_confidence": 0.05,
+        "ram_custom_tags": ["zeus", "lightning"],
     })
     assert response.status_code == 200
-    assert response.json()["owl_confidence"] == 0.05
-    assert response.json()["vocabulary"] == ["diamond", "scatter"]
+    assert response.json()["ram_confidence"] == 0.05
+    assert response.json()["ram_custom_tags"] == ["zeus", "lightning"]
 
     # Takes effect immediately, without restart, and syncs the already-built
-    # Indexer instance (which snapshots vocabulary at construction time).
-    assert main.config.OWL_CONFIDENCE == 0.05
-    assert main.config.COLOR_MIN_SHARE == 0.03
-    assert main.config.VOCABULARY == ["diamond", "scatter"]
-    assert main.indexer.vocabulary == ["diamond", "scatter"]
-
-    # Fields not included in the request are left untouched.
-    assert main.config.YOLO_CONFIDENCE == 0.4
+    # Indexer instance (which snapshots custom_tags at construction time).
+    assert main.config.RAM_CONFIDENCE == 0.05
+    assert main.config.RAM_CUSTOM_TAGS == ["zeus", "lightning"]
+    assert main.indexer.custom_tags == ["zeus", "lightning"]
 
 
 def test_post_settings_rejects_out_of_range_values(tmp_path, monkeypatch):
     main, _ = _fresh_app(tmp_path, monkeypatch)
     client = TestClient(main.app)
 
-    # color_clusters=0 would crash sklearn's KMeans on every image during
-    # the next reindex if it were ever allowed through.
-    response = client.post("/settings", json={"color_clusters": 0})
+    response = client.post("/settings", json={"ram_confidence": -0.1})
     assert response.status_code == 422
-    assert main.config.COLOR_CLUSTERS != 0
+    assert main.config.RAM_CONFIDENCE != -0.1
 
-    response = client.post("/settings", json={"color_min_share": 1.5})
+    response = client.post("/settings", json={"ram_confidence": 1.5})
     assert response.status_code == 422
-
-    response = client.post("/settings", json={"owl_confidence": -0.1})
-    assert response.status_code == 422
-
-    # Config is untouched by a rejected request.
-    assert main.config.COLOR_CLUSTERS == 4
-    assert main.config.COLOR_MIN_SHARE == 0.08
-    assert main.config.OWL_CONFIDENCE == 0.15
 
 
 def test_reindex_force_param_is_passed_through_to_indexer(tmp_path, monkeypatch):

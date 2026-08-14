@@ -1,4 +1,4 @@
-from . import config, embeddings
+from . import embeddings
 from .storage import ImageEntry, IndexStore
 
 
@@ -9,12 +9,6 @@ def search(
     obj: str | None = None,
     limit: int = 60,
 ) -> list[ImageEntry]:
-    # embed_text is a standalone CLIP forward pass that never touches the
-    # store, so it's computed before acquiring the lock — otherwise it would
-    # hold store.lock for the duration of a slow model call, stalling any
-    # concurrent reindex upsert/save or other search/thumbnail request.
-    query_embedding = embeddings.embed_text(text) if text else None
-
     with store.lock:
         entries = store.all()
         candidates = list(range(len(entries)))
@@ -24,23 +18,21 @@ def search(
         if obj:
             candidates = [i for i in candidates if obj in entries[i].objects]
 
+        # Deliberately no CLIP semantic-similarity fallback here: it surfaced
+        # images with no matching text or tag at all (e.g. searching "clover"
+        # returning an unrelated baseball photo), which was more confusing
+        # than useful. Text search is OCR text + object tags only now — every
+        # result is directly explainable by what's in it. CLIP is still used
+        # for "Find Similar" below and for custom-tag matching in objects.py.
         if text:
             text_lower = text.lower()
-            text_matches = {i for i in candidates if text_lower in entries[i].ocr_text.lower()}
-            scores = {i: embeddings.cosine_similarity(query_embedding, store.embeddings[i]) for i in candidates}
-            matched = [
+            candidates = [
                 i for i in candidates
-                if i in text_matches or scores[i] >= config.TEXT_SIMILARITY_THRESHOLD
+                if text_lower in entries[i].ocr_text.lower()
+                or any(text_lower in o.lower() for o in entries[i].objects)
             ]
-            ranked = sorted(
-                matched,
-                key=lambda i: scores[i] + (0.25 if i in text_matches else 0.0),
-                reverse=True,
-            )
-        else:
-            ranked = candidates
 
-        return [entries[i] for i in ranked[:limit]]
+        return [entries[i] for i in candidates[:limit]]
 
 
 def find_similar(store: IndexStore, image_id: str, limit: int = 20) -> list[ImageEntry] | None:

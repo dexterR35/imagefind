@@ -15,7 +15,7 @@ describe("SearchFilters", () => {
 
     fireEvent.click(screen.getByLabelText("green"));
     fireEvent.change(screen.getByRole("combobox"), { target: { value: "clover" } });
-    fireEvent.change(screen.getByPlaceholderText("Search text or meaning..."), {
+    fireEvent.change(screen.getByPlaceholderText("Search text or tags..."), {
       target: { value: "netbet" },
     });
 
@@ -34,7 +34,7 @@ describe("SearchFilters", () => {
       render(<SearchFilters onChange={onChange} />);
       expect(onChange).toHaveBeenCalledTimes(1); // initial mount call, fires without a timer
 
-      const input = screen.getByPlaceholderText("Search text or meaning...");
+      const input = screen.getByPlaceholderText("Search text or tags...");
       fireEvent.change(input, { target: { value: "n" } });
       fireEvent.change(input, { target: { value: "ne" } });
       fireEvent.change(input, { target: { value: "net" } });

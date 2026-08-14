@@ -22,7 +22,7 @@ app.add_middleware(
 
 store = IndexStore(config.INDEX_DIR)
 store.load()
-indexer = Indexer(config.IMAGES_DIR, config.INDEX_DIR, store, config.VOCABULARY)
+indexer = Indexer(config.IMAGES_DIR, config.INDEX_DIR, store, config.RAM_CUSTOM_TAGS)
 jobs: dict[str, ReindexJob] = {}
 MAX_JOB_HISTORY = 10
 
@@ -99,22 +99,14 @@ def objects_endpoint():
 
 
 class SettingsUpdate(BaseModel):
-    yolo_confidence: float | None = Field(default=None, ge=0.0, le=1.0)
-    owl_confidence: float | None = Field(default=None, ge=0.0, le=1.0)
-    text_similarity_threshold: float | None = Field(default=None, ge=0.0, le=1.0)
-    color_clusters: int | None = Field(default=None, ge=1, le=20)
-    color_min_share: float | None = Field(default=None, ge=0.0, le=1.0)
-    vocabulary: list[str] | None = None
+    ram_confidence: float | None = Field(default=None, ge=0.0, le=1.0)
+    ram_custom_tags: list[str] | None = None
 
 
 def _settings_dict() -> dict:
     return {
-        "yolo_confidence": config.YOLO_CONFIDENCE,
-        "owl_confidence": config.OWL_CONFIDENCE,
-        "text_similarity_threshold": config.TEXT_SIMILARITY_THRESHOLD,
-        "color_clusters": config.COLOR_CLUSTERS,
-        "color_min_share": config.COLOR_MIN_SHARE,
-        "vocabulary": config.VOCABULARY,
+        "ram_confidence": config.RAM_CONFIDENCE,
+        "ram_custom_tags": config.RAM_CUSTOM_TAGS,
     }
 
 
@@ -125,20 +117,12 @@ def get_settings():
 
 @app.post("/settings")
 def update_settings(update: SettingsUpdate):
-    if update.yolo_confidence is not None:
-        config.YOLO_CONFIDENCE = update.yolo_confidence
-    if update.owl_confidence is not None:
-        config.OWL_CONFIDENCE = update.owl_confidence
-    if update.text_similarity_threshold is not None:
-        config.TEXT_SIMILARITY_THRESHOLD = update.text_similarity_threshold
-    if update.color_clusters is not None:
-        config.COLOR_CLUSTERS = update.color_clusters
-    if update.color_min_share is not None:
-        config.COLOR_MIN_SHARE = update.color_min_share
-    if update.vocabulary is not None:
-        config.VOCABULARY = update.vocabulary
-        # Indexer snapshots the vocabulary list at construction time, so a
-        # runtime change to config.VOCABULARY needs to be pushed to it
+    if update.ram_confidence is not None:
+        config.RAM_CONFIDENCE = update.ram_confidence
+    if update.ram_custom_tags is not None:
+        config.RAM_CUSTOM_TAGS = update.ram_custom_tags
+        # Indexer snapshots custom_tags at construction time, so a runtime
+        # change to config.RAM_CUSTOM_TAGS needs to be pushed to it
         # explicitly to actually take effect on the next reindex.
-        indexer.vocabulary = update.vocabulary
+        indexer.custom_tags = update.ram_custom_tags
     return _settings_dict()

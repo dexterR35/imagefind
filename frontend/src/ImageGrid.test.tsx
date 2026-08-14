@@ -4,7 +4,10 @@ import { ImageGrid } from "./ImageGrid";
 import type { ImageResult } from "./api";
 
 const sample: ImageResult[] = [
-  { id: "a1", path: "/imgs/clover.png", thumbnail_url: "/thumbnail/a1", ocr_text: "", colors: ["green"], objects: ["clover"] },
+  {
+    id: "a1", path: "/imgs/clover.png", thumbnail_url: "/thumbnail/a1", ocr_text: "",
+    colors: ["green"], objects: ["clover"],
+  },
 ];
 
 describe("ImageGrid", () => {

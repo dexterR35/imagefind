@@ -32,25 +32,25 @@ class ReindexSettings:
     reindex run, so a POST /settings call arriving mid-run can't make one
     run process some images with old values and some with new ones."""
 
-    vocabulary: list[str]
-    yolo_confidence: float
-    owl_confidence: float
+    ram_confidence: float | None
+    custom_tags: list[str]
+    custom_tag_threshold: float
     color_clusters: int
     color_min_share: float
 
 
 class Indexer:
-    def __init__(self, images_dir: Path, index_dir: Path, store: IndexStore, vocabulary: list[str]):
+    def __init__(self, images_dir: Path, index_dir: Path, store: IndexStore, custom_tags: list[str] | None = None):
         self.images_dir = Path(images_dir)
         self.index_dir = Path(index_dir)
         self.store = store
-        self.vocabulary = vocabulary
+        self.custom_tags = custom_tags if custom_tags is not None else []
 
     def _current_settings(self) -> ReindexSettings:
         return ReindexSettings(
-            vocabulary=self.vocabulary,
-            yolo_confidence=config.YOLO_CONFIDENCE,
-            owl_confidence=config.OWL_CONFIDENCE,
+            ram_confidence=config.RAM_CONFIDENCE,
+            custom_tags=self.custom_tags,
+            custom_tag_threshold=config.RAM_CUSTOM_TAG_THRESHOLD,
             color_clusters=config.COLOR_CLUSTERS,
             color_min_share=config.COLOR_MIN_SHARE,
         )
@@ -71,10 +71,12 @@ class Indexer:
             embedding = embeddings.embed_image(img)
 
         text = ocr.extract_text(path)
-        object_labels = objects_mod.detect_all_objects(
-            path, settings.vocabulary,
-            yolo_conf=settings.yolo_confidence, owl_conf=settings.owl_confidence,
-        )
+        object_labels = set(objects_mod.detect_ram_objects(path, conf=settings.ram_confidence))
+        if settings.custom_tags:
+            object_labels |= set(
+                objects_mod.detect_custom_tags(embedding, settings.custom_tags, settings.custom_tag_threshold)
+            )
+        object_labels = sorted(object_labels)
 
         entry = ImageEntry(
             id=image_id, path=str(path), thumbnail_path=str(thumb_path),

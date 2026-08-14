@@ -21,8 +21,8 @@ export function SearchFilters({ onChange }: Props) {
   }, []);
 
   // Debounce the free-text input only: every keystroke would otherwise trigger
-  // a real CLIP forward pass server-side, and slow responses for stale partial
-  // queries could race with (and overwrite) a later, more complete one.
+  // a server round-trip, and slow responses for stale partial queries could
+  // race with (and overwrite) a later, more complete one.
   useEffect(() => {
     const handle = window.setTimeout(() => setDebouncedText(text), DEBOUNCE_MS);
     return () => window.clearTimeout(handle);
@@ -36,7 +36,7 @@ export function SearchFilters({ onChange }: Props) {
     <div className="search-filters">
       <input
         type="text"
-        placeholder="Search text or meaning..."
+        placeholder="Search text or tags..."
         value={text}
         onChange={(e) => setText(e.target.value)}
       />

@@ -2,7 +2,7 @@ import json
 import logging
 import os
 import threading
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, fields
 from pathlib import Path
 
 import numpy as np
@@ -39,7 +39,13 @@ class IndexStore:
         with self.lock:
             if self.index_path.exists():
                 data = json.loads(self.index_path.read_text())
-                self.entries = [ImageEntry(**e) for e in data]
+                # Filter to known fields so an index.json written by an older/newer
+                # schema (e.g. a since-removed objects_by_model key) doesn't crash
+                # the load with an unexpected-keyword-argument error.
+                known_fields = {f.name for f in fields(ImageEntry)}
+                self.entries = [
+                    ImageEntry(**{k: v for k, v in e.items() if k in known_fields}) for e in data
+                ]
             else:
                 self.entries = []
             if self.embeddings_path.exists():

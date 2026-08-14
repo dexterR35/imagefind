@@ -7,7 +7,15 @@ opencv-python-headless==4.10.0.84
 scikit-learn==1.5.2
 open-clip-torch==2.26.1
 easyocr==1.7.2
-ultralytics==8.3.0
+# fairscale and transformers aren't imported directly anywhere in app/ — they're
+# used internally by the ram package (ram/models/bert.py, vit.py) and aren't
+# declared in its own package metadata, so they're pinned explicitly here.
+fairscale==0.4.13
 transformers==4.44.2
+# Vendored locally in vendor/recognize-anything (pruned copy of
+# https://github.com/xinyu1205/recognize-anything, training-only code and
+# demo assets stripped) — not on PyPI, and this way `pip install -r
+# requirements.txt` doesn't need git or network access to build it.
+./vendor/recognize-anything
 pytest==8.3.3
 httpx==0.27.2

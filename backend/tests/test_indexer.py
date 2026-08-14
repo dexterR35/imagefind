@@ -33,7 +33,7 @@ def test_run_reindex_processes_new_and_skips_unchanged(tmp_path, monkeypatch):
     index_dir = tmp_path / "index"
     store = IndexStore(index_dir, embedding_dim=512)
     store.load()
-    indexer = Indexer(images_dir, index_dir, store, vocabulary=["clover"])
+    indexer = Indexer(images_dir, index_dir, store)
 
     job = ReindexJob(id="job1")
     indexer.run_reindex(job)
@@ -64,7 +64,7 @@ def test_run_reindex_skips_corrupt_image_without_aborting(tmp_path):
     index_dir = tmp_path / "index"
     store = IndexStore(index_dir, embedding_dim=512)
     store.load()
-    indexer = Indexer(images_dir, index_dir, store, vocabulary=["clover"])
+    indexer = Indexer(images_dir, index_dir, store)
 
     job = ReindexJob(id="job1")
     indexer.run_reindex(job)
@@ -82,7 +82,7 @@ def test_run_reindex_prunes_entries_for_deleted_files(tmp_path):
     index_dir = tmp_path / "index"
     store = IndexStore(index_dir, embedding_dim=512)
     store.load()
-    indexer = Indexer(images_dir, index_dir, store, vocabulary=["clover"])
+    indexer = Indexer(images_dir, index_dir, store)
 
     job = ReindexJob(id="job1")
     indexer.run_reindex(job)
@@ -107,7 +107,7 @@ def test_run_reindex_prunes_files_deleted_during_the_scan(tmp_path, monkeypatch)
     index_dir = tmp_path / "index"
     store = IndexStore(index_dir, embedding_dim=512)
     store.load()
-    indexer = Indexer(images_dir, index_dir, store, vocabulary=["clover"])
+    indexer = Indexer(images_dir, index_dir, store)
 
     fake_process = _fake_process_image(index_dir)
     monkeypatch.setattr(indexer, "process_image", fake_process)
@@ -146,7 +146,7 @@ def test_run_reindex_force_reprocesses_unchanged_files(tmp_path, monkeypatch):
     index_dir = tmp_path / "index"
     store = IndexStore(index_dir, embedding_dim=512)
     store.load()
-    indexer = Indexer(images_dir, index_dir, store, vocabulary=["clover"])
+    indexer = Indexer(images_dir, index_dir, store)
 
     calls = []
     fake_process = _fake_process_image(index_dir)
@@ -179,7 +179,7 @@ def test_run_reindex_saves_periodically_not_just_at_the_end(tmp_path, monkeypatc
     index_dir = tmp_path / "index"
     store = IndexStore(index_dir, embedding_dim=512)
     store.load()
-    indexer = Indexer(images_dir, index_dir, store, vocabulary=["clover"])
+    indexer = Indexer(images_dir, index_dir, store)
 
     monkeypatch.setattr(indexer, "process_image", _fake_process_image(index_dir))
 
@@ -210,7 +210,7 @@ def test_run_reindex_snapshots_settings_once_at_start(tmp_path, monkeypatch):
     index_dir = tmp_path / "index"
     store = IndexStore(index_dir, embedding_dim=512)
     store.load()
-    indexer = Indexer(images_dir, index_dir, store, vocabulary=["clover"])
+    indexer = Indexer(images_dir, index_dir, store)
 
     original_clusters = config.COLOR_CLUSTERS
     fake_process = _fake_process_image(index_dir)
@@ -230,4 +230,29 @@ def test_run_reindex_snapshots_settings_once_at_start(tmp_path, monkeypatch):
 
     assert len(captured) == 1
     assert captured[0].color_clusters == original_clusters
-    assert captured[0].vocabulary == ["clover"]
+
+
+def test_run_reindex_snapshots_custom_tags_once_at_start(tmp_path, monkeypatch):
+    images_dir = tmp_path / "images"
+    _make_images(images_dir, count=1)
+
+    index_dir = tmp_path / "index"
+    store = IndexStore(index_dir, embedding_dim=512)
+    store.load()
+    indexer = Indexer(images_dir, index_dir, store, custom_tags=["zeus"])
+
+    fake_process = _fake_process_image(index_dir)
+    captured = []
+
+    def process_and_mutate(path, settings):
+        captured.append(settings)
+        indexer.custom_tags = ["changed mid-run"]
+        return fake_process(path, settings)
+
+    monkeypatch.setattr(indexer, "process_image", process_and_mutate)
+
+    job = ReindexJob(id="job1")
+    indexer.run_reindex(job)
+
+    assert len(captured) == 1
+    assert captured[0].custom_tags == ["zeus"]

@@ -15,7 +15,7 @@ interface Props {
 export function Settings({ onReindexComplete }: Props) {
   const [open, setOpen] = useState(false);
   const [settings, setSettings] = useState<SettingsType | null>(null);
-  const [vocabularyText, setVocabularyText] = useState("");
+  const [customTagsText, setCustomTagsText] = useState("");
   const [saving, setSaving] = useState(false);
   const [status, setStatus] = useState<ReindexStatus | null>(null);
   const pollRef = useRef<number | null>(null);
@@ -24,7 +24,7 @@ export function Settings({ onReindexComplete }: Props) {
     if (open && settings === null) {
       fetchSettings().then((s) => {
         setSettings(s);
-        setVocabularyText(s.vocabulary.join(", "));
+        setCustomTagsText(s.ram_custom_tags.join(", "));
       });
     }
   }, [open, settings]);
@@ -48,7 +48,7 @@ export function Settings({ onReindexComplete }: Props) {
     if (!settings) return;
     setSaving(true);
     setStatus(null);
-    const vocabulary = vocabularyText
+    const ram_custom_tags = customTagsText
       .split(",")
       .map((v) => v.trim())
       .filter(Boolean);
@@ -57,7 +57,7 @@ export function Settings({ onReindexComplete }: Props) {
     // (e.g. a reindex is already running elsewhere, giving a 409) reports
     // accurately instead of implying nothing happened at all.
     try {
-      const saved = await updateSettings({ ...settings, vocabulary });
+      const saved = await updateSettings({ ...settings, ram_custom_tags });
       setSettings(saved);
     } catch {
       setSaving(false);
@@ -105,66 +105,22 @@ export function Settings({ onReindexComplete }: Props) {
       {open && settings && (
         <div className="settings-panel">
           <label>
-            Object confidence (standard objects: person, car, ...)
+            Object confidence (blank uses model defaults)
             <input
               type="number"
               step="0.01"
               min="0"
               max="1"
-              value={settings.yolo_confidence}
-              onChange={(e) => updateField("yolo_confidence", Number(e.target.value))}
+              value={settings.ram_confidence ?? ""}
+              onChange={(e) => updateField("ram_confidence", e.target.value === "" ? null : Number(e.target.value))}
             />
           </label>
           <label>
-            Object confidence (custom vocabulary)
-            <input
-              type="number"
-              step="0.01"
-              min="0"
-              max="1"
-              value={settings.owl_confidence}
-              onChange={(e) => updateField("owl_confidence", Number(e.target.value))}
-            />
-          </label>
-          <label>
-            Text match strength
-            <input
-              type="number"
-              step="0.01"
-              min="0"
-              max="1"
-              value={settings.text_similarity_threshold}
-              onChange={(e) => updateField("text_similarity_threshold", Number(e.target.value))}
-            />
-          </label>
-          <label>
-            Color regions to detect
-            <input
-              type="number"
-              step="1"
-              min="1"
-              max="10"
-              value={settings.color_clusters}
-              onChange={(e) => updateField("color_clusters", Number(e.target.value))}
-            />
-          </label>
-          <label>
-            Minimum color share
-            <input
-              type="number"
-              step="0.01"
-              min="0"
-              max="1"
-              value={settings.color_min_share}
-              onChange={(e) => updateField("color_min_share", Number(e.target.value))}
-            />
-          </label>
-          <label>
-            Object vocabulary (comma-separated)
+            Custom tags to also look for (comma-separated)
             <input
               type="text"
-              value={vocabularyText}
-              onChange={(e) => setVocabularyText(e.target.value)}
+              value={customTagsText}
+              onChange={(e) => setCustomTagsText(e.target.value)}
             />
           </label>
           <button type="button" onClick={handleSaveAndReindex} disabled={saving}>

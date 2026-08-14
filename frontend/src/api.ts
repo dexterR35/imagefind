@@ -22,12 +22,8 @@ export interface ReindexStatus {
 }
 
 export interface Settings {
-  yolo_confidence: number;
-  owl_confidence: number;
-  text_similarity_threshold: number;
-  color_clusters: number;
-  color_min_share: number;
-  vocabulary: string[];
+  ram_confidence: number | null;
+  ram_custom_tags: string[];
 }
 
 const BASE_URL = "http://localhost:8000";

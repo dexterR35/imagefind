@@ -4,12 +4,8 @@ import * as api from "./api";
 import { Settings } from "./Settings";
 
 const sampleSettings: api.Settings = {
-  yolo_confidence: 0.4,
-  owl_confidence: 0.15,
-  text_similarity_threshold: 0.2,
-  color_clusters: 4,
-  color_min_share: 0.08,
-  vocabulary: ["clover", "horseshoe"],
+  ram_confidence: 0.15,
+  ram_custom_tags: ["zeus", "lightning"],
 };
 
 describe("Settings", () => {
@@ -20,22 +16,22 @@ describe("Settings", () => {
     cleanup();
   });
 
-  it("loads current settings when opened and pre-fills the vocabulary field", async () => {
+  it("loads current settings when opened and pre-fills the custom tags field", async () => {
     vi.spyOn(api, "fetchSettings").mockResolvedValue(sampleSettings);
 
     render(<Settings onReindexComplete={vi.fn()} />);
     fireEvent.click(screen.getByText("Settings"));
 
     await waitFor(() => expect(screen.getByDisplayValue("0.15")).toBeInTheDocument());
-    expect(screen.getByDisplayValue("clover, horseshoe")).toBeInTheDocument();
+    expect(screen.getByDisplayValue("zeus, lightning")).toBeInTheDocument();
   });
 
   it("saves edited settings, triggers a forced reindex, and polls to completion", async () => {
     vi.spyOn(api, "fetchSettings").mockResolvedValue(sampleSettings);
     const updateSpy = vi.spyOn(api, "updateSettings").mockResolvedValue({
       ...sampleSettings,
-      owl_confidence: 0.05,
-      vocabulary: ["clover", "diamond"],
+      ram_confidence: 0.05,
+      ram_custom_tags: ["zeus", "statue"],
     });
     const reindexSpy = vi.spyOn(api, "startReindex").mockResolvedValue("job1");
     vi.spyOn(api, "fetchReindexStatus").mockResolvedValue({ processed: 1, total: 1, failed: 0, done: true, error: null });
@@ -46,14 +42,14 @@ describe("Settings", () => {
     await waitFor(() => expect(screen.getByDisplayValue("0.15")).toBeInTheDocument());
 
     fireEvent.change(screen.getByDisplayValue("0.15"), { target: { value: "0.05" } });
-    fireEvent.change(screen.getByDisplayValue("clover, horseshoe"), {
-      target: { value: "clover, diamond" },
+    fireEvent.change(screen.getByDisplayValue("zeus, lightning"), {
+      target: { value: "zeus, statue" },
     });
     fireEvent.click(screen.getByText("Save & Reindex"));
 
     await waitFor(() =>
       expect(updateSpy).toHaveBeenCalledWith(
-        expect.objectContaining({ owl_confidence: 0.05, vocabulary: ["clover", "diamond"] })
+        expect.objectContaining({ ram_confidence: 0.05, ram_custom_tags: ["zeus", "statue"] })
       )
     );
     // startReindex must be called with force=true — settings changes need a
