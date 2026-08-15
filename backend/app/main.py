@@ -16,7 +16,7 @@ from .storage import IndexStore
 app = FastAPI(title="ImageFind")
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["http://localhost:5173"],
+    allow_origins=config.CORS_ALLOWED_ORIGINS,
     allow_methods=["*"],
     allow_headers=["*"],
 )
@@ -26,6 +26,31 @@ store.load()
 indexer = Indexer(config.IMAGES_DIR, config.INDEX_DIR, store, config.RAM_CUSTOM_TAGS)
 jobs: dict[str, ReindexJob] = {}
 MAX_JOB_HISTORY = 10
+
+_watcher_observer = None
+_reconciliation_stop = threading.Event()
+_reconciliation_thread = None
+
+if config.ENABLE_WATCHER:
+    from .watcher import start_reconciliation_loop, start_watcher
+
+    _watcher_observer = start_watcher(indexer, store)
+    _reconciliation_thread = start_reconciliation_loop(
+        indexer,
+        lambda: ReindexJob(id=uuid.uuid4().hex),
+        config.RECONCILE_INTERVAL_SECONDS,
+        _reconciliation_stop,
+    )
+
+
+@app.on_event("shutdown")
+def _stop_watcher():
+    if _watcher_observer is not None:
+        _watcher_observer.stop()
+        _watcher_observer.join(timeout=5)
+    _reconciliation_stop.set()
+    if _reconciliation_thread is not None:
+        _reconciliation_thread.join(timeout=5)
 
 
 def _entry_to_dict(e) -> dict:
@@ -87,6 +112,14 @@ def thumbnail_endpoint(image_id: str):
     if entry is None:
         raise HTTPException(status_code=404, detail="image not found")
     return FileResponse(entry.thumbnail_path)
+
+
+@app.get("/download/{image_id}")
+def download_endpoint(image_id: str):
+    entry = store.get(image_id)
+    if entry is None:
+        raise HTTPException(status_code=404, detail="image not found")
+    return FileResponse(entry.path, filename=Path(entry.path).name)
 
 
 @app.get("/colors")

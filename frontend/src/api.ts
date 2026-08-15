@@ -45,6 +45,10 @@ function toAbsolute(results: ImageResult[]): ImageResult[] {
   return results.map((r) => ({ ...r, thumbnail_url: `${BASE_URL}${r.thumbnail_url}` }));
 }
 
+export function downloadUrl(imageId: string): string {
+  return `${BASE_URL}/download/${imageId}`;
+}
+
 export async function search(filters: SearchFilters): Promise<ImageResult[]> {
   const params = new URLSearchParams();
   if (filters.text) params.set("text", filters.text);

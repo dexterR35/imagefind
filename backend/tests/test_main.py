@@ -11,6 +11,10 @@ def _fresh_app(tmp_path, monkeypatch):
     images_dir.mkdir()
     monkeypatch.setenv("IMAGES_DIR", str(images_dir))
     monkeypatch.setenv("INDEX_DIR", str(tmp_path / "index"))
+    # A developer's shell may have ENABLE_WATCHER=true set for real deployment
+    # use; every _fresh_app call must start from a clean slate or it would
+    # spin up a real watchdog Observer + reconciliation thread during tests.
+    monkeypatch.delenv("ENABLE_WATCHER", raising=False)
     from app import config, main
     importlib.reload(config)
     importlib.reload(main)
@@ -57,6 +61,12 @@ def test_second_reindex_while_one_is_running_returns_409(tmp_path, monkeypatch):
         assert second.status_code == 409
     finally:
         release.set()
+
+
+def test_watcher_disabled_by_default(tmp_path, monkeypatch):
+    main, _ = _fresh_app(tmp_path, monkeypatch)
+    assert main._watcher_observer is None
+    assert main._reconciliation_thread is None
 
 
 def test_search_and_filters_use_prepopulated_store(tmp_path, monkeypatch):
@@ -283,3 +293,45 @@ def test_thumbnail_serves_cached_file(tmp_path, monkeypatch):
     assert response.status_code == 200
     assert response.content == b"fake-jpg-bytes"
     assert client.get("/thumbnail/missing").status_code == 404
+
+
+def test_cors_allowed_origins_configurable_via_env(tmp_path, monkeypatch):
+    monkeypatch.setenv("CORS_ALLOWED_ORIGINS", "http://192.168.1.50:5173,http://localhost:5173")
+    main, _ = _fresh_app(tmp_path, monkeypatch)
+    assert main.config.CORS_ALLOWED_ORIGINS == [
+        "http://192.168.1.50:5173", "http://localhost:5173"
+    ]
+
+    # Exercise the actual CORSMiddleware wiring, not just the config value —
+    # this would still pass even if main.py's CORSMiddleware line reverted to
+    # a hardcoded origin list, since it never touches the config value above.
+    client = TestClient(main.app)
+    response = client.get("/health", headers={"Origin": "http://192.168.1.50:5173"})
+    assert response.headers["access-control-allow-origin"] == "http://192.168.1.50:5173"
+
+
+def test_download_endpoint_returns_original_file_as_attachment(tmp_path, monkeypatch):
+    main, _ = _fresh_app(tmp_path, monkeypatch)
+    from app.storage import ImageEntry
+
+    original = tmp_path / "original.png"
+    original.write_bytes(b"fake-png-bytes")
+    entry = ImageEntry(
+        id="d1", path=str(original), thumbnail_path=str(tmp_path / "d1.jpg"),
+        ocr_text="", colors=[], objects=[], mtime=0.0, size=0,
+    )
+    main.store.upsert(entry, np.ones(512, dtype=np.float32))
+
+    client = TestClient(main.app)
+    response = client.get("/download/d1")
+
+    assert response.status_code == 200
+    assert response.content == b"fake-png-bytes"
+    assert "attachment" in response.headers["content-disposition"]
+    assert "original.png" in response.headers["content-disposition"]
+
+
+def test_download_endpoint_404_for_unknown_id(tmp_path, monkeypatch):
+    main, _ = _fresh_app(tmp_path, monkeypatch)
+    client = TestClient(main.app)
+    assert client.get("/download/missing").status_code == 404

@@ -36,6 +36,16 @@ IMAGES_DIR = (
     else Path(os.environ.get("IMAGES_DIR", "./images"))
 )
 
+# Which browser origins may call this API. Defaults to the Vite dev server
+# only; set to the server machine's actual LAN address(es) — comma-separated
+# — once other users on the network need to reach it (e.g.
+# "http://192.168.1.50:5173,http://192.168.1.50:3000").
+CORS_ALLOWED_ORIGINS = [
+    origin.strip()
+    for origin in os.environ.get("CORS_ALLOWED_ORIGINS", "http://localhost:5173").split(",")
+    if origin.strip()
+]
+
 # RAM++ (Recognize Anything Model) — automatic open-set tagger, no vocabulary needed.
 # Its checkpoint ships with per-tag tuned thresholds, so RAM_CONFIDENCE defaults to
 # None ("use the model's own thresholds") rather than a single guessed global number;
@@ -71,3 +81,19 @@ RAM_CUSTOM_TAG_REFERENCE_DIR = Path(os.environ.get("RAM_CUSTOM_TAG_REFERENCE_DIR
 # (e.g. a green accent) don't get merged away or filtered out.
 COLOR_CLUSTERS = int(os.environ.get("COLOR_CLUSTERS", "4"))
 COLOR_MIN_SHARE = float(os.environ.get("COLOR_MIN_SHARE", "0.08"))
+
+# DAM-style real-time indexing: a watchdog observer processes new/changed
+# files as they land instead of waiting for a manual reindex. Off by default
+# so tests (which reload config/main repeatedly) never spin up real
+# background threads/OS file watchers; set true in the actual deployment.
+ENABLE_WATCHER = os.environ.get("ENABLE_WATCHER", "false").lower() == "true"
+# How long a file's size must stay unchanged across polls before the watcher
+# treats a create/modify event as "the write is finished" and processes it —
+# guards against reading a file mid-copy over the NAS.
+WATCHER_STABLE_CHECK_SECONDS = float(os.environ.get("WATCHER_STABLE_CHECK_SECONDS", "1.0"))
+# Backstop for the real-time watcher: catches anything a missed file-system
+# event didn't (e.g. SMB change-notifications aren't 100% guaranteed for
+# writes from other machines onto the same NAS share). This is a full
+# needs_reindex()-gated scan, same as the manual Reindex button, just run on
+# a low-frequency timer instead of only on click.
+RECONCILE_INTERVAL_SECONDS = float(os.environ.get("RECONCILE_INTERVAL_SECONDS", str(4 * 60 * 60)))

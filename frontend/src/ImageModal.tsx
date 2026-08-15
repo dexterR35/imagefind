@@ -1,4 +1,4 @@
-import type { ImageResult } from "./api";
+import { downloadUrl, type ImageResult } from "./api";
 
 interface Props {
   image: ImageResult;
@@ -17,6 +17,9 @@ export function ImageModal({ image, onClose, onFindSimilar }: Props) {
         <button type="button" onClick={() => onFindSimilar(image.id)}>
           Find Similar
         </button>
+        <a className="download-button" href={downloadUrl(image.id)} download>
+          Download
+        </a>
         <button type="button" onClick={onClose}>
           Close
         </button>

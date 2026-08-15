@@ -1,13 +1,27 @@
 import json
 import logging
-import os
+import sqlite3
 import threading
-from dataclasses import asdict, dataclass, fields
+from dataclasses import dataclass, fields
 from pathlib import Path
 
 import numpy as np
 
 logger = logging.getLogger(__name__)
+
+_SCHEMA = """
+CREATE TABLE IF NOT EXISTS images (
+    id TEXT PRIMARY KEY,
+    path TEXT UNIQUE NOT NULL,
+    thumbnail_path TEXT NOT NULL,
+    ocr_text TEXT NOT NULL,
+    colors TEXT NOT NULL,
+    objects TEXT NOT NULL,
+    mtime REAL NOT NULL,
+    size INTEGER NOT NULL,
+    embedding BLOB NOT NULL
+)
+"""
 
 
 @dataclass
@@ -26,41 +40,142 @@ class IndexStore:
     def __init__(self, index_dir: Path, embedding_dim: int = 512):
         self.index_dir = Path(index_dir)
         self.index_dir.mkdir(parents=True, exist_ok=True)
-        self.index_path = self.index_dir / "index.json"
-        self.embeddings_path = self.index_dir / "embeddings.npy"
+        self.db_path = self.index_dir / "index.db"
+        self.legacy_index_path = self.index_dir / "index.json"
+        self.legacy_embeddings_path = self.index_dir / "embeddings.npy"
         self.embedding_dim = embedding_dim
         self.entries: list[ImageEntry] = []
-        self.embeddings: np.ndarray = np.zeros((0, embedding_dim), dtype=np.float32)
+        # self._emb_buf is the real backing allocation; self.embeddings is
+        # always a view self._emb_buf[:len(self.entries)]. Growing it
+        # doubles capacity instead of reallocating exactly len+1 rows on
+        # every single new-path upsert, which is what made upsert() O(n)
+        # per call (and O(n^2) over a full reindex) before this.
+        self._emb_buf: np.ndarray = np.zeros((0, embedding_dim), dtype=np.float32)
+        self.embeddings: np.ndarray = self._emb_buf
         self._by_id: dict[str, int] = {}
         self._by_path: dict[str, int] = {}
         self.lock = threading.RLock()
+        self._conn = self._open_db()
+
+    def _open_db(self) -> sqlite3.Connection:
+        conn = sqlite3.connect(str(self.db_path), check_same_thread=False)
+        try:
+            conn.execute("PRAGMA journal_mode=WAL")
+            conn.execute(_SCHEMA)
+            conn.commit()
+        except sqlite3.DatabaseError:
+            logger.warning(
+                "IndexStore: %s is corrupt, resetting to a fresh empty index", self.db_path
+            )
+            conn.close()
+            for suffix in ("", "-wal", "-shm"):
+                self.db_path.with_name(self.db_path.name + suffix).unlink(missing_ok=True)
+            conn = sqlite3.connect(str(self.db_path), check_same_thread=False)
+            conn.execute("PRAGMA journal_mode=WAL")
+            conn.execute(_SCHEMA)
+            conn.commit()
+        return conn
+
+    def _migrate_from_legacy_files(self) -> None:
+        try:
+            data = json.loads(self.legacy_index_path.read_text())
+        except (OSError, json.JSONDecodeError):
+            logger.warning("IndexStore: legacy index.json unreadable, skipping migration")
+            return
+        try:
+            legacy_embeddings = np.load(self.legacy_embeddings_path)
+        except (OSError, ValueError):
+            logger.warning("IndexStore: legacy embeddings.npy unreadable, skipping migration")
+            return
+        if len(data) != legacy_embeddings.shape[0]:
+            logger.warning(
+                "IndexStore: legacy entries/embeddings length mismatch, skipping migration"
+            )
+            return
+
+        known_fields = {f.name for f in fields(ImageEntry)}
+        rows = []
+        try:
+            for i, e in enumerate(data):
+                entry = ImageEntry(**{k: v for k, v in e.items() if k in known_fields})
+                rows.append((
+                    entry.id, entry.path, entry.thumbnail_path, entry.ocr_text,
+                    json.dumps(entry.colors), json.dumps(entry.objects),
+                    entry.mtime, entry.size,
+                    legacy_embeddings[i].astype(np.float32).tobytes(),
+                ))
+        except (TypeError, ValueError, KeyError) as exc:
+            logger.warning("IndexStore: legacy entry construction failed, skipping migration: %s", exc)
+            return
+
+        ids = [r[0] for r in rows]
+        paths = [r[1] for r in rows]
+        if len(set(ids)) != len(ids):
+            logger.warning(
+                "IndexStore: legacy index.json contains %d duplicate id(s); "
+                "only the last entry for each duplicate id will be kept",
+                len(ids) - len(set(ids)),
+            )
+        if len(set(paths)) != len(paths):
+            logger.warning(
+                "IndexStore: legacy index.json contains %d duplicate path(s); "
+                "only the last entry for each duplicate path will be kept",
+                len(paths) - len(set(paths)),
+            )
+
+        self._conn.executemany(
+            "INSERT OR REPLACE INTO images "
+            "(id, path, thumbnail_path, ocr_text, colors, objects, mtime, size, embedding) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            rows,
+        )
+        # One-shot marker: this table can legitimately become empty again
+        # later (prune(set()), repointed images_dir), so "table is empty"
+        # can't be used to decide whether migration should re-run — that
+        # would resurrect legacy rows that were deliberately deleted. This
+        # PRAGMA persists in the db file itself and is only ever set once,
+        # right after a successful migration.
+        self._conn.execute("PRAGMA user_version = 1")
+        self._conn.commit()
 
     def load(self) -> None:
         with self.lock:
-            if self.index_path.exists():
-                data = json.loads(self.index_path.read_text())
-                # Filter to known fields so an index.json written by an older/newer
-                # schema (e.g. a since-removed objects_by_model key) doesn't crash
-                # the load with an unexpected-keyword-argument error.
-                known_fields = {f.name for f in fields(ImageEntry)}
-                self.entries = [
-                    ImageEntry(**{k: v for k, v in e.items() if k in known_fields}) for e in data
-                ]
-            else:
-                self.entries = []
-            if self.embeddings_path.exists():
-                self.embeddings = np.load(self.embeddings_path)
-            else:
-                self.embeddings = np.zeros((0, self.embedding_dim), dtype=np.float32)
+            if self.legacy_index_path.exists():
+                user_version = self._conn.execute("PRAGMA user_version").fetchone()[0]
+                if user_version == 0:
+                    self._migrate_from_legacy_files()
 
-            if len(self.entries) != self.embeddings.shape[0]:
+            rows = self._conn.execute(
+                "SELECT id, path, thumbnail_path, ocr_text, colors, objects, "
+                "mtime, size, embedding FROM images ORDER BY rowid"
+            ).fetchall()
+
+            try:
+                entries = []
+                embeddings = []
+                for (id_, path, thumbnail_path, ocr_text, colors_json, objects_json,
+                     mtime, size, embedding_blob) in rows:
+                    entries.append(ImageEntry(
+                        id=id_, path=path, thumbnail_path=thumbnail_path,
+                        ocr_text=ocr_text, colors=json.loads(colors_json),
+                        objects=json.loads(objects_json), mtime=mtime, size=size,
+                    ))
+                    embeddings.append(np.frombuffer(embedding_blob, dtype=np.float32))
+
+                self.entries = entries
+                self._emb_buf = (
+                    np.vstack(embeddings) if embeddings
+                    else np.zeros((0, self.embedding_dim), dtype=np.float32)
+                )
+                self.embeddings = self._emb_buf
+            except ValueError as exc:
                 logger.warning(
-                    "IndexStore: entries/embeddings length mismatch (%d entries vs %d "
-                    "embeddings) — resetting index to empty",
-                    len(self.entries), self.embeddings.shape[0],
+                    "IndexStore: %s contains an unreadable embedding, resetting to a fresh "
+                    "empty index: %s", self.db_path, exc,
                 )
                 self.entries = []
-                self.embeddings = np.zeros((0, self.embedding_dim), dtype=np.float32)
+                self._emb_buf = np.zeros((0, self.embedding_dim), dtype=np.float32)
+                self.embeddings = self._emb_buf
 
             self._reindex_lookup()
 
@@ -70,13 +185,7 @@ class IndexStore:
 
     def save(self) -> None:
         with self.lock:
-            tmp_index = self.index_path.with_suffix(".json.tmp")
-            tmp_index.write_text(json.dumps([asdict(e) for e in self.entries]))
-            os.replace(tmp_index, self.index_path)
-
-            tmp_emb = self.embeddings_path.with_suffix(".tmp.npy")
-            np.save(tmp_emb, self.embeddings)
-            os.replace(tmp_emb, self.embeddings_path)
+            self._conn.commit()
 
     def needs_reindex(self, path: Path) -> bool:
         with self.lock:
@@ -88,11 +197,18 @@ class IndexStore:
         return entry.mtime != stat.st_mtime or entry.size != stat.st_size
 
     def upsert(self, entry: ImageEntry, embedding: np.ndarray) -> None:
-        # Updates _by_id/_by_path directly instead of calling _reindex_lookup()
-        # (an O(n) full rebuild of both dicts) on every single call - a full
-        # reindex upserts once per image, so that would make the bookkeeping
-        # alone O(n^2) over a whole library.
         with self.lock:
+            self._conn.execute(
+                "INSERT OR REPLACE INTO images "
+                "(id, path, thumbnail_path, ocr_text, colors, objects, mtime, size, embedding) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                (
+                    entry.id, entry.path, entry.thumbnail_path, entry.ocr_text,
+                    json.dumps(entry.colors), json.dumps(entry.objects),
+                    entry.mtime, entry.size,
+                    np.asarray(embedding, dtype=np.float32).tobytes(),
+                ),
+            )
             if entry.path in self._by_path:
                 i = self._by_path[entry.path]
                 old_id = self.entries[i].id
@@ -102,20 +218,44 @@ class IndexStore:
                     del self._by_id[old_id]
             else:
                 i = len(self.entries)
+                if i >= self._emb_buf.shape[0]:
+                    self._grow_embedding_buffer(current_count=i)
                 self.entries.append(entry)
-                self.embeddings = np.vstack([self.embeddings, embedding[None, :]])
+                self._emb_buf[i] = embedding
+                self.embeddings = self._emb_buf[: i + 1]
                 self._by_path[entry.path] = i
             self._by_id[entry.id] = i
 
+    def _grow_embedding_buffer(self, current_count: int) -> None:
+        """Doubles the backing allocation (min 1024 rows) instead of growing
+        by exactly one row per call — an amortized-O(1) append instead of
+        O(n) per insert / O(n^2) over a full reindex."""
+        new_capacity = max(self._emb_buf.shape[0] * 2, 1024)
+        new_buf = np.zeros((new_capacity, self.embedding_dim), dtype=np.float32)
+        new_buf[:current_count] = self._emb_buf[:current_count]
+        self._emb_buf = new_buf
+
     def prune(self, keep_paths: set[str]) -> None:
-        """Remove entries whose path is not in keep_paths, keeping entries/embeddings aligned."""
         with self.lock:
+            self._conn.execute("CREATE TEMP TABLE IF NOT EXISTS keep_paths (path TEXT PRIMARY KEY)")
+            self._conn.execute("DELETE FROM keep_paths")
+            self._conn.executemany(
+                "INSERT INTO keep_paths (path) VALUES (?)", [(p,) for p in keep_paths]
+            )
+            self._conn.execute("DELETE FROM images WHERE path NOT IN (SELECT path FROM keep_paths)")
+            self._conn.execute("DROP TABLE keep_paths")
+            self._conn.commit()
+
             keep_indices = [i for i, e in enumerate(self.entries) if e.path in keep_paths]
             self.entries = [self.entries[i] for i in keep_indices]
             if keep_indices:
                 self.embeddings = self.embeddings[keep_indices]
             else:
                 self.embeddings = np.zeros((0, self.embedding_dim), dtype=np.float32)
+            # Fancy-indexing (or the empty-case literal) always returns a
+            # fresh, exact-fit array, never a view into the old buffer — safe
+            # to treat as the new backing allocation directly.
+            self._emb_buf = self.embeddings
             self._reindex_lookup()
 
     def get(self, id: str) -> ImageEntry | None:
@@ -136,3 +276,15 @@ class IndexStore:
     def all(self) -> list[ImageEntry]:
         with self.lock:
             return list(self.entries)
+
+    def delete_by_path(self, path: str) -> None:
+        with self.lock:
+            self._conn.execute("DELETE FROM images WHERE path = ?", (path,))
+            self._conn.commit()
+            i = self._by_path.get(path)
+            if i is None:
+                return
+            del self.entries[i]
+            self.embeddings = np.delete(self.embeddings, i, axis=0)
+            self._emb_buf = self.embeddings
+            self._reindex_lookup()
