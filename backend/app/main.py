@@ -114,6 +114,14 @@ def thumbnail_endpoint(image_id: str):
     return FileResponse(entry.thumbnail_path)
 
 
+@app.get("/download/{image_id}")
+def download_endpoint(image_id: str):
+    entry = store.get(image_id)
+    if entry is None:
+        raise HTTPException(status_code=404, detail="image not found")
+    return FileResponse(entry.path, filename=Path(entry.path).name)
+
+
 @app.get("/colors")
 def colors_endpoint():
     return sorted({c for e in store.all() for c in e.colors})

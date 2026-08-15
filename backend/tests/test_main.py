@@ -297,3 +297,30 @@ def test_cors_allowed_origins_configurable_via_env(tmp_path, monkeypatch):
     assert main.config.CORS_ALLOWED_ORIGINS == [
         "http://192.168.1.50:5173", "http://localhost:5173"
     ]
+
+
+def test_download_endpoint_returns_original_file_as_attachment(tmp_path, monkeypatch):
+    main, _ = _fresh_app(tmp_path, monkeypatch)
+    from app.storage import ImageEntry
+
+    original = tmp_path / "original.png"
+    original.write_bytes(b"fake-png-bytes")
+    entry = ImageEntry(
+        id="d1", path=str(original), thumbnail_path=str(tmp_path / "d1.jpg"),
+        ocr_text="", colors=[], objects=[], mtime=0.0, size=0,
+    )
+    main.store.upsert(entry, np.ones(512, dtype=np.float32))
+
+    client = TestClient(main.app)
+    response = client.get("/download/d1")
+
+    assert response.status_code == 200
+    assert response.content == b"fake-png-bytes"
+    assert "attachment" in response.headers["content-disposition"]
+    assert "original.png" in response.headers["content-disposition"]
+
+
+def test_download_endpoint_404_for_unknown_id(tmp_path, monkeypatch):
+    main, _ = _fresh_app(tmp_path, monkeypatch)
+    client = TestClient(main.app)
+    assert client.get("/download/missing").status_code == 404
