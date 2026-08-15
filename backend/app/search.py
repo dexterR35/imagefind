@@ -62,7 +62,9 @@ def find_similar(store: IndexStore, image_id: str, limit: int = 20) -> list[Imag
         sims = store.embeddings @ query_embedding
         sims[self_index] = -np.inf
 
-        k = min(limit, len(entries) - 1)
+        k = min(max(limit, 0), len(entries) - 1)
+        if k == 0:
+            return []
         top = np.argpartition(-sims, k - 1)[:k]
         top = top[np.argsort(-sims[top])]
         return [entries[i] for i in top]

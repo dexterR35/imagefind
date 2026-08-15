@@ -78,20 +78,34 @@ def test_find_similar_unknown_id_returns_none(tmp_path):
 
 
 def test_find_similar_respects_limit_with_many_entries(tmp_path):
-    entries_and_vecs = [(_entry("query"), [1.0, 0.0])]
     # Create 50 entries with known similarities to the query vector [1,0].
-    # Insert them in reverse order (e49, e48, ..., e0) so that storage order
-    # is decoupled from similarity rank — a broken implementation that merely
-    # returned the first k non-self entries in storage order would return
-    # ["e49", "e48", "e47", "e46", "e45"] and fail the test.
+    # Insert them in reverse order (e49, e48, ..., e0) *before* the query
+    # entry, so storage order is decoupled from similarity rank AND the
+    # query itself lands at a non-zero storage index (index 50, not 0) —
+    # a broken self_index computation (e.g. always assuming index 0) would
+    # still incorrectly exclude e49 or fail to exclude the query itself.
+    entries_and_vecs = []
     for i in range(50, 0, -1):
         angle_component = (i - 1) / 100.0
         entries_and_vecs.append(
             (_entry(f"e{i-1}"), [1.0 - angle_component, angle_component])
         )
+    entries_and_vecs.append((_entry("query"), [1.0, 0.0]))
     store = _store_with(tmp_path, entries_and_vecs)
+    assert store._by_id["query"] == 50
 
     result = find_similar(store, "query", limit=5)
 
     assert len(result) == 5
     assert [e.id for e in result] == ["e0", "e1", "e2", "e3", "e4"]
+
+
+def test_find_similar_limit_zero_or_negative_returns_empty_list(tmp_path):
+    store = _store_with(tmp_path, [
+        (_entry("query"), [1.0, 0.0]),
+        (_entry("a"), [0.9, 0.1]),
+        (_entry("b"), [0.0, 1.0]),
+    ])
+
+    assert find_similar(store, "query", limit=0) == []
+    assert find_similar(store, "query", limit=-1) == []

@@ -1,4 +1,5 @@
 import json
+import logging
 import threading
 
 import numpy as np
@@ -240,3 +241,100 @@ def test_delete_by_path_removes_entry_and_keeps_embeddings_aligned(tmp_path):
     reloaded = IndexStore(tmp_path, embedding_dim=4)
     reloaded.load()
     assert reloaded.get("a1") is None
+
+
+def test_migration_marker_prevents_resurrecting_legitimately_pruned_entries(tmp_path):
+    # Regression guard: the migration used to be gated on "table is empty",
+    # which is also true after a legitimate prune(set()) — that would
+    # re-import the never-deleted legacy index.json and resurrect rows that
+    # were deliberately removed. A persistent one-shot marker (PRAGMA
+    # user_version) must survive across IndexStore instances even though the
+    # in-memory table is legitimately empty again.
+    legacy_entry = {
+        "id": "a1", "path": "/imgs/a.png", "thumbnail_path": "/thumbs/a1.jpg",
+        "ocr_text": "NETBET", "colors": ["green"], "objects": ["clover"],
+        "mtime": 123.0, "size": 456,
+    }
+    (tmp_path / "index.json").write_text(json.dumps([legacy_entry]))
+    np.save(tmp_path / "embeddings.npy", np.array([[1.0, 0.0, 0.0, 0.0]], dtype=np.float32))
+
+    store = IndexStore(tmp_path, embedding_dim=4)
+    store.load()
+    assert store.get("a1") is not None  # migration ran once, entry present
+
+    store.prune(set())  # e.g. source folder emptied out
+    store.save()
+    assert store.all() == []
+
+    # A fresh IndexStore over the same dir must NOT re-run the migration just
+    # because the table happens to be empty again - the legacy index.json is
+    # still on disk (left in place per spec) and would otherwise resurrect a1.
+    reloaded = IndexStore(tmp_path, embedding_dim=4)
+    reloaded.load()
+    assert reloaded.all() == []
+
+
+def test_corrupt_db_recovery_also_clears_stale_wal_sidecar(tmp_path):
+    # A stale -wal sidecar surviving a fresh, empty main db file would get
+    # replayed by SQLite into it, silently un-resetting the "fresh empty
+    # index" the corruption-recovery path is supposed to produce.
+    (tmp_path / "index.db").write_bytes(b"not a real sqlite database")
+    (tmp_path / "index.db-wal").write_bytes(b"stale wal bytes that must not be replayed")
+    (tmp_path / "index.db-shm").write_bytes(b"stale shm bytes")
+
+    store = IndexStore(tmp_path, embedding_dim=4)
+    store.load()
+
+    assert store.all() == []
+    assert store.embeddings.shape == (0, 4)
+    assert store.get("a1") is None
+
+
+def test_migration_logs_warning_on_duplicate_ids_but_keeps_last(tmp_path, caplog):
+    legacy_entries = [
+        {
+            "id": "a1", "path": "/imgs/a.png", "thumbnail_path": "/thumbs/a1.jpg",
+            "ocr_text": "first", "colors": [], "objects": [], "mtime": 1.0, "size": 1,
+        },
+        {
+            "id": "a1", "path": "/imgs/a2.png", "thumbnail_path": "/thumbs/a1b.jpg",
+            "ocr_text": "second", "colors": [], "objects": [], "mtime": 2.0, "size": 2,
+        },
+    ]
+    (tmp_path / "index.json").write_text(json.dumps(legacy_entries))
+    np.save(
+        tmp_path / "embeddings.npy",
+        np.array([[1.0, 0, 0, 0], [0, 1.0, 0, 0]], dtype=np.float32),
+    )
+
+    with caplog.at_level(logging.WARNING):
+        store = IndexStore(tmp_path, embedding_dim=4)
+        store.load()
+
+    # Last one wins - one entry survives with the second entry's data - but
+    # it must be observable that a row was silently dropped along the way.
+    assert len(store.all()) == 1
+    assert store.get("a1").ocr_text == "second"
+    assert any("duplicate" in r.message.lower() for r in caplog.records)
+
+
+def test_load_recovers_from_malformed_embedding_blob(tmp_path):
+    store = IndexStore(tmp_path, embedding_dim=4)
+    store.load()
+    # Bypass upsert() to simulate row-level corruption surviving whatever
+    # validation exists elsewhere (e.g. a partial/corrupt write at the SQLite
+    # row level) - "short" is 5 bytes, not a multiple of float32's 4-byte
+    # itemsize, so np.frombuffer raises ValueError on it.
+    store._conn.execute(
+        "INSERT INTO images "
+        "(id, path, thumbnail_path, ocr_text, colors, objects, mtime, size, embedding) "
+        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        ("bad1", "/imgs/bad.png", "/thumbs/bad.jpg", "", "[]", "[]", 0.0, 0, b"short"),
+    )
+    store._conn.commit()
+
+    fresh = IndexStore(tmp_path, embedding_dim=4)
+    fresh.load()  # must not raise, per spec's "reset to empty rather than crash" policy
+
+    assert fresh.all() == []
+    assert fresh.embeddings.shape == (0, 4)

@@ -62,7 +62,8 @@ class IndexStore:
                 "IndexStore: %s is corrupt, resetting to a fresh empty index", self.db_path
             )
             conn.close()
-            self.db_path.unlink(missing_ok=True)
+            for suffix in ("", "-wal", "-shm"):
+                self.db_path.with_name(self.db_path.name + suffix).unlink(missing_ok=True)
             conn = sqlite3.connect(str(self.db_path), check_same_thread=False)
             conn.execute("PRAGMA journal_mode=WAL")
             conn.execute(_SCHEMA)
@@ -100,19 +101,42 @@ class IndexStore:
         except (TypeError, ValueError, KeyError) as exc:
             logger.warning("IndexStore: legacy entry construction failed, skipping migration: %s", exc)
             return
+
+        ids = [r[0] for r in rows]
+        paths = [r[1] for r in rows]
+        if len(set(ids)) != len(ids):
+            logger.warning(
+                "IndexStore: legacy index.json contains %d duplicate id(s); "
+                "only the last entry for each duplicate id will be kept",
+                len(ids) - len(set(ids)),
+            )
+        if len(set(paths)) != len(paths):
+            logger.warning(
+                "IndexStore: legacy index.json contains %d duplicate path(s); "
+                "only the last entry for each duplicate path will be kept",
+                len(paths) - len(set(paths)),
+            )
+
         self._conn.executemany(
             "INSERT OR REPLACE INTO images "
             "(id, path, thumbnail_path, ocr_text, colors, objects, mtime, size, embedding) "
             "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
             rows,
         )
+        # One-shot marker: this table can legitimately become empty again
+        # later (prune(set()), repointed images_dir), so "table is empty"
+        # can't be used to decide whether migration should re-run — that
+        # would resurrect legacy rows that were deliberately deleted. This
+        # PRAGMA persists in the db file itself and is only ever set once,
+        # right after a successful migration.
+        self._conn.execute("PRAGMA user_version = 1")
         self._conn.commit()
 
     def load(self) -> None:
         with self.lock:
             if self.legacy_index_path.exists():
-                count = self._conn.execute("SELECT COUNT(*) FROM images").fetchone()[0]
-                if count == 0:
+                user_version = self._conn.execute("PRAGMA user_version").fetchone()[0]
+                if user_version == 0:
                     self._migrate_from_legacy_files()
 
             rows = self._conn.execute(
@@ -120,21 +144,31 @@ class IndexStore:
                 "mtime, size, embedding FROM images ORDER BY rowid"
             ).fetchall()
 
-            self.entries = []
-            embeddings = []
-            for (id_, path, thumbnail_path, ocr_text, colors_json, objects_json,
-                 mtime, size, embedding_blob) in rows:
-                self.entries.append(ImageEntry(
-                    id=id_, path=path, thumbnail_path=thumbnail_path,
-                    ocr_text=ocr_text, colors=json.loads(colors_json),
-                    objects=json.loads(objects_json), mtime=mtime, size=size,
-                ))
-                embeddings.append(np.frombuffer(embedding_blob, dtype=np.float32))
+            try:
+                entries = []
+                embeddings = []
+                for (id_, path, thumbnail_path, ocr_text, colors_json, objects_json,
+                     mtime, size, embedding_blob) in rows:
+                    entries.append(ImageEntry(
+                        id=id_, path=path, thumbnail_path=thumbnail_path,
+                        ocr_text=ocr_text, colors=json.loads(colors_json),
+                        objects=json.loads(objects_json), mtime=mtime, size=size,
+                    ))
+                    embeddings.append(np.frombuffer(embedding_blob, dtype=np.float32))
 
-            self.embeddings = (
-                np.vstack(embeddings) if embeddings
-                else np.zeros((0, self.embedding_dim), dtype=np.float32)
-            )
+                self.entries = entries
+                self.embeddings = (
+                    np.vstack(embeddings) if embeddings
+                    else np.zeros((0, self.embedding_dim), dtype=np.float32)
+                )
+            except ValueError as exc:
+                logger.warning(
+                    "IndexStore: %s contains an unreadable embedding, resetting to a fresh "
+                    "empty index: %s", self.db_path, exc,
+                )
+                self.entries = []
+                self.embeddings = np.zeros((0, self.embedding_dim), dtype=np.float32)
+
             self._reindex_lookup()
 
     def _reindex_lookup(self) -> None:

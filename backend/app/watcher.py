@@ -7,6 +7,7 @@ from typing import TYPE_CHECKING, Callable
 from watchdog.events import FileSystemEventHandler
 from watchdog.observers import Observer
 
+from . import config
 from .indexer import IMAGE_EXTENSIONS, Indexer
 from .storage import IndexStore
 
@@ -15,7 +16,7 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
-_STABLE_CHECK_INTERVAL = 1.0
+_STABLE_CHECK_INTERVAL = config.WATCHER_STABLE_CHECK_SECONDS
 
 
 def _wait_until_stable(path: Path, checks: int = 3, interval: float = _STABLE_CHECK_INTERVAL) -> bool:
@@ -63,6 +64,11 @@ class _Handler(FileSystemEventHandler):
         if path.suffix.lower() not in IMAGE_EXTENSIONS:
             return
         if not _wait_until_stable(path, interval=_STABLE_CHECK_INTERVAL):
+            return
+        try:
+            if not self._store.needs_reindex(path):
+                return
+        except OSError:
             return
         settings = self._indexer._current_settings()
         try:

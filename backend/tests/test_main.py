@@ -11,6 +11,10 @@ def _fresh_app(tmp_path, monkeypatch):
     images_dir.mkdir()
     monkeypatch.setenv("IMAGES_DIR", str(images_dir))
     monkeypatch.setenv("INDEX_DIR", str(tmp_path / "index"))
+    # A developer's shell may have ENABLE_WATCHER=true set for real deployment
+    # use; every _fresh_app call must start from a clean slate or it would
+    # spin up a real watchdog Observer + reconciliation thread during tests.
+    monkeypatch.delenv("ENABLE_WATCHER", raising=False)
     from app import config, main
     importlib.reload(config)
     importlib.reload(main)
@@ -297,6 +301,13 @@ def test_cors_allowed_origins_configurable_via_env(tmp_path, monkeypatch):
     assert main.config.CORS_ALLOWED_ORIGINS == [
         "http://192.168.1.50:5173", "http://localhost:5173"
     ]
+
+    # Exercise the actual CORSMiddleware wiring, not just the config value —
+    # this would still pass even if main.py's CORSMiddleware line reverted to
+    # a hardcoded origin list, since it never touches the config value above.
+    client = TestClient(main.app)
+    response = client.get("/health", headers={"Origin": "http://192.168.1.50:5173"})
+    assert response.headers["access-control-allow-origin"] == "http://192.168.1.50:5173"
 
 
 def test_download_endpoint_returns_original_file_as_attachment(tmp_path, monkeypatch):
