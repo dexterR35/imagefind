@@ -338,3 +338,36 @@ def test_load_recovers_from_malformed_embedding_blob(tmp_path):
 
     assert fresh.all() == []
     assert fresh.embeddings.shape == (0, 4)
+
+
+def test_upsert_grows_embedding_buffer_by_doubling_not_per_row(tmp_path):
+    # Regression test for upsert()'s O(n)-per-call np.vstack(): the backing
+    # buffer must over-allocate on growth (capacity > count) rather than
+    # reallocating an exact-fit array on every single new-path upsert.
+    store = IndexStore(tmp_path, embedding_dim=4)
+    store.load()
+    n = 1500  # crosses the 1024-row initial-capacity boundary at least once
+    for i in range(n):
+        store.upsert(
+            _entry(id=f"e{i}", path=f"/imgs/e{i}.png"),
+            np.array([float(i), 0.0, 0.0, 1.0], dtype=np.float32),
+        )
+
+    assert len(store.entries) == n
+    assert store.embeddings.shape == (n, 4)
+    # The public view must be exactly n rows even though the backing
+    # allocation is larger - no stray capacity rows ever leak out.
+    assert store._emb_buf.shape[0] >= n
+    assert store._emb_buf.shape[0] > n  # over-allocated, not an exact fit
+
+    # Data integrity across a growth boundary: spot-check first, a
+    # mid-growth, and the last entry.
+    assert store.get_embedding("e0").tolist() == [0.0, 0.0, 0.0, 1.0]
+    assert store.get_embedding("e1023").tolist() == [1023.0, 0.0, 0.0, 1.0]
+    assert store.get_embedding(f"e{n - 1}").tolist() == [float(n - 1), 0.0, 0.0, 1.0]
+
+    store.save()
+    reloaded = IndexStore(tmp_path, embedding_dim=4)
+    reloaded.load()
+    assert reloaded.embeddings.shape == (n, 4)
+    assert reloaded.get_embedding("e750").tolist() == [750.0, 0.0, 0.0, 1.0]

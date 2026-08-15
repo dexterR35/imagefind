@@ -173,3 +173,15 @@
   border-radius: 4px;
   align-self: center;
 }
+
+.download-button {
+  display: inline-block;
+  text-align: center;
+  text-decoration: none;
+  color: inherit;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  padding: 6px 12px;
+  font: inherit;
+  cursor: pointer;
+}

@@ -45,7 +45,13 @@ class IndexStore:
         self.legacy_embeddings_path = self.index_dir / "embeddings.npy"
         self.embedding_dim = embedding_dim
         self.entries: list[ImageEntry] = []
-        self.embeddings: np.ndarray = np.zeros((0, embedding_dim), dtype=np.float32)
+        # self._emb_buf is the real backing allocation; self.embeddings is
+        # always a view self._emb_buf[:len(self.entries)]. Growing it
+        # doubles capacity instead of reallocating exactly len+1 rows on
+        # every single new-path upsert, which is what made upsert() O(n)
+        # per call (and O(n^2) over a full reindex) before this.
+        self._emb_buf: np.ndarray = np.zeros((0, embedding_dim), dtype=np.float32)
+        self.embeddings: np.ndarray = self._emb_buf
         self._by_id: dict[str, int] = {}
         self._by_path: dict[str, int] = {}
         self.lock = threading.RLock()
@@ -157,17 +163,19 @@ class IndexStore:
                     embeddings.append(np.frombuffer(embedding_blob, dtype=np.float32))
 
                 self.entries = entries
-                self.embeddings = (
+                self._emb_buf = (
                     np.vstack(embeddings) if embeddings
                     else np.zeros((0, self.embedding_dim), dtype=np.float32)
                 )
+                self.embeddings = self._emb_buf
             except ValueError as exc:
                 logger.warning(
                     "IndexStore: %s contains an unreadable embedding, resetting to a fresh "
                     "empty index: %s", self.db_path, exc,
                 )
                 self.entries = []
-                self.embeddings = np.zeros((0, self.embedding_dim), dtype=np.float32)
+                self._emb_buf = np.zeros((0, self.embedding_dim), dtype=np.float32)
+                self.embeddings = self._emb_buf
 
             self._reindex_lookup()
 
@@ -210,10 +218,22 @@ class IndexStore:
                     del self._by_id[old_id]
             else:
                 i = len(self.entries)
+                if i >= self._emb_buf.shape[0]:
+                    self._grow_embedding_buffer(current_count=i)
                 self.entries.append(entry)
-                self.embeddings = np.vstack([self.embeddings, embedding[None, :]])
+                self._emb_buf[i] = embedding
+                self.embeddings = self._emb_buf[: i + 1]
                 self._by_path[entry.path] = i
             self._by_id[entry.id] = i
+
+    def _grow_embedding_buffer(self, current_count: int) -> None:
+        """Doubles the backing allocation (min 1024 rows) instead of growing
+        by exactly one row per call — an amortized-O(1) append instead of
+        O(n) per insert / O(n^2) over a full reindex."""
+        new_capacity = max(self._emb_buf.shape[0] * 2, 1024)
+        new_buf = np.zeros((new_capacity, self.embedding_dim), dtype=np.float32)
+        new_buf[:current_count] = self._emb_buf[:current_count]
+        self._emb_buf = new_buf
 
     def prune(self, keep_paths: set[str]) -> None:
         with self.lock:
@@ -232,6 +252,10 @@ class IndexStore:
                 self.embeddings = self.embeddings[keep_indices]
             else:
                 self.embeddings = np.zeros((0, self.embedding_dim), dtype=np.float32)
+            # Fancy-indexing (or the empty-case literal) always returns a
+            # fresh, exact-fit array, never a view into the old buffer — safe
+            # to treat as the new backing allocation directly.
+            self._emb_buf = self.embeddings
             self._reindex_lookup()
 
     def get(self, id: str) -> ImageEntry | None:
@@ -262,4 +286,5 @@ class IndexStore:
                 return
             del self.entries[i]
             self.embeddings = np.delete(self.embeddings, i, axis=0)
+            self._emb_buf = self.embeddings
             self._reindex_lookup()
