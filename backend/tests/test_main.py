@@ -289,3 +289,11 @@ def test_thumbnail_serves_cached_file(tmp_path, monkeypatch):
     assert response.status_code == 200
     assert response.content == b"fake-jpg-bytes"
     assert client.get("/thumbnail/missing").status_code == 404
+
+
+def test_cors_allowed_origins_configurable_via_env(tmp_path, monkeypatch):
+    monkeypatch.setenv("CORS_ALLOWED_ORIGINS", "http://192.168.1.50:5173,http://localhost:5173")
+    main, _ = _fresh_app(tmp_path, monkeypatch)
+    assert main.config.CORS_ALLOWED_ORIGINS == [
+        "http://192.168.1.50:5173", "http://localhost:5173"
+    ]

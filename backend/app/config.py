@@ -36,6 +36,16 @@ IMAGES_DIR = (
     else Path(os.environ.get("IMAGES_DIR", "./images"))
 )
 
+# Which browser origins may call this API. Defaults to the Vite dev server
+# only; set to the server machine's actual LAN address(es) — comma-separated
+# — once other users on the network need to reach it (e.g.
+# "http://192.168.1.50:5173,http://192.168.1.50:3000").
+CORS_ALLOWED_ORIGINS = [
+    origin.strip()
+    for origin in os.environ.get("CORS_ALLOWED_ORIGINS", "http://localhost:5173").split(",")
+    if origin.strip()
+]
+
 # RAM++ (Recognize Anything Model) — automatic open-set tagger, no vocabulary needed.
 # Its checkpoint ships with per-tag tuned thresholds, so RAM_CONFIDENCE defaults to
 # None ("use the model's own thresholds") rather than a single guessed global number;
