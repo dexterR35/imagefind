@@ -102,8 +102,19 @@ def reindex_status(job_id: str):
         raise HTTPException(status_code=404, detail="job not found")
     return {
         "processed": job.processed, "total": job.total, "failed": job.failed,
-        "done": job.done, "error": job.error,
+        "done": job.done, "error": job.error, "cancelled": job.cancelled,
     }
+
+
+@app.post("/reindex/{job_id}/cancel")
+def reindex_cancel(job_id: str):
+    job = jobs.get(job_id)
+    if job is None:
+        raise HTTPException(status_code=404, detail="job not found")
+    if job.done:
+        raise HTTPException(status_code=409, detail="job already finished")
+    job.cancel_event.set()
+    return {"status": "cancelling"}
 
 
 @app.get("/thumbnail/{image_id}")

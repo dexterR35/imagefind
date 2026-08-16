@@ -3,6 +3,7 @@
   "private": true,
   "scripts": {
     "start": "concurrently -n backend,frontend -c blue,green \"npm:start:backend\" \"npm:start:frontend\"",
+    "setup:backend": "node scripts/setup-backend.js",
     "start:backend": "node scripts/start-backend.js",
     "start:frontend": "cd frontend && npm run dev"
   },

@@ -1,6 +1,7 @@
 import logging
+import threading
 import uuid
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 
 import numpy as np
@@ -27,6 +28,9 @@ class ReindexJob:
     failed: int = 0
     done: bool = False
     error: str | None = None
+    cancelled: bool = False
+    # Not exposed to API callers directly - set via Indexer.cancel(job).
+    cancel_event: threading.Event = field(default_factory=threading.Event, repr=False, compare=False)
 
 
 @dataclass
@@ -103,7 +107,18 @@ class Indexer:
             objects_mod.clear_custom_tag_cache()
             paths = self._list_image_paths()
             job.total = len(paths)
+            if paths:
+                # Fails once, up front, with a clear message if the RAM++
+                # checkpoint is missing or corrupt - rather than every single
+                # image failing individually with a cryptic error and nothing
+                # ever getting indexed. Skipped entirely when there's nothing
+                # to process, so an empty (or fully up-to-date) folder never
+                # needs the model at all.
+                objects_mod.ensure_ram_ready()
             for path in paths:
+                if job.cancel_event.is_set():
+                    job.cancelled = True
+                    break
                 try:
                     if force or self.store.needs_reindex(path):
                         entry, embedding = self.process_image(path, settings)
@@ -114,6 +129,13 @@ class Indexer:
                 job.processed += 1
                 if job.processed % 50 == 0:
                     self.store.save()
+            if job.cancelled:
+                # Whatever was already indexed this run stays indexed - the
+                # next reindex picks back up via needs_reindex() - but skip
+                # the prune/final-save pass below since it belongs to a full,
+                # completed scan.
+                self.store.save()
+                return
             # images_dir may be a network mount (e.g. a NAS share) that can
             # disappear out from under the app - Path.rglob() on a missing
             # directory silently returns [] rather than raising, which would

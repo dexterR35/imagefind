@@ -79,6 +79,33 @@ describe("ReindexButton", () => {
     expect(onComplete).not.toHaveBeenCalled();
   });
 
+  it("stops polling and reports partial progress when the job is cancelled", async () => {
+    vi.spyOn(api, "startReindex").mockResolvedValue("job1");
+    vi.spyOn(api, "cancelReindex").mockResolvedValue(undefined);
+    const statusSpy = vi
+      .spyOn(api, "fetchReindexStatus")
+      .mockResolvedValueOnce({ processed: 1, total: 10, failed: 0, done: false, error: null, cancelled: false })
+      .mockResolvedValueOnce({ processed: 1, total: 10, failed: 0, done: true, error: null, cancelled: true });
+    const onComplete = vi.fn();
+
+    render(<ReindexButton onComplete={onComplete} />);
+    fireEvent.click(screen.getByText("Reindex"));
+    await vi.advanceTimersByTimeAsync(500);
+
+    fireEvent.click(screen.getByText("Stop"));
+    await vi.advanceTimersByTimeAsync(0);
+    expect(api.cancelReindex).toHaveBeenCalledWith("job1");
+
+    await vi.advanceTimersByTimeAsync(500);
+
+    expect(statusSpy).toHaveBeenCalledTimes(2);
+    await waitFor(() =>
+      expect(screen.getByText(/reindex stopped.*kept 1 already-processed image/i)).toBeInTheDocument(),
+    );
+    expect(screen.queryByText("Stop")).not.toBeInTheDocument();
+    expect(onComplete).toHaveBeenCalled();
+  });
+
   it("re-enables the button and shows an error if a status poll fails", async () => {
     vi.spyOn(api, "startReindex").mockResolvedValue("job1");
     vi.spyOn(api, "fetchReindexStatus").mockRejectedValue(new Error("lost connection"));

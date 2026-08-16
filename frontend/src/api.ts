@@ -19,6 +19,7 @@ export interface ReindexStatus {
   failed: number;
   done: boolean;
   error: string | null;
+  cancelled: boolean;
 }
 
 export interface Settings {
@@ -94,6 +95,11 @@ export async function fetchReindexStatus(jobId: string): Promise<ReindexStatus> 
   const res = await fetch(`${BASE_URL}/reindex/status/${jobId}`);
   if (!res.ok) throw new Error(`fetch reindex status failed: ${res.status}`);
   return res.json();
+}
+
+export async function cancelReindex(jobId: string): Promise<void> {
+  const res = await fetch(`${BASE_URL}/reindex/${jobId}/cancel`, { method: "POST" });
+  if (!res.ok) throw new Error(await errorDetail(res));
 }
 
 export async function fetchSettings(): Promise<Settings> {

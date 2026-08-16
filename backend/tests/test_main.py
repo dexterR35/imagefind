@@ -39,7 +39,9 @@ def test_reindex_on_empty_folder_completes_immediately(tmp_path, monkeypatch):
             break
         time.sleep(0.05)
 
-    assert status == {"processed": 0, "total": 0, "failed": 0, "done": True, "error": None}
+    assert status == {
+        "processed": 0, "total": 0, "failed": 0, "done": True, "error": None, "cancelled": False,
+    }
 
 
 def test_second_reindex_while_one_is_running_returns_409(tmp_path, monkeypatch):
@@ -61,6 +63,48 @@ def test_second_reindex_while_one_is_running_returns_409(tmp_path, monkeypatch):
         assert second.status_code == 409
     finally:
         release.set()
+
+
+def test_cancel_reindex_sets_the_job_cancel_event(tmp_path, monkeypatch):
+    main, _ = _fresh_app(tmp_path, monkeypatch)
+    release = threading.Event()
+
+    def fake_run_reindex(job, force=False):
+        release.wait(timeout=5)
+        job.done = True
+
+    monkeypatch.setattr(main.indexer, "run_reindex", fake_run_reindex)
+    client = TestClient(main.app)
+
+    job_id = client.post("/reindex").json()["job_id"]
+    try:
+        response = client.post(f"/reindex/{job_id}/cancel")
+        assert response.status_code == 200
+        assert main.jobs[job_id].cancel_event.is_set()
+    finally:
+        release.set()
+
+
+def test_cancel_reindex_returns_404_for_unknown_job(tmp_path, monkeypatch):
+    main, _ = _fresh_app(tmp_path, monkeypatch)
+    client = TestClient(main.app)
+    assert client.post("/reindex/does-not-exist/cancel").status_code == 404
+
+
+def test_cancel_reindex_returns_409_for_an_already_finished_job(tmp_path, monkeypatch):
+    main, _ = _fresh_app(tmp_path, monkeypatch)
+    client = TestClient(main.app)
+    job_id = client.post("/reindex").json()["job_id"]
+
+    status = {}
+    for _ in range(40):
+        status = client.get(f"/reindex/status/{job_id}").json()
+        if status["done"]:
+            break
+        time.sleep(0.05)
+    assert status["done"] is True
+
+    assert client.post(f"/reindex/{job_id}/cancel").status_code == 409
 
 
 def test_watcher_disabled_by_default(tmp_path, monkeypatch):

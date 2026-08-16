@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from "react";
-import { fetchReindexStatus, startReindex, type ReindexStatus } from "./api";
+import { cancelReindex, fetchReindexStatus, startReindex, type ReindexStatus } from "./api";
 
 interface Props {
   onComplete: () => void;
@@ -8,7 +8,9 @@ interface Props {
 export function ReindexButton({ onComplete }: Props) {
   const [status, setStatus] = useState<ReindexStatus | null>(null);
   const [running, setRunning] = useState(false);
+  const [stopping, setStopping] = useState(false);
   const pollRef = useRef<number | null>(null);
+  const jobIdRef = useRef<string | null>(null);
   // handleClick's setInterval callback closes over whatever it captures at
   // click time and keeps using that for the whole poll — a plain `onComplete`
   // reference would go stale if the parent passes a new one (e.g. because
@@ -33,6 +35,7 @@ export function ReindexButton({ onComplete }: Props) {
 
   async function handleClick() {
     setRunning(true);
+    setStopping(false);
     setStatus(null);
     let jobId: string;
     try {
@@ -40,10 +43,11 @@ export function ReindexButton({ onComplete }: Props) {
     } catch {
       // startReindex itself failed, so no polling ever starts — without this
       // catch the button would stay disabled ("Reindexing...") forever.
-      setStatus({ processed: 0, total: 0, failed: 0, done: true, error: "Failed to start reindex." });
+      setStatus({ processed: 0, total: 0, failed: 0, done: true, error: "Failed to start reindex.", cancelled: false });
       setRunning(false);
       return;
     }
+    jobIdRef.current = jobId;
 
     pollRef.current = window.setInterval(async () => {
       try {
@@ -52,17 +56,31 @@ export function ReindexButton({ onComplete }: Props) {
         if (s.done) {
           stopPolling();
           setRunning(false);
+          setStopping(false);
+          jobIdRef.current = null;
           onCompleteRef.current();
         }
       } catch {
         stopPolling();
         setRunning(false);
+        setStopping(false);
+        jobIdRef.current = null;
         setStatus({
-          processed: 0, total: 0, failed: 0, done: true,
+          processed: 0, total: 0, failed: 0, done: true, cancelled: false,
           error: "Lost connection while checking reindex status.",
         });
       }
     }, 500);
+  }
+
+  async function handleStop() {
+    if (!jobIdRef.current) return;
+    setStopping(true);
+    try {
+      await cancelReindex(jobIdRef.current);
+    } catch {
+      setStopping(false);
+    }
   }
 
   return (
@@ -70,10 +88,18 @@ export function ReindexButton({ onComplete }: Props) {
       <button type="button" onClick={handleClick} disabled={running}>
         {running ? "Reindexing..." : "Reindex"}
       </button>
+      {running && (
+        <button type="button" onClick={handleStop} disabled={stopping}>
+          {stopping ? "Stopping..." : "Stop"}
+        </button>
+      )}
       {status && !status.done && (
         <span>
           {status.processed} / {status.total}
         </span>
+      )}
+      {status?.done && status.cancelled && (
+        <span>Reindex stopped — kept {status.processed} already-processed image(s).</span>
       )}
       {status?.done && status.failed > 0 && (
         <span className="reindex-error">{status.failed} image(s) failed to index — check server logs.</span>

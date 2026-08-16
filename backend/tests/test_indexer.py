@@ -1,10 +1,20 @@
 import numpy as np
+import pytest
 from PIL import Image
 
 from app import config
 from app import objects as objects_mod
 from app.indexer import Indexer, ReindexJob
 from app.storage import ImageEntry, IndexStore
+
+
+@pytest.fixture(autouse=True)
+def _skip_real_ram_load(monkeypatch):
+    # These tests exercise the reindex loop's own logic (skipping, pruning,
+    # cancellation, periodic saves, ...) via a fake process_image and have
+    # nothing to do with RAM++ itself - stub out the eager readiness check
+    # so they don't need a real multi-GB checkpoint on disk to pass.
+    monkeypatch.setattr(objects_mod, "ensure_ram_ready", lambda: None)
 
 
 def _make_images(images_dir, count=2):
@@ -307,3 +317,60 @@ def test_run_reindex_clears_custom_tag_embedding_cache_at_start(tmp_path, monkey
     # Otherwise adding/changing reference images for an existing custom tag
     # and reindexing wouldn't actually pick them up until a full restart.
     assert "zeus" not in objects_mod._tag_embedding_cache
+
+
+def test_run_reindex_fails_fast_without_processing_any_images_when_ram_not_ready(tmp_path, monkeypatch):
+    images_dir = tmp_path / "images"
+    _make_images(images_dir, count=3)
+
+    index_dir = tmp_path / "index"
+    store = IndexStore(index_dir, embedding_dim=512)
+    store.load()
+    indexer = Indexer(images_dir, index_dir, store)
+
+    def _boom():
+        raise FileNotFoundError("RAM++ checkpoint not found at '...'")
+
+    monkeypatch.setattr(objects_mod, "ensure_ram_ready", _boom)
+    calls = []
+    monkeypatch.setattr(indexer, "process_image", lambda p, s: calls.append(p))
+
+    job = ReindexJob(id="job1")
+    indexer.run_reindex(job)
+
+    assert calls == [], "no image should be attempted once the RAM++ readiness check fails"
+    assert job.processed == 0
+    assert job.failed == 0
+    assert job.done is True
+    assert job.error is not None and "checkpoint" in job.error.lower()
+    assert len(store.all()) == 0
+
+
+def test_run_reindex_stops_when_cancelled_and_keeps_partial_progress(tmp_path, monkeypatch):
+    images_dir = tmp_path / "images"
+    _make_images(images_dir, count=3)
+
+    index_dir = tmp_path / "index"
+    store = IndexStore(index_dir, embedding_dim=512)
+    store.load()
+    indexer = Indexer(images_dir, index_dir, store)
+
+    job = ReindexJob(id="job1")
+    fake_process = _fake_process_image(index_dir)
+
+    def process_then_cancel(path, settings):
+        # Simulate a stop request arriving while the first image is
+        # in-flight - the loop should notice it before starting the next one.
+        result = fake_process(path, settings)
+        job.cancel_event.set()
+        return result
+
+    monkeypatch.setattr(indexer, "process_image", process_then_cancel)
+
+    indexer.run_reindex(job)
+
+    assert job.cancelled is True
+    assert job.done is True
+    assert job.error is None
+    assert job.processed == 1
+    assert len(store.all()) == 1, "the one image already processed before cancelling must stay indexed"

@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import {
+  cancelReindex,
   fetchReindexStatus,
   fetchSettings,
   startReindex,
@@ -17,8 +18,10 @@ export function Settings({ onReindexComplete }: Props) {
   const [settings, setSettings] = useState<SettingsType | null>(null);
   const [customTagsText, setCustomTagsText] = useState("");
   const [saving, setSaving] = useState(false);
+  const [stopping, setStopping] = useState(false);
   const [status, setStatus] = useState<ReindexStatus | null>(null);
   const pollRef = useRef<number | null>(null);
+  const jobIdRef = useRef<string | null>(null);
 
   useEffect(() => {
     if (open && settings === null) {
@@ -62,7 +65,7 @@ export function Settings({ onReindexComplete }: Props) {
     } catch (err) {
       setSaving(false);
       setStatus({
-        processed: 0, total: 0, failed: 0, done: true,
+        processed: 0, total: 0, failed: 0, done: true, cancelled: false,
         error: `Failed to save settings: ${err instanceof Error ? err.message : String(err)}`,
       });
       return;
@@ -74,11 +77,12 @@ export function Settings({ onReindexComplete }: Props) {
     } catch (err) {
       setSaving(false);
       setStatus({
-        processed: 0, total: 0, failed: 0, done: true,
+        processed: 0, total: 0, failed: 0, done: true, cancelled: false,
         error: `Settings saved, but failed to start reindex: ${err instanceof Error ? err.message : String(err)}`,
       });
       return;
     }
+    jobIdRef.current = jobId;
 
     pollRef.current = window.setInterval(async () => {
       try {
@@ -87,17 +91,31 @@ export function Settings({ onReindexComplete }: Props) {
         if (s.done) {
           stopPolling();
           setSaving(false);
+          setStopping(false);
+          jobIdRef.current = null;
           onReindexComplete();
         }
       } catch {
         stopPolling();
         setSaving(false);
+        setStopping(false);
+        jobIdRef.current = null;
         setStatus({
-          processed: 0, total: 0, failed: 0, done: true,
+          processed: 0, total: 0, failed: 0, done: true, cancelled: false,
           error: "Lost connection while checking reindex status.",
         });
       }
     }, 500);
+  }
+
+  async function handleStopReindex() {
+    if (!jobIdRef.current) return;
+    setStopping(true);
+    try {
+      await cancelReindex(jobIdRef.current);
+    } catch {
+      setStopping(false);
+    }
   }
 
   return (
@@ -139,10 +157,18 @@ export function Settings({ onReindexComplete }: Props) {
           <button type="button" onClick={handleSaveAndReindex} disabled={saving}>
             {saving ? "Reindexing..." : "Save & Reindex"}
           </button>
+          {saving && (
+            <button type="button" onClick={handleStopReindex} disabled={stopping}>
+              {stopping ? "Stopping..." : "Stop"}
+            </button>
+          )}
           {status && !status.done && (
             <span>
               {status.processed} / {status.total}
             </span>
+          )}
+          {status?.done && status.cancelled && (
+            <span>Reindex stopped — kept {status.processed} already-processed image(s).</span>
           )}
           {status?.done && status.failed > 0 && (
             <span className="reindex-error">{status.failed} image(s) failed to index — check server logs.</span>

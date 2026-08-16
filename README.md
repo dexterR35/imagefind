@@ -16,6 +16,19 @@ scrolling through folders looking for the one you remember.
 - **Search box** — type a word and it finds every image where that word shows up,
   either as something the app recognized in the picture or as text printed on it.
 
+## Setup
+
+First time on a machine (needs Python 3.10+ and Node.js):
+
+```
+npm install
+npm run setup:backend   # creates backend/.venv and installs Python deps
+npm start                # starts backend (port 8000) and frontend (port 5173+)
+```
+
+If you have an NVIDIA GPU and want CUDA-accelerated inference, run
+`npm run setup:backend -- --cuda` instead.
+
 ## How it works
 
 Run **Reindex** once (and again any time you add new pictures). The app looks at
