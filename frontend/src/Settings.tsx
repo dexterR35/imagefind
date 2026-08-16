@@ -59,20 +59,23 @@ export function Settings({ onReindexComplete }: Props) {
     try {
       const saved = await updateSettings({ ...settings, ram_custom_tags });
       setSettings(saved);
-    } catch {
+    } catch (err) {
       setSaving(false);
-      setStatus({ processed: 0, total: 0, failed: 0, done: true, error: "Failed to save settings." });
+      setStatus({
+        processed: 0, total: 0, failed: 0, done: true,
+        error: `Failed to save settings: ${err instanceof Error ? err.message : String(err)}`,
+      });
       return;
     }
 
     let jobId: string;
     try {
       jobId = await startReindex(true);
-    } catch {
+    } catch (err) {
       setSaving(false);
       setStatus({
         processed: 0, total: 0, failed: 0, done: true,
-        error: "Settings saved, but failed to start reindex (a reindex may already be running).",
+        error: `Settings saved, but failed to start reindex: ${err instanceof Error ? err.message : String(err)}`,
       });
       return;
     }

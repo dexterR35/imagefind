@@ -27,7 +27,23 @@ export interface Settings {
   images_dir: string;
 }
 
-const BASE_URL = "http://localhost:8000";
+// Override with VITE_API_BASE_URL when the frontend is served to a different
+// machine than the backend (e.g. over LAN) — "localhost" would otherwise
+// resolve to the viewer's own device instead of the server.
+const BASE_URL = import.meta.env.VITE_API_BASE_URL ?? "http://localhost:8000";
+
+async function errorDetail(res: Response): Promise<string> {
+  try {
+    const body = await res.json();
+    if (typeof body.detail === "string") return body.detail;
+    if (Array.isArray(body.detail)) {
+      return body.detail.map((d: { msg?: string }) => d.msg ?? JSON.stringify(d)).join("; ");
+    }
+  } catch {
+    // response body wasn't JSON (or had no detail) — fall through to status text
+  }
+  return res.statusText || `status ${res.status}`;
+}
 
 export async function fetchColors(): Promise<string[]> {
   const res = await fetch(`${BASE_URL}/colors`);
@@ -69,7 +85,7 @@ export async function findSimilar(imageId: string): Promise<ImageResult[]> {
 
 export async function startReindex(force = false): Promise<string> {
   const res = await fetch(`${BASE_URL}/reindex?force=${force}`, { method: "POST" });
-  if (!res.ok) throw new Error(`start reindex failed: ${res.status}`);
+  if (!res.ok) throw new Error(await errorDetail(res));
   const data = await res.json();
   return data.job_id;
 }
@@ -82,7 +98,7 @@ export async function fetchReindexStatus(jobId: string): Promise<ReindexStatus> 
 
 export async function fetchSettings(): Promise<Settings> {
   const res = await fetch(`${BASE_URL}/settings`);
-  if (!res.ok) throw new Error(`fetch settings failed: ${res.status}`);
+  if (!res.ok) throw new Error(await errorDetail(res));
   return res.json();
 }
 
@@ -92,6 +108,6 @@ export async function updateSettings(settings: Settings): Promise<Settings> {
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(settings),
   });
-  if (!res.ok) throw new Error(`update settings failed: ${res.status}`);
+  if (!res.ok) throw new Error(await errorDetail(res));
   return res.json();
 }
