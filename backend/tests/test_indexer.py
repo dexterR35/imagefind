@@ -31,10 +31,35 @@ def _fake_process_image(index_dir):
             id=path.name, path=str(path),
             thumbnail_path=str(index_dir / "thumbnails" / f"{path.name}.jpg"),
             ocr_text="", colors=[], objects=[], mtime=stat.st_mtime, size=stat.st_size,
+            width=64, height=64, format="PNG", date_taken=stat.st_mtime, indexed_at=1.0,
         )
         return entry, np.zeros(512, dtype=np.float32)
 
     return process
+
+
+def test_process_image_captures_dimensions_format_and_falls_back_date_taken(tmp_path):
+    # Exercises the real pipeline (no monkeypatching of process_image itself)
+    # to verify width/height/format/date_taken are actually populated from
+    # the file - a synthetic PNG with no EXIF, so date_taken must fall back
+    # to the file's mtime.
+    images_dir = tmp_path / "images"
+    images_dir.mkdir()
+    img_path = images_dir / "photo.png"
+    Image.new("RGB", (64, 48), (10, 20, 30)).save(img_path)
+    expected_mtime = img_path.stat().st_mtime
+
+    index_dir = tmp_path / "index"
+    store = IndexStore(index_dir, embedding_dim=512)
+    store.load()
+    indexer = Indexer(images_dir, index_dir, store)
+
+    entry, _ = indexer.process_image(img_path, indexer._current_settings())
+
+    assert (entry.width, entry.height) == (64, 48)
+    assert entry.format == "PNG"
+    assert entry.date_taken == expected_mtime
+    assert entry.indexed_at > 0
 
 
 def test_run_reindex_processes_new_and_skips_unchanged(tmp_path, monkeypatch):

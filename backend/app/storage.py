@@ -6,6 +6,7 @@ from dataclasses import dataclass, fields
 from pathlib import Path
 
 import numpy as np
+import sqlite_vec
 
 logger = logging.getLogger(__name__)
 
@@ -13,15 +14,70 @@ _SCHEMA = """
 CREATE TABLE IF NOT EXISTS images (
     id TEXT PRIMARY KEY,
     path TEXT UNIQUE NOT NULL,
+    filename TEXT NOT NULL DEFAULT '',
     thumbnail_path TEXT NOT NULL,
     ocr_text TEXT NOT NULL,
-    colors TEXT NOT NULL,
-    objects TEXT NOT NULL,
+    colors TEXT NOT NULL CHECK (json_valid(colors)),
+    objects TEXT NOT NULL CHECK (json_valid(objects)),
     mtime REAL NOT NULL,
     size INTEGER NOT NULL,
+    width INTEGER NOT NULL DEFAULT 0,
+    height INTEGER NOT NULL DEFAULT 0,
+    format TEXT NOT NULL DEFAULT '',
+    date_taken REAL NOT NULL DEFAULT 0,
+    indexed_at REAL NOT NULL DEFAULT 0,
     embedding BLOB NOT NULL
-)
+);
+
+CREATE TABLE IF NOT EXISTS image_colors (
+    image_id TEXT NOT NULL REFERENCES images(id) ON UPDATE CASCADE ON DELETE CASCADE,
+    color TEXT NOT NULL,
+    PRIMARY KEY (image_id, color)
+);
+
+CREATE TABLE IF NOT EXISTS image_objects (
+    image_id TEXT NOT NULL REFERENCES images(id) ON UPDATE CASCADE ON DELETE CASCADE,
+    label TEXT NOT NULL,
+    PRIMARY KEY (image_id, label)
+);
+
+CREATE VIRTUAL TABLE IF NOT EXISTS image_fts USING fts5(
+    ocr_text,
+    objects,
+    tokenize='trigram'
+);
+
+CREATE TABLE IF NOT EXISTS index_store_meta (
+    key TEXT PRIMARY KEY,
+    value TEXT NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS images_date_taken_idx ON images(date_taken, id);
+CREATE INDEX IF NOT EXISTS images_filename_idx ON images(filename COLLATE NOCASE, id);
+CREATE INDEX IF NOT EXISTS images_size_idx ON images(size, id);
+CREATE INDEX IF NOT EXISTS image_colors_color_idx ON image_colors(color, image_id);
+CREATE INDEX IF NOT EXISTS image_objects_label_idx ON image_objects(label, image_id);
 """
+
+_METADATA_COLUMNS = [
+    ("filename", "TEXT NOT NULL DEFAULT ''"),
+    ("width", "INTEGER NOT NULL DEFAULT 0"),
+    ("height", "INTEGER NOT NULL DEFAULT 0"),
+    ("format", "TEXT NOT NULL DEFAULT ''"),
+    ("date_taken", "REAL NOT NULL DEFAULT 0"),
+    ("indexed_at", "REAL NOT NULL DEFAULT 0"),
+]
+
+_SELECT_COLUMNS = (
+    "id, path, thumbnail_path, ocr_text, colors, objects, mtime, size, "
+    "width, height, format, date_taken, indexed_at"
+)
+_INSERT_COLUMNS = (
+    "id, path, filename, thumbnail_path, ocr_text, colors, objects, mtime, size, "
+    "width, height, format, date_taken, indexed_at, embedding"
+)
+_PLACEHOLDERS = ", ".join("?" * 15)
+_DERIVED_SCHEMA_VERSION = "2"
 
 
 @dataclass
@@ -34,9 +90,30 @@ class ImageEntry:
     objects: list[str]
     mtime: float
     size: int
+    width: int = 0
+    height: int = 0
+    format: str = ""
+    date_taken: float = 0.0
+    indexed_at: float = 0.0
+
+
+def _row_to_entry(row: tuple) -> ImageEntry:
+    return ImageEntry(
+        id=row[0], path=row[1], thumbnail_path=row[2], ocr_text=row[3],
+        colors=json.loads(row[4]), objects=json.loads(row[5]),
+        mtime=row[6], size=row[7], width=row[8], height=row[9],
+        format=row[10], date_taken=row[11], indexed_at=row[12],
+    )
 
 
 class IndexStore:
+    """SQLite-backed image index.
+
+    The database is the live query engine, not merely persistence for an
+    in-memory copy. Metadata search uses ordinary indexed SQL/FTS5 and image
+    similarity uses sqlite-vec's vec0 virtual table.
+    """
+
     def __init__(self, index_dir: Path, embedding_dim: int = 512):
         self.index_dir = Path(index_dir)
         self.index_dir.mkdir(parents=True, exist_ok=True)
@@ -44,37 +121,127 @@ class IndexStore:
         self.legacy_index_path = self.index_dir / "index.json"
         self.legacy_embeddings_path = self.index_dir / "embeddings.npy"
         self.embedding_dim = embedding_dim
-        self.entries: list[ImageEntry] = []
-        # self._emb_buf is the real backing allocation; self.embeddings is
-        # always a view self._emb_buf[:len(self.entries)]. Growing it
-        # doubles capacity instead of reallocating exactly len+1 rows on
-        # every single new-path upsert, which is what made upsert() O(n)
-        # per call (and O(n^2) over a full reindex) before this.
-        self._emb_buf: np.ndarray = np.zeros((0, embedding_dim), dtype=np.float32)
-        self.embeddings: np.ndarray = self._emb_buf
-        self._by_id: dict[str, int] = {}
-        self._by_path: dict[str, int] = {}
         self.lock = threading.RLock()
         self._conn = self._open_db()
 
-    def _open_db(self) -> sqlite3.Connection:
+    def _connect(self) -> sqlite3.Connection:
         conn = sqlite3.connect(str(self.db_path), check_same_thread=False)
+        conn.execute("PRAGMA foreign_keys=ON")
+        conn.execute("PRAGMA journal_mode=WAL")
+        conn.execute("PRAGMA busy_timeout=5000")
+        conn.enable_load_extension(True)
         try:
-            conn.execute("PRAGMA journal_mode=WAL")
-            conn.execute(_SCHEMA)
+            sqlite_vec.load(conn)
+        finally:
+            conn.enable_load_extension(False)
+        return conn
+
+    def _open_db(self) -> sqlite3.Connection:
+        try:
+            conn = self._connect()
+        except sqlite3.DatabaseError:
+            logger.warning("IndexStore: %s is corrupt, resetting to a fresh empty index", self.db_path)
+            for suffix in ("", "-wal", "-shm"):
+                self.db_path.with_name(self.db_path.name + suffix).unlink(missing_ok=True)
+            conn = self._connect()
+        try:
+            # The original images table may predate the new columns, so it
+            # must be created/migrated before the rest of the schema refers
+            # to filename in an index.
+            conn.execute(
+                "CREATE TABLE IF NOT EXISTS images ("
+                "id TEXT PRIMARY KEY, path TEXT UNIQUE NOT NULL, filename TEXT NOT NULL DEFAULT '', "
+                "thumbnail_path TEXT NOT NULL, ocr_text TEXT NOT NULL, colors TEXT NOT NULL, "
+                "objects TEXT NOT NULL, mtime REAL NOT NULL, size INTEGER NOT NULL, "
+                "width INTEGER NOT NULL DEFAULT 0, height INTEGER NOT NULL DEFAULT 0, "
+                "format TEXT NOT NULL DEFAULT '', date_taken REAL NOT NULL DEFAULT 0, "
+                "indexed_at REAL NOT NULL DEFAULT 0, embedding BLOB NOT NULL)"
+            )
+            self._migrate_add_metadata_columns(conn)
+            conn.executescript(_SCHEMA)
+            vector_schema = conn.execute(
+                "SELECT sql FROM sqlite_master WHERE type='table' AND name='image_vectors'"
+            ).fetchone()
+            expected_dimension = f"float[{self.embedding_dim}]"
+            if vector_schema and expected_dimension not in vector_schema[0]:
+                # Preserve image rows if a future embedding model changes
+                # dimensions; only the derived vec0 index needs rebuilding.
+                conn.execute("DROP TABLE image_vectors")
+            conn.execute(
+                f"CREATE VIRTUAL TABLE IF NOT EXISTS image_vectors USING vec0("
+                f"embedding float[{self.embedding_dim}] distance_metric=cosine)"
+            )
+            conn.execute(
+                "CREATE TRIGGER IF NOT EXISTS images_delete_derived AFTER DELETE ON images BEGIN "
+                "DELETE FROM image_colors WHERE image_id=OLD.id; "
+                "DELETE FROM image_objects WHERE image_id=OLD.id; "
+                "DELETE FROM image_fts WHERE rowid=OLD.rowid; "
+                "DELETE FROM image_vectors WHERE rowid=OLD.rowid; END"
+            )
             conn.commit()
         except sqlite3.DatabaseError:
-            logger.warning(
-                "IndexStore: %s is corrupt, resetting to a fresh empty index", self.db_path
-            )
+            logger.warning("IndexStore: %s is corrupt, resetting to a fresh empty index", self.db_path)
             conn.close()
             for suffix in ("", "-wal", "-shm"):
                 self.db_path.with_name(self.db_path.name + suffix).unlink(missing_ok=True)
-            conn = sqlite3.connect(str(self.db_path), check_same_thread=False)
-            conn.execute("PRAGMA journal_mode=WAL")
-            conn.execute(_SCHEMA)
+            conn = self._connect()
+            conn.executescript(_SCHEMA)
+            conn.execute(
+                f"CREATE VIRTUAL TABLE image_vectors USING vec0("
+                f"embedding float[{self.embedding_dim}] distance_metric=cosine)"
+            )
+            conn.execute(
+                "CREATE TRIGGER images_delete_derived AFTER DELETE ON images BEGIN "
+                "DELETE FROM image_colors WHERE image_id=OLD.id; "
+                "DELETE FROM image_objects WHERE image_id=OLD.id; "
+                "DELETE FROM image_fts WHERE rowid=OLD.rowid; "
+                "DELETE FROM image_vectors WHERE rowid=OLD.rowid; END"
+            )
             conn.commit()
         return conn
+
+    @staticmethod
+    def _migrate_add_metadata_columns(conn: sqlite3.Connection) -> None:
+        existing = {row[1] for row in conn.execute("PRAGMA table_info(images)").fetchall()}
+        for name, decl in _METADATA_COLUMNS:
+            if name not in existing:
+                conn.execute(f"ALTER TABLE images ADD COLUMN {name} {decl}")
+
+    def _entry_values(self, entry: ImageEntry, embedding: np.ndarray) -> tuple:
+        vector = np.asarray(embedding, dtype=np.float32)
+        if vector.shape != (self.embedding_dim,):
+            raise ValueError(
+                f"embedding for {entry.id!r} has shape {vector.shape}; "
+                f"expected ({self.embedding_dim},)"
+            )
+        return (
+            entry.id, entry.path, Path(entry.path).name, entry.thumbnail_path,
+            entry.ocr_text, json.dumps(entry.colors), json.dumps(entry.objects),
+            entry.mtime, entry.size, entry.width, entry.height, entry.format,
+            entry.date_taken, entry.indexed_at, vector.tobytes(),
+        )
+
+    def _sync_derived(self, rowid: int, entry: ImageEntry, embedding: np.ndarray) -> None:
+        self._conn.execute("DELETE FROM image_colors WHERE image_id=?", (entry.id,))
+        self._conn.execute("DELETE FROM image_objects WHERE image_id=?", (entry.id,))
+        self._conn.execute("DELETE FROM image_fts WHERE rowid=?", (rowid,))
+        self._conn.execute("DELETE FROM image_vectors WHERE rowid=?", (rowid,))
+        self._conn.executemany(
+            "INSERT INTO image_colors(image_id, color) VALUES (?, ?)",
+            [(entry.id, color) for color in sorted(set(entry.colors))],
+        )
+        self._conn.executemany(
+            "INSERT INTO image_objects(image_id, label) VALUES (?, ?)",
+            [(entry.id, label) for label in sorted(set(entry.objects))],
+        )
+        self._conn.execute(
+            "INSERT INTO image_fts(rowid, ocr_text, objects) VALUES (?, ?, ?)",
+            (rowid, entry.ocr_text, " ".join(entry.objects)),
+        )
+        self._conn.execute(
+            "INSERT INTO image_vectors(rowid, embedding) VALUES (?, ?)",
+            (rowid, np.asarray(embedding, dtype=np.float32)),
+        )
 
     def _migrate_from_legacy_files(self) -> None:
         try:
@@ -88,54 +255,72 @@ class IndexStore:
             logger.warning("IndexStore: legacy embeddings.npy unreadable, skipping migration")
             return
         if len(data) != legacy_embeddings.shape[0]:
-            logger.warning(
-                "IndexStore: legacy entries/embeddings length mismatch, skipping migration"
-            )
+            logger.warning("IndexStore: legacy entries/embeddings length mismatch, skipping migration")
             return
 
-        known_fields = {f.name for f in fields(ImageEntry)}
-        rows = []
+        known_fields = {field.name for field in fields(ImageEntry)}
+        entries: list[tuple[ImageEntry, np.ndarray]] = []
         try:
-            for i, e in enumerate(data):
-                entry = ImageEntry(**{k: v for k, v in e.items() if k in known_fields})
-                rows.append((
-                    entry.id, entry.path, entry.thumbnail_path, entry.ocr_text,
-                    json.dumps(entry.colors), json.dumps(entry.objects),
-                    entry.mtime, entry.size,
-                    legacy_embeddings[i].astype(np.float32).tobytes(),
-                ))
+            for index, raw in enumerate(data):
+                entry = ImageEntry(**{key: value for key, value in raw.items() if key in known_fields})
+                vector = np.asarray(legacy_embeddings[index], dtype=np.float32)
+                self._entry_values(entry, vector)
+                entries.append((entry, vector))
         except (TypeError, ValueError, KeyError) as exc:
             logger.warning("IndexStore: legacy entry construction failed, skipping migration: %s", exc)
             return
 
-        ids = [r[0] for r in rows]
-        paths = [r[1] for r in rows]
-        if len(set(ids)) != len(ids):
-            logger.warning(
-                "IndexStore: legacy index.json contains %d duplicate id(s); "
-                "only the last entry for each duplicate id will be kept",
-                len(ids) - len(set(ids)),
-            )
-        if len(set(paths)) != len(paths):
-            logger.warning(
-                "IndexStore: legacy index.json contains %d duplicate path(s); "
-                "only the last entry for each duplicate path will be kept",
-                len(paths) - len(set(paths)),
-            )
+        ids = [entry.id for entry, _ in entries]
+        paths = [entry.path for entry, _ in entries]
+        duplicate_count = (len(ids) - len(set(ids))) + (len(paths) - len(set(paths)))
+        if duplicate_count:
+            logger.warning("IndexStore: legacy index contains %d duplicate id/path value(s); last wins", duplicate_count)
 
-        self._conn.executemany(
-            "INSERT OR REPLACE INTO images "
-            "(id, path, thumbnail_path, ocr_text, colors, objects, mtime, size, embedding) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
-            rows,
-        )
-        # One-shot marker: this table can legitimately become empty again
-        # later (prune(set()), repointed images_dir), so "table is empty"
-        # can't be used to decide whether migration should re-run — that
-        # would resurrect legacy rows that were deliberately deleted. This
-        # PRAGMA persists in the db file itself and is only ever set once,
-        # right after a successful migration.
+        for entry, vector in entries:
+            # Preserve the legacy INSERT OR REPLACE behavior for duplicate
+            # ids and paths: later rows in index.json win deterministically.
+            self._conn.execute(
+                "DELETE FROM images WHERE id=? OR path=?", (entry.id, entry.path)
+            )
+            self.upsert(entry, vector)
         self._conn.execute("PRAGMA user_version = 1")
+        self._conn.commit()
+
+    def _derived_indexes_need_rebuild(self) -> bool:
+        version_row = self._conn.execute(
+            "SELECT value FROM index_store_meta WHERE key='derived_schema_version'"
+        ).fetchone()
+        version = f"{_DERIVED_SCHEMA_VERSION}:{self.embedding_dim}"
+        if version_row != (version,):
+            return True
+        image_count = self._conn.execute("SELECT count(*) FROM images").fetchone()[0]
+        vector_count = self._conn.execute("SELECT count(*) FROM image_vectors").fetchone()[0]
+        fts_count = self._conn.execute("SELECT count(*) FROM image_fts").fetchone()[0]
+        return image_count != vector_count or image_count != fts_count
+
+    def _rebuild_derived_indexes(self) -> None:
+        self._conn.execute("DELETE FROM image_colors")
+        self._conn.execute("DELETE FROM image_objects")
+        self._conn.execute("DELETE FROM image_fts")
+        self._conn.execute("DELETE FROM image_vectors")
+        rows = self._conn.execute(
+            f"SELECT rowid, {_SELECT_COLUMNS}, embedding FROM images ORDER BY rowid"
+        ).fetchall()
+        for row in rows:
+            rowid = row[0]
+            entry = _row_to_entry(row[1:14])
+            vector = np.frombuffer(row[14], dtype=np.float32)
+            if vector.shape != (self.embedding_dim,):
+                raise ValueError(f"unreadable embedding for {entry.id!r}")
+            self._conn.execute(
+                "UPDATE images SET filename=? WHERE rowid=?",
+                (Path(entry.path).name, rowid),
+            )
+            self._sync_derived(rowid, entry, vector)
+        self._conn.execute(
+            "INSERT OR REPLACE INTO index_store_meta(key, value) VALUES ('derived_schema_version', ?)",
+            (f"{_DERIVED_SCHEMA_VERSION}:{self.embedding_dim}",),
+        )
         self._conn.commit()
 
     def load(self) -> None:
@@ -144,147 +329,188 @@ class IndexStore:
                 user_version = self._conn.execute("PRAGMA user_version").fetchone()[0]
                 if user_version == 0:
                     self._migrate_from_legacy_files()
-
-            rows = self._conn.execute(
-                "SELECT id, path, thumbnail_path, ocr_text, colors, objects, "
-                "mtime, size, embedding FROM images ORDER BY rowid"
-            ).fetchall()
-
             try:
-                entries = []
-                embeddings = []
-                for (id_, path, thumbnail_path, ocr_text, colors_json, objects_json,
-                     mtime, size, embedding_blob) in rows:
-                    entries.append(ImageEntry(
-                        id=id_, path=path, thumbnail_path=thumbnail_path,
-                        ocr_text=ocr_text, colors=json.loads(colors_json),
-                        objects=json.loads(objects_json), mtime=mtime, size=size,
-                    ))
-                    embeddings.append(np.frombuffer(embedding_blob, dtype=np.float32))
-
-                self.entries = entries
-                self._emb_buf = (
-                    np.vstack(embeddings) if embeddings
-                    else np.zeros((0, self.embedding_dim), dtype=np.float32)
-                )
-                self.embeddings = self._emb_buf
-            except ValueError as exc:
+                if self._derived_indexes_need_rebuild():
+                    self._rebuild_derived_indexes()
+            except (json.JSONDecodeError, sqlite3.DatabaseError, ValueError) as exc:
                 logger.warning(
-                    "IndexStore: %s contains an unreadable embedding, resetting to a fresh "
-                    "empty index: %s", self.db_path, exc,
+                    "IndexStore: %s contains unreadable indexed data, resetting to empty: %s",
+                    self.db_path, exc,
                 )
-                self.entries = []
-                self._emb_buf = np.zeros((0, self.embedding_dim), dtype=np.float32)
-                self.embeddings = self._emb_buf
-
-            self._reindex_lookup()
-
-    def _reindex_lookup(self) -> None:
-        self._by_id = {e.id: i for i, e in enumerate(self.entries)}
-        self._by_path = {e.path: i for i, e in enumerate(self.entries)}
+                self._conn.execute("DELETE FROM images")
+                self._conn.execute("DELETE FROM image_colors")
+                self._conn.execute("DELETE FROM image_objects")
+                self._conn.execute("DELETE FROM image_fts")
+                self._conn.execute("DELETE FROM image_vectors")
+                self._conn.commit()
 
     def save(self) -> None:
         with self.lock:
             self._conn.commit()
 
     def needs_reindex(self, path: Path) -> bool:
-        with self.lock:
-            key = str(path)
-            if key not in self._by_path:
-                return True
-            entry = self.entries[self._by_path[key]]
-        stat = Path(path).stat()
-        return entry.mtime != stat.st_mtime or entry.size != stat.st_size
+        entry = self.get_by_path(str(path))
+        if entry is None:
+            return True
+        stat = path.stat()
+        metadata_missing = (
+            entry.width <= 0 or entry.height <= 0 or not entry.format
+            or entry.date_taken <= 0 or entry.indexed_at <= 0
+        )
+        return metadata_missing or entry.mtime != stat.st_mtime or entry.size != stat.st_size
 
     def upsert(self, entry: ImageEntry, embedding: np.ndarray) -> None:
         with self.lock:
-            self._conn.execute(
-                "INSERT OR REPLACE INTO images "
-                "(id, path, thumbnail_path, ocr_text, colors, objects, mtime, size, embedding) "
-                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
-                (
-                    entry.id, entry.path, entry.thumbnail_path, entry.ocr_text,
-                    json.dumps(entry.colors), json.dumps(entry.objects),
-                    entry.mtime, entry.size,
-                    np.asarray(embedding, dtype=np.float32).tobytes(),
-                ),
-            )
-            if entry.path in self._by_path:
-                i = self._by_path[entry.path]
-                old_id = self.entries[i].id
-                self.entries[i] = entry
-                self.embeddings[i] = embedding
-                if old_id != entry.id:
-                    del self._by_id[old_id]
-            else:
-                i = len(self.entries)
-                if i >= self._emb_buf.shape[0]:
-                    self._grow_embedding_buffer(current_count=i)
-                self.entries.append(entry)
-                self._emb_buf[i] = embedding
-                self.embeddings = self._emb_buf[: i + 1]
-                self._by_path[entry.path] = i
-            self._by_id[entry.id] = i
-
-    def _grow_embedding_buffer(self, current_count: int) -> None:
-        """Doubles the backing allocation (min 1024 rows) instead of growing
-        by exactly one row per call — an amortized-O(1) append instead of
-        O(n) per insert / O(n^2) over a full reindex."""
-        new_capacity = max(self._emb_buf.shape[0] * 2, 1024)
-        new_buf = np.zeros((new_capacity, self.embedding_dim), dtype=np.float32)
-        new_buf[:current_count] = self._emb_buf[:current_count]
-        self._emb_buf = new_buf
+            values = self._entry_values(entry, embedding)
+            row = self._conn.execute(
+                f"INSERT INTO images ({_INSERT_COLUMNS}) VALUES ({_PLACEHOLDERS}) "
+                "ON CONFLICT(path) DO UPDATE SET "
+                "id=excluded.id, filename=excluded.filename, thumbnail_path=excluded.thumbnail_path, "
+                "ocr_text=excluded.ocr_text, colors=excluded.colors, objects=excluded.objects, "
+                "mtime=excluded.mtime, size=excluded.size, width=excluded.width, height=excluded.height, "
+                "format=excluded.format, date_taken=excluded.date_taken, indexed_at=excluded.indexed_at, "
+                "embedding=excluded.embedding RETURNING rowid",
+                values,
+            ).fetchone()
+            self._sync_derived(row[0], entry, embedding)
 
     def prune(self, keep_paths: set[str]) -> None:
         with self.lock:
-            self._conn.execute("CREATE TEMP TABLE IF NOT EXISTS keep_paths (path TEXT PRIMARY KEY)")
+            self._conn.execute("CREATE TEMP TABLE IF NOT EXISTS keep_paths(path TEXT PRIMARY KEY)")
             self._conn.execute("DELETE FROM keep_paths")
-            self._conn.executemany(
-                "INSERT INTO keep_paths (path) VALUES (?)", [(p,) for p in keep_paths]
-            )
+            self._conn.executemany("INSERT INTO keep_paths(path) VALUES (?)", [(path,) for path in keep_paths])
             self._conn.execute("DELETE FROM images WHERE path NOT IN (SELECT path FROM keep_paths)")
             self._conn.execute("DROP TABLE keep_paths")
             self._conn.commit()
 
-            keep_indices = [i for i, e in enumerate(self.entries) if e.path in keep_paths]
-            self.entries = [self.entries[i] for i in keep_indices]
-            if keep_indices:
-                self.embeddings = self.embeddings[keep_indices]
-            else:
-                self.embeddings = np.zeros((0, self.embedding_dim), dtype=np.float32)
-            # Fancy-indexing (or the empty-case literal) always returns a
-            # fresh, exact-fit array, never a view into the old buffer — safe
-            # to treat as the new backing allocation directly.
-            self._emb_buf = self.embeddings
-            self._reindex_lookup()
-
-    def get(self, id: str) -> ImageEntry | None:
+    def get(self, image_id: str) -> ImageEntry | None:
         with self.lock:
-            i = self._by_id.get(id)
-            return self.entries[i] if i is not None else None
+            row = self._conn.execute(
+                f"SELECT {_SELECT_COLUMNS} FROM images WHERE id=?", (image_id,)
+            ).fetchone()
+            return _row_to_entry(row) if row else None
 
     def get_by_path(self, path: str) -> ImageEntry | None:
         with self.lock:
-            i = self._by_path.get(path)
-            return self.entries[i] if i is not None else None
+            row = self._conn.execute(
+                f"SELECT {_SELECT_COLUMNS} FROM images WHERE path=?", (path,)
+            ).fetchone()
+            return _row_to_entry(row) if row else None
 
-    def get_embedding(self, id: str) -> np.ndarray | None:
+    def get_embedding(self, image_id: str) -> np.ndarray | None:
         with self.lock:
-            i = self._by_id.get(id)
-            return self.embeddings[i] if i is not None else None
+            row = self._conn.execute("SELECT embedding FROM images WHERE id=?", (image_id,)).fetchone()
+            return np.frombuffer(row[0], dtype=np.float32).copy() if row else None
 
     def all(self) -> list[ImageEntry]:
         with self.lock:
-            return list(self.entries)
+            return [
+                _row_to_entry(row)
+                for row in self._conn.execute(
+                    f"SELECT {_SELECT_COLUMNS} FROM images ORDER BY rowid"
+                ).fetchall()
+            ]
+
+    @property
+    def entries(self) -> list[ImageEntry]:
+        # Compatibility for maintenance/tests; normal application paths use
+        # count/search/get and do not materialize the catalog.
+        return self.all()
+
+    @property
+    def embeddings(self) -> np.ndarray:
+        with self.lock:
+            rows = self._conn.execute("SELECT embedding FROM images ORDER BY rowid").fetchall()
+        return (
+            np.vstack([np.frombuffer(row[0], dtype=np.float32) for row in rows])
+            if rows else np.zeros((0, self.embedding_dim), dtype=np.float32)
+        )
+
+    @property
+    def _by_id(self) -> dict[str, int]:
+        return {entry.id: index for index, entry in enumerate(self.all())}
+
+    def count(self) -> int:
+        with self.lock:
+            return self._conn.execute("SELECT count(*) FROM images").fetchone()[0]
+
+    def distinct_colors(self) -> list[str]:
+        with self.lock:
+            return [row[0] for row in self._conn.execute("SELECT DISTINCT color FROM image_colors ORDER BY color")]
+
+    def distinct_objects(self) -> list[str]:
+        with self.lock:
+            return [row[0] for row in self._conn.execute("SELECT DISTINCT label FROM image_objects ORDER BY label")]
+
+    def search(
+        self,
+        text: str | None = None,
+        color: str | None = None,
+        obj: str | None = None,
+        sort: str = "date_desc",
+        offset: int = 0,
+        limit: int = 60,
+    ) -> tuple[list[ImageEntry], int]:
+        clauses: list[str] = []
+        params: list[object] = []
+        if color:
+            clauses.append("EXISTS (SELECT 1 FROM image_colors c WHERE c.image_id=images.id AND c.color=?)")
+            params.append(color)
+        if obj:
+            clauses.append("EXISTS (SELECT 1 FROM image_objects o WHERE o.image_id=images.id AND o.label=?)")
+            params.append(obj)
+        if text:
+            if len(text) >= 3:
+                clauses.append("images.rowid IN (SELECT rowid FROM image_fts WHERE image_fts MATCH ?)")
+                params.append('"' + text.replace('"', '""') + '"')
+            else:
+                clauses.append(
+                    "(instr(lower(images.ocr_text), lower(?)) > 0 OR EXISTS ("
+                    "SELECT 1 FROM image_objects o WHERE o.image_id=images.id "
+                    "AND instr(lower(o.label), lower(?)) > 0))"
+                )
+                params.extend((text, text))
+
+        where = " WHERE " + " AND ".join(clauses) if clauses else ""
+        order_by = {
+            "date_desc": "date_taken DESC, id ASC",
+            "date_asc": "date_taken ASC, id ASC",
+            "name_asc": "filename COLLATE NOCASE ASC, id ASC",
+            "name_desc": "filename COLLATE NOCASE DESC, id ASC",
+            "size_desc": "size DESC, id ASC",
+            "size_asc": "size ASC, id ASC",
+        }.get(sort, "date_taken DESC, id ASC")
+
+        with self.lock:
+            total = self._conn.execute(f"SELECT count(*) FROM images{where}", params).fetchone()[0]
+            rows = self._conn.execute(
+                f"SELECT {_SELECT_COLUMNS} FROM images{where} "
+                f"ORDER BY {order_by} LIMIT ? OFFSET ?",
+                [*params, limit, offset],
+            ).fetchall()
+        return [_row_to_entry(row) for row in rows], total
+
+    def find_similar(self, image_id: str, limit: int = 20) -> list[ImageEntry] | None:
+        with self.lock:
+            row = self._conn.execute("SELECT rowid FROM images WHERE id=?", (image_id,)).fetchone()
+            if row is None:
+                return None
+            if limit <= 0:
+                return []
+            rowid = row[0]
+            rows = self._conn.execute(
+                "WITH nearest AS MATERIALIZED ("
+                "SELECT rowid, distance FROM image_vectors "
+                "WHERE embedding MATCH (SELECT embedding FROM image_vectors WHERE rowid=?) "
+                "AND k=? ORDER BY distance"
+                ") SELECT " + _SELECT_COLUMNS + " FROM nearest "
+                "JOIN images ON images.rowid=nearest.rowid "
+                "WHERE nearest.rowid != ? ORDER BY nearest.distance, nearest.rowid LIMIT ?",
+                (rowid, limit + 1, rowid, limit),
+            ).fetchall()
+            return [_row_to_entry(result) for result in rows]
 
     def delete_by_path(self, path: str) -> None:
         with self.lock:
-            self._conn.execute("DELETE FROM images WHERE path = ?", (path,))
+            self._conn.execute("DELETE FROM images WHERE path=?", (path,))
             self._conn.commit()
-            i = self._by_path.get(path)
-            if i is None:
-                return
-            del self.entries[i]
-            self.embeddings = np.delete(self.embeddings, i, axis=0)
-            self._emb_buf = self.embeddings
-            self._reindex_lookup()

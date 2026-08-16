@@ -1,5 +1,6 @@
 import json
 import logging
+import sqlite3
 import threading
 
 import numpy as np
@@ -7,11 +8,11 @@ import numpy as np
 from app.storage import ImageEntry, IndexStore
 
 
-def _entry(path="/imgs/a.png", mtime=0.0, size=0, id="a1"):
+def _entry(path="/imgs/a.png", mtime=0.0, size=0, id="a1", **kwargs):
     return ImageEntry(
         id=id, path=path, thumbnail_path=f"/thumbs/{id}.jpg",
         ocr_text="NETBET", colors=["green"], objects=["clover"],
-        mtime=mtime, size=size,
+        mtime=mtime, size=size, **kwargs,
     )
 
 
@@ -28,6 +29,58 @@ def test_upsert_save_load_roundtrip(tmp_path):
     assert reloaded.get_by_path("/imgs/a.png").id == "a1"
 
 
+def test_upsert_save_load_roundtrip_preserves_new_metadata_fields(tmp_path):
+    store = IndexStore(tmp_path, embedding_dim=4)
+    store.load()
+    store.upsert(
+        _entry(width=1920, height=1080, format="PNG", date_taken=111.0, indexed_at=222.0),
+        np.array([1.0, 0.0, 0.0, 0.0], dtype=np.float32),
+    )
+    store.save()
+
+    reloaded = IndexStore(tmp_path, embedding_dim=4)
+    reloaded.load()
+    entry = reloaded.get("a1")
+    assert (entry.width, entry.height, entry.format) == (1920, 1080, "PNG")
+    assert (entry.date_taken, entry.indexed_at) == (111.0, 222.0)
+
+
+def test_opening_a_pre_metadata_schema_db_migrates_columns_without_losing_data(tmp_path):
+    # Simulates an index.db created before width/height/format/date_taken/
+    # indexed_at existed - IndexStore must ALTER the table in place rather
+    # than choking on (or silently dropping) the pre-existing row.
+    db_path = tmp_path / "index.db"
+    tmp_path.mkdir(parents=True, exist_ok=True)
+    conn = sqlite3.connect(str(db_path))
+    conn.execute(
+        "CREATE TABLE images ("
+        "id TEXT PRIMARY KEY, path TEXT UNIQUE NOT NULL, thumbnail_path TEXT NOT NULL, "
+        "ocr_text TEXT NOT NULL, colors TEXT NOT NULL, objects TEXT NOT NULL, "
+        "mtime REAL NOT NULL, size INTEGER NOT NULL, embedding BLOB NOT NULL)"
+    )
+    conn.execute(
+        "INSERT INTO images (id, path, thumbnail_path, ocr_text, colors, objects, mtime, size, embedding) "
+        "VALUES ('a1', '/imgs/a.png', '/thumbs/a1.jpg', 'NETBET', '[\"green\"]', '[\"clover\"]', "
+        "0.0, 0, ?)",
+        (np.zeros(4, dtype=np.float32).tobytes(),),
+    )
+    conn.commit()
+    conn.close()
+
+    store = IndexStore(tmp_path, embedding_dim=4)
+    store.load()
+
+    entry = store.get("a1")
+    assert entry.ocr_text == "NETBET"
+    assert (entry.width, entry.height, entry.format) == (0, 0, "")
+    assert (entry.date_taken, entry.indexed_at) == (0.0, 0.0)
+
+    # And the migrated schema must accept new writes with the new columns.
+    store.upsert(_entry(id="b1", path="/imgs/b.png", width=10, height=20), np.zeros(4, dtype=np.float32))
+    store.save()
+    assert store.get("b1").width == 10
+
+
 def test_needs_reindex_detects_new_and_unchanged_files(tmp_path):
     img_path = tmp_path / "photo.png"
     img_path.write_bytes(b"fake-image-bytes")
@@ -37,9 +90,26 @@ def test_needs_reindex_detects_new_and_unchanged_files(tmp_path):
     store.load()
     assert store.needs_reindex(img_path) is True
 
-    entry = _entry(path=str(img_path), mtime=stat.st_mtime, size=stat.st_size)
+    entry = _entry(
+        path=str(img_path), mtime=stat.st_mtime, size=stat.st_size,
+        width=10, height=10, format="PNG", date_taken=stat.st_mtime, indexed_at=1.0,
+    )
     store.upsert(entry, np.zeros(4, dtype=np.float32))
     assert store.needs_reindex(img_path) is False
+
+
+def test_needs_reindex_backfills_metadata_for_an_unchanged_legacy_row(tmp_path):
+    img_path = tmp_path / "photo.png"
+    img_path.write_bytes(b"fake-image-bytes")
+    stat = img_path.stat()
+    store = IndexStore(tmp_path / "idx", embedding_dim=4)
+    store.load()
+    store.upsert(
+        _entry(path=str(img_path), mtime=stat.st_mtime, size=stat.st_size),
+        np.zeros(4, dtype=np.float32),
+    )
+
+    assert store.needs_reindex(img_path) is True
 
 
 def test_needs_reindex_true_when_file_changes(tmp_path):
@@ -340,10 +410,7 @@ def test_load_recovers_from_malformed_embedding_blob(tmp_path):
     assert fresh.embeddings.shape == (0, 4)
 
 
-def test_upsert_grows_embedding_buffer_by_doubling_not_per_row(tmp_path):
-    # Regression test for upsert()'s O(n)-per-call np.vstack(): the backing
-    # buffer must over-allocate on growth (capacity > count) rather than
-    # reallocating an exact-fit array on every single new-path upsert.
+def test_upsert_keeps_large_catalog_in_sqlite_without_an_in_memory_buffer(tmp_path):
     store = IndexStore(tmp_path, embedding_dim=4)
     store.load()
     n = 1500  # crosses the 1024-row initial-capacity boundary at least once
@@ -355,10 +422,7 @@ def test_upsert_grows_embedding_buffer_by_doubling_not_per_row(tmp_path):
 
     assert len(store.entries) == n
     assert store.embeddings.shape == (n, 4)
-    # The public view must be exactly n rows even though the backing
-    # allocation is larger - no stray capacity rows ever leak out.
-    assert store._emb_buf.shape[0] >= n
-    assert store._emb_buf.shape[0] > n  # over-allocated, not an exact fit
+    assert not hasattr(store, "_emb_buf")
 
     # Data integrity across a growth boundary: spot-check first, a
     # mid-growth, and the last entry.

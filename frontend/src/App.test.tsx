@@ -4,16 +4,31 @@ import * as api from "./api";
 import type { ImageResult } from "./api";
 import App from "./App";
 
+function image(id: string): ImageResult {
+  return {
+    id,
+    path: `/imgs/${id}.png`,
+    thumbnail_url: `http://localhost:8000/thumbnail/${id}`,
+    ocr_text: "",
+    colors: [],
+    objects: [],
+    width: 100,
+    height: 80,
+    format: "PNG",
+    size: 2048,
+    mtime: 1_700_000_000,
+    date_taken: 1_700_000_000,
+    indexed_at: 1_700_000_100,
+  };
+}
+
 describe("App", () => {
   it("runs a search on filter change and opens Find Similar results", async () => {
     vi.spyOn(api, "fetchColors").mockResolvedValue(["green"]);
     vi.spyOn(api, "fetchObjects").mockResolvedValue(["clover"]);
-    const image = {
-      id: "a1", path: "/imgs/clover.png", thumbnail_url: "/thumbnail/a1",
-      ocr_text: "", colors: ["green"], objects: ["clover"],
-    };
-    vi.spyOn(api, "search").mockResolvedValue([image]);
-    vi.spyOn(api, "findSimilar").mockResolvedValue([image]);
+    const result = { ...image("a1"), path: "/imgs/clover.png", colors: ["green"], objects: ["clover"] };
+    vi.spyOn(api, "search").mockResolvedValue({ results: [result], total: 1 });
+    vi.spyOn(api, "findSimilar").mockResolvedValue([result]);
 
     render(<App />);
     fireEvent.change(await screen.findByPlaceholderText("Search text or tags..."), {
@@ -38,7 +53,7 @@ describe("App", () => {
     // The initial mount-time search (with empty filters) fails too.
     await waitFor(() => expect(screen.getByText(/search failed/i)).toBeInTheDocument());
 
-    searchSpy.mockResolvedValue([]);
+    searchSpy.mockResolvedValue({ results: [], total: 0 });
     fireEvent.change(screen.getByPlaceholderText("Search text or tags..."), {
       target: { value: "clover" },
     });
@@ -50,24 +65,18 @@ describe("App", () => {
     vi.spyOn(api, "fetchColors").mockResolvedValue(["green"]);
     vi.spyOn(api, "fetchObjects").mockResolvedValue([]);
 
-    const imageA: ImageResult = {
-      id: "a", path: "/imgs/a.png", thumbnail_url: "http://localhost:8000/thumbnail/a",
-      ocr_text: "", colors: [], objects: [],
-    };
-    const imageB: ImageResult = {
-      id: "b", path: "/imgs/b.png", thumbnail_url: "http://localhost:8000/thumbnail/b",
-      ocr_text: "", colors: [], objects: [],
-    };
+    const imageA = image("a");
+    const imageB = image("b");
 
-    let resolveStale!: (v: ImageResult[]) => void;
-    const staleResponse = new Promise<ImageResult[]>((resolve) => {
+    let resolveStale!: (v: api.SearchResponse) => void;
+    const staleResponse = new Promise<api.SearchResponse>((resolve) => {
       resolveStale = resolve;
     });
 
     vi.spyOn(api, "search")
-      .mockResolvedValueOnce([]) // initial mount search
+      .mockResolvedValueOnce({ results: [], total: 0 }) // initial mount search
       .mockImplementationOnce(() => staleResponse) // color -> "green": stale, resolves late
-      .mockResolvedValueOnce([imageB]); // color -> undefined: fresher, resolves first
+      .mockResolvedValueOnce({ results: [imageB], total: 1 }); // color -> undefined: fresher, resolves first
 
     render(<App />);
     const swatch = await screen.findByLabelText("green");
@@ -77,10 +86,31 @@ describe("App", () => {
 
     await waitFor(() => expect(screen.getByAltText("b.png")).toBeInTheDocument());
 
-    resolveStale([imageA]);
+    resolveStale({ results: [imageA], total: 1 });
     // Flush the now-resolved stale request's continuation (a no-op re-assertion
     // that b.png is still there is enough to let its microtask run first).
     await waitFor(() => expect(screen.getByAltText("b.png")).toBeInTheDocument());
     expect(screen.queryByAltText("a.png")).not.toBeInTheDocument();
+  });
+
+  it("requests another page and applies the selected sort", async () => {
+    vi.spyOn(api, "fetchColors").mockResolvedValue([]);
+    vi.spyOn(api, "fetchObjects").mockResolvedValue([]);
+    const searchSpy = vi.spyOn(api, "search")
+      .mockResolvedValueOnce({ results: [image("first")], total: 61 })
+      .mockResolvedValueOnce({ results: [image("last")], total: 61 })
+      .mockResolvedValueOnce({ results: [image("sorted")], total: 61 });
+    vi.stubGlobal("scrollTo", vi.fn());
+
+    render(<App />);
+    await screen.findByAltText("first.png");
+
+    fireEvent.click(screen.getByText("Next"));
+    await screen.findByAltText("last.png");
+    expect(searchSpy).toHaveBeenLastCalledWith({}, { sort: "date_desc", offset: 60, limit: 60 });
+
+    fireEvent.change(screen.getByLabelText("Sort by"), { target: { value: "name_asc" } });
+    await screen.findByAltText("sorted.png");
+    expect(searchSpy).toHaveBeenLastCalledWith({}, { sort: "name_asc", offset: 0, limit: 60 });
   });
 });

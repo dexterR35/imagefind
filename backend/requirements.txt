@@ -8,6 +8,10 @@ open-clip-torch==2.26.1
 # to pin that separately, and app/ never imports cv2 directly.
 easyocr==1.7.2
 watchdog==6.0.0
+# SQLite-native KNN vector search. Embeddings stay in index.db and are queried
+# through a vec0 virtual table instead of being loaded into a process-wide
+# NumPy matrix at startup.
+sqlite-vec==0.1.9
 # fairscale and transformers aren't imported directly anywhere in app/ — they're
 # used internally by the ram package (ram/models/bert.py, vit.py) and aren't
 # declared in its own package metadata, so they're pinned explicitly here.

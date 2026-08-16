@@ -15,8 +15,8 @@ describe("ReindexButton", () => {
     vi.spyOn(api, "startReindex").mockResolvedValue("job1");
     const statusSpy = vi
       .spyOn(api, "fetchReindexStatus")
-      .mockResolvedValueOnce({ processed: 1, total: 2, failed: 0, done: false, error: null })
-      .mockResolvedValueOnce({ processed: 2, total: 2, failed: 0, done: true, error: null });
+      .mockResolvedValueOnce({ processed: 1, total: 2, failed: 0, done: false, error: null, cancelled: false })
+      .mockResolvedValueOnce({ processed: 2, total: 2, failed: 0, done: true, error: null, cancelled: false });
     const onComplete = vi.fn();
 
     render(<ReindexButton onComplete={onComplete} />);
@@ -36,7 +36,7 @@ describe("ReindexButton", () => {
     // stale one would fire instead.
     vi.spyOn(api, "startReindex").mockResolvedValue("job1");
     vi.spyOn(api, "fetchReindexStatus").mockResolvedValue({
-      processed: 1, total: 1, failed: 0, done: true, error: null,
+      processed: 1, total: 1, failed: 0, done: true, error: null, cancelled: false,
     });
     const staleOnComplete = vi.fn();
     const freshOnComplete = vi.fn();
@@ -54,7 +54,7 @@ describe("ReindexButton", () => {
   it("shows a warning when some images failed to index, without treating it as an error", async () => {
     vi.spyOn(api, "startReindex").mockResolvedValue("job1");
     vi.spyOn(api, "fetchReindexStatus").mockResolvedValue({
-      processed: 10, total: 10, failed: 3, done: true, error: null,
+      processed: 10, total: 10, failed: 3, done: true, error: null, cancelled: false,
     });
     const onComplete = vi.fn();
 

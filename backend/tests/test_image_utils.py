@@ -1,6 +1,8 @@
 from PIL import Image
 
-from app.image_utils import flatten_to_rgb
+import datetime
+
+from app.image_utils import extract_date_taken, flatten_to_rgb
 
 
 def test_flatten_to_rgb_composites_transparency_onto_white():
@@ -24,3 +26,25 @@ def test_flatten_to_rgb_converts_plain_rgb_without_change():
 
     assert result.mode == "RGB"
     assert result.getpixel((5, 5)) == (10, 20, 30)
+
+
+def test_extract_date_taken_prefers_original_capture_date():
+    img = Image.new("RGB", (1, 1))
+    exif = img.getexif()
+    exif[36867] = "2024:05:06 07:08:09"
+    exif[306] = "2025:01:02 03:04:05"
+
+    expected = datetime.datetime(2024, 5, 6, 7, 8, 9).timestamp()
+    assert extract_date_taken(img, fallback=123.0) == expected
+
+
+def test_extract_date_taken_uses_next_valid_tag_then_file_mtime():
+    img = Image.new("RGB", (1, 1))
+    exif = img.getexif()
+    exif[36867] = "not-a-date"
+    exif[306] = "2025:01:02 03:04:05"
+    expected = datetime.datetime(2025, 1, 2, 3, 4, 5).timestamp()
+    assert extract_date_taken(img, fallback=123.0) == expected
+
+    empty = Image.new("RGB", (1, 1))
+    assert extract_date_taken(empty, fallback=123.0) == 123.0

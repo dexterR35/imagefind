@@ -129,14 +129,42 @@ def test_search_and_filters_use_prepopulated_store(tmp_path, monkeypatch):
     assert client.get("/objects").json() == ["clover", "person"]
 
     result = client.get("/search", params={"color": "green"}).json()
-    assert [r["id"] for r in result] == ["a1"]
+    assert [r["id"] for r in result["results"]] == ["a1"]
+    assert result["total"] == 1
 
     result = client.get("/search", params={"object": "clover"}).json()
-    assert [r["id"] for r in result] == ["a1"]
-    assert client.get("/search", params={"object": "missing"}).json() == []
+    assert [r["id"] for r in result["results"]] == ["a1"]
+    assert client.get("/search", params={"object": "missing"}).json() == {"results": [], "total": 0}
 
     assert client.get("/search/similar/a1").json() == []
     assert client.get("/search/similar/missing").status_code == 404
+
+
+def test_search_paginates_and_reports_metadata(tmp_path, monkeypatch):
+    main, _ = _fresh_app(tmp_path, monkeypatch)
+    from app.storage import ImageEntry
+
+    for i in range(3):
+        entry = ImageEntry(
+            id=f"e{i}", path=f"/imgs/e{i}.png", thumbnail_path=str(tmp_path / f"e{i}.jpg"),
+            ocr_text="", colors=[], objects=[], mtime=0.0, size=100 * i,
+            width=10, height=20, format="PNG", date_taken=float(i),
+            indexed_at=100.0 + i,
+        )
+        main.store.upsert(entry, np.ones(512, dtype=np.float32))
+
+    client = TestClient(main.app)
+    page = client.get("/search", params={"sort": "date_asc", "offset": 1, "limit": 1}).json()
+    assert [r["id"] for r in page["results"]] == ["e1"]
+    assert page["total"] == 3
+    assert page["results"][0]["width"] == 10
+    assert page["results"][0]["format"] == "PNG"
+    assert page["results"][0]["indexed_at"] == 101.0
+
+    assert client.get("/search", params={"sort": "not-a-real-sort"}).status_code == 422
+    assert client.get("/search", params={"offset": -1}).status_code == 422
+    assert client.get("/search", params={"limit": 0}).status_code == 422
+    assert client.get("/search", params={"limit": 1000}).status_code == 422
 
 
 def test_get_settings_returns_current_config_values(tmp_path, monkeypatch):

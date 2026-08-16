@@ -36,6 +36,13 @@ every image and remembers what it recognized in it, any text written on it, its
 main colors, and a "fingerprint" used later for "find similar." After that, search
 is instant — new photos only need reindexing once, the rest stays cached.
 
+The complete searchable catalog lives in the local `backend/.index/index.db`
+SQLite database. Metadata filtering, FTS5 text search, sorting, pagination, and
+`sqlite-vec` similarity queries all execute in SQLite; the backend does not load
+the whole image catalog or embedding matrix into memory at startup. Original
+images and generated thumbnails remain regular files, with their paths stored in
+the database.
+
 ## Tools used
 
 | Tool | What it's for |

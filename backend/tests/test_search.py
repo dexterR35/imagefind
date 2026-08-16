@@ -4,11 +4,11 @@ from app.search import find_similar, search
 from app.storage import ImageEntry, IndexStore
 
 
-def _entry(id, colors=None, objects=None, ocr_text=""):
+def _entry(id, colors=None, objects=None, ocr_text="", date_taken=0.0, size=0):
     return ImageEntry(
         id=id, path=f"/imgs/{id}.png", thumbnail_path=f"/t/{id}.jpg",
         ocr_text=ocr_text, colors=colors or [], objects=objects or [],
-        mtime=0.0, size=0,
+        mtime=0.0, size=size, date_taken=date_taken,
     )
 
 
@@ -26,8 +26,9 @@ def test_search_filters_by_color_and_object_with_and_logic(tmp_path):
         (_entry("b", colors=["green"], objects=["person"]), [1, 0]),
         (_entry("c", colors=["blue"], objects=["clover"]), [1, 0]),
     ])
-    result = search(store, color="green", obj="clover")
+    result, total = search(store, color="green", obj="clover")
     assert [e.id for e in result] == ["a"]
+    assert total == 1
 
 
 def test_search_text_matches_ocr_text(tmp_path):
@@ -35,7 +36,7 @@ def test_search_text_matches_ocr_text(tmp_path):
         (_entry("a", ocr_text="NETBET BONUS"), [1.0, 0.0]),
         (_entry("b", ocr_text="unrelated"), [0.0, 1.0]),
     ])
-    result = search(store, text="netbet")
+    result, _ = search(store, text="netbet")
     assert [e.id for e in result] == ["a"]
 
 
@@ -44,7 +45,7 @@ def test_search_text_matches_object_tags_too(tmp_path):
         (_entry("a", objects=["clover", "gold"]), [0.0, 1.0]),
         (_entry("b", objects=["person"]), [0.0, 1.0]),
     ])
-    result = search(store, text="clover")
+    result, _ = search(store, text="clover")
     assert [e.id for e in result] == ["a"]
 
 
@@ -56,7 +57,46 @@ def test_search_text_has_no_semantic_fallback(tmp_path):
     store = _store_with(tmp_path, [
         (_entry("a", objects=["baseball glove", "person"], ocr_text=""), [1.0, 0.0]),
     ])
-    assert search(store, text="clover") == []
+    assert search(store, text="clover") == ([], 0)
+
+
+def test_search_paginates_with_offset_and_limit_and_reports_total(tmp_path):
+    store = _store_with(tmp_path, [
+        (_entry(f"e{i}", date_taken=float(i)), [1.0, 0.0]) for i in range(5)
+    ])
+    result, total = search(store, sort="date_asc", offset=2, limit=2)
+    assert [e.id for e in result] == ["e2", "e3"]
+    assert total == 5
+
+
+def test_search_sorts_by_date_desc_by_default(tmp_path):
+    store = _store_with(tmp_path, [
+        (_entry("old", date_taken=1.0), [1.0, 0.0]),
+        (_entry("new", date_taken=3.0), [1.0, 0.0]),
+        (_entry("mid", date_taken=2.0), [1.0, 0.0]),
+    ])
+    result, _ = search(store)
+    assert [e.id for e in result] == ["new", "mid", "old"]
+
+
+def test_search_sorts_by_name_asc(tmp_path):
+    store = _store_with(tmp_path, [
+        (_entry("banana"), [1.0, 0.0]),
+        (_entry("apple"), [1.0, 0.0]),
+        (_entry("cherry"), [1.0, 0.0]),
+    ])
+    result, _ = search(store, sort="name_asc")
+    assert [e.id for e in result] == ["apple", "banana", "cherry"]
+
+
+def test_search_sorts_by_size_desc(tmp_path):
+    store = _store_with(tmp_path, [
+        (_entry("small", size=10), [1.0, 0.0]),
+        (_entry("big", size=1000), [1.0, 0.0]),
+        (_entry("mid", size=100), [1.0, 0.0]),
+    ])
+    result, _ = search(store, sort="size_desc")
+    assert [e.id for e in result] == ["big", "mid", "small"]
 
 
 def test_find_similar_excludes_self_and_orders_by_similarity(tmp_path):
@@ -109,3 +149,22 @@ def test_find_similar_limit_zero_or_negative_returns_empty_list(tmp_path):
 
     assert find_similar(store, "query", limit=0) == []
     assert find_similar(store, "query", limit=-1) == []
+
+
+def test_search_and_similarity_do_not_materialize_the_catalog(tmp_path, monkeypatch):
+    store = _store_with(tmp_path, [
+        (_entry("query", objects=["clover"]), [1.0, 0.0]),
+        (_entry("match", objects=["clover"]), [0.9, 0.1]),
+    ])
+
+    def fail_if_materialized():
+        raise AssertionError("search must query SQLite, not call store.all()")
+
+    monkeypatch.setattr(store, "all", fail_if_materialized)
+
+    results, total = search(store, text="clover")
+    similar = find_similar(store, "query")
+
+    assert total == 2
+    assert [entry.id for entry in results] == ["match", "query"]
+    assert [entry.id for entry in similar] == ["match"]

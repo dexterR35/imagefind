@@ -5,12 +5,38 @@ export interface ImageResult {
   ocr_text: string;
   colors: string[];
   objects: string[];
+  width: number;
+  height: number;
+  format: string;
+  size: number;
+  mtime: number;
+  date_taken: number;
+  indexed_at: number;
 }
 
 export interface SearchFilters {
   text?: string;
   color?: string;
   object?: string;
+}
+
+export type SortOption =
+  | "date_desc"
+  | "date_asc"
+  | "name_asc"
+  | "name_desc"
+  | "size_desc"
+  | "size_asc";
+
+export interface SearchOptions {
+  sort?: SortOption;
+  offset?: number;
+  limit?: number;
+}
+
+export interface SearchResponse {
+  results: ImageResult[];
+  total: number;
 }
 
 export interface ReindexStatus {
@@ -66,15 +92,21 @@ export function downloadUrl(imageId: string): string {
   return `${BASE_URL}/download/${imageId}`;
 }
 
-export async function search(filters: SearchFilters): Promise<ImageResult[]> {
+export async function search(
+  filters: SearchFilters,
+  options: SearchOptions = {},
+): Promise<SearchResponse> {
   const params = new URLSearchParams();
   if (filters.text) params.set("text", filters.text);
   if (filters.color) params.set("color", filters.color);
   if (filters.object) params.set("object", filters.object);
+  if (options.sort) params.set("sort", options.sort);
+  if (options.offset !== undefined) params.set("offset", String(options.offset));
+  if (options.limit !== undefined) params.set("limit", String(options.limit));
   const res = await fetch(`${BASE_URL}/search?${params.toString()}`);
   if (!res.ok) throw new Error(`search failed: ${res.status}`);
-  const data: ImageResult[] = await res.json();
-  return toAbsolute(data);
+  const data: SearchResponse = await res.json();
+  return { ...data, results: toAbsolute(data.results) };
 }
 
 export async function findSimilar(imageId: string): Promise<ImageResult[]> {

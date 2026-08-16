@@ -5,30 +5,45 @@ describe("search", () => {
   it("builds query params only for provided filters", async () => {
     const mockFetch = vi.fn().mockResolvedValue({
       ok: true,
-      json: async () => [
+      json: async () => ({ results: [
         { id: "a1", path: "/x.png", thumbnail_url: "/thumbnail/a1", ocr_text: "", colors: [], objects: [] },
-      ],
+      ], total: 1 }),
     });
     vi.stubGlobal("fetch", mockFetch);
 
     const results = await search({ color: "green" });
 
     expect(mockFetch).toHaveBeenCalledWith("http://localhost:8000/search?color=green");
-    expect(results[0].id).toBe("a1");
+    expect(results.results[0].id).toBe("a1");
+    expect(results.total).toBe(1);
   });
 
   it("resolves thumbnail_url to an absolute backend URL, not an origin-relative path", async () => {
     const mockFetch = vi.fn().mockResolvedValue({
       ok: true,
-      json: async () => [
+      json: async () => ({ results: [
         { id: "a1", path: "/x.png", thumbnail_url: "/thumbnail/a1", ocr_text: "", colors: [], objects: [] },
-      ],
+      ], total: 1 }),
     });
     vi.stubGlobal("fetch", mockFetch);
 
     const results = await search({});
 
-    expect(results[0].thumbnail_url).toBe("http://localhost:8000/thumbnail/a1");
+    expect(results.results[0].thumbnail_url).toBe("http://localhost:8000/thumbnail/a1");
+  });
+
+  it("passes pagination and sorting options", async () => {
+    const mockFetch = vi.fn().mockResolvedValue({
+      ok: true,
+      json: async () => ({ results: [], total: 0 }),
+    });
+    vi.stubGlobal("fetch", mockFetch);
+
+    await search({ text: "logo" }, { sort: "name_desc", offset: 60, limit: 30 });
+
+    expect(mockFetch).toHaveBeenCalledWith(
+      "http://localhost:8000/search?text=logo&sort=name_desc&offset=60&limit=30",
+    );
   });
 
   it("throws when the response is not ok", async () => {

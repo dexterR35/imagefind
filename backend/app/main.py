@@ -1,11 +1,14 @@
 import threading
 import uuid
 from pathlib import Path
+from typing import Literal
 
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
 from pydantic import BaseModel, Field, field_validator
+
+SortOption = Literal["date_desc", "date_asc", "name_asc", "name_desc", "size_desc", "size_asc"]
 
 from . import config
 from .indexer import Indexer, ReindexJob
@@ -57,18 +60,30 @@ def _entry_to_dict(e) -> dict:
     return {
         "id": e.id, "path": e.path, "thumbnail_url": f"/thumbnail/{e.id}",
         "ocr_text": e.ocr_text, "colors": e.colors, "objects": e.objects,
+        "width": e.width, "height": e.height, "format": e.format,
+        "size": e.size, "mtime": e.mtime, "date_taken": e.date_taken,
+        "indexed_at": e.indexed_at,
     }
 
 
 @app.get("/health")
 def health():
-    return {"status": "ok", "indexed": len(store.all())}
+    return {"status": "ok", "indexed": store.count()}
 
 
 @app.get("/search")
-def search_endpoint(text: str | None = None, color: str | None = None, object: str | None = None):
-    results = run_search(store, text=text, color=color, obj=object)
-    return [_entry_to_dict(e) for e in results]
+def search_endpoint(
+    text: str | None = None,
+    color: str | None = None,
+    object: str | None = None,
+    sort: SortOption = "date_desc",
+    offset: int = Query(0, ge=0),
+    limit: int = Query(60, ge=1, le=200),
+):
+    results, total = run_search(
+        store, text=text, color=color, obj=object, sort=sort, offset=offset, limit=limit
+    )
+    return {"results": [_entry_to_dict(e) for e in results], "total": total}
 
 
 @app.get("/search/similar/{image_id}")
@@ -135,12 +150,12 @@ def download_endpoint(image_id: str):
 
 @app.get("/colors")
 def colors_endpoint():
-    return sorted({c for e in store.all() for c in e.colors})
+    return store.distinct_colors()
 
 
 @app.get("/objects")
 def objects_endpoint():
-    return sorted({o for e in store.all() for o in e.objects})
+    return store.distinct_objects()
 
 
 class SettingsUpdate(BaseModel):

@@ -60,6 +60,7 @@ def test_handler_on_modified_processes_and_upserts_image(tmp_path, monkeypatch):
         entry = ImageEntry(
             id="new1", path=str(path), thumbnail_path=str(index_dir / "t.jpg"),
             ocr_text="", colors=[], objects=[], mtime=stat.st_mtime, size=stat.st_size,
+            width=32, height=32, format="PNG", date_taken=stat.st_mtime, indexed_at=1.0,
         )
         return entry, np.zeros(512, dtype=np.float32)
 
@@ -97,6 +98,7 @@ def test_handler_on_modified_skips_reprocessing_an_already_indexed_unchanged_fil
         entry = ImageEntry(
             id="new1", path=str(path), thumbnail_path=str(index_dir / "t.jpg"),
             ocr_text="", colors=[], objects=[], mtime=stat.st_mtime, size=stat.st_size,
+            width=32, height=32, format="PNG", date_taken=stat.st_mtime, indexed_at=1.0,
         )
         return entry, np.zeros(512, dtype=np.float32)
 

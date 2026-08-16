@@ -1,4 +1,37 @@
+import datetime
+
 from PIL import Image
+
+_EXIF_DATETIME_TAGS = (
+    36867,  # DateTimeOriginal: when the camera captured the image
+    36868,  # DateTimeDigitized
+    306,    # DateTime: last file/image metadata change
+)
+_EXIF_DATETIME_FORMAT = "%Y:%m:%d %H:%M:%S"
+
+
+def extract_date_taken(image: Image.Image, fallback: float) -> float:
+    """Best available EXIF capture date as a Unix timestamp.
+
+    Falls back to the file mtime because screenshots and generated images
+    commonly carry no EXIF metadata at all.
+    """
+    try:
+        exif = image.getexif()
+    except (AttributeError, TypeError, ValueError):
+        return fallback
+
+    for tag in _EXIF_DATETIME_TAGS:
+        try:
+            raw = exif.get(tag)
+            if raw:
+                value = raw.decode(errors="strict") if isinstance(raw, bytes) else str(raw)
+                return datetime.datetime.strptime(value, _EXIF_DATETIME_FORMAT).timestamp()
+        except (UnicodeDecodeError, ValueError, TypeError):
+            # A malformed higher-priority tag should not prevent a valid
+            # lower-priority EXIF date from being used.
+            continue
+    return fallback
 
 
 def flatten_to_rgb(image: Image.Image) -> Image.Image:

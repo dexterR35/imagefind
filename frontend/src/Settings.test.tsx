@@ -35,7 +35,7 @@ describe("Settings", () => {
       images_dir: "/other-photos",
     });
     vi.spyOn(api, "startReindex").mockResolvedValue("job1");
-    vi.spyOn(api, "fetchReindexStatus").mockResolvedValue({ processed: 1, total: 1, failed: 0, done: true, error: null });
+    vi.spyOn(api, "fetchReindexStatus").mockResolvedValue({ processed: 1, total: 1, failed: 0, done: true, error: null, cancelled: false });
 
     render(<Settings onReindexComplete={vi.fn()} />);
     fireEvent.click(screen.getByText("Settings"));
@@ -57,7 +57,7 @@ describe("Settings", () => {
       ram_custom_tags: ["zeus", "statue"],
     });
     const reindexSpy = vi.spyOn(api, "startReindex").mockResolvedValue("job1");
-    vi.spyOn(api, "fetchReindexStatus").mockResolvedValue({ processed: 1, total: 1, failed: 0, done: true, error: null });
+    vi.spyOn(api, "fetchReindexStatus").mockResolvedValue({ processed: 1, total: 1, failed: 0, done: true, error: null, cancelled: false });
     const onReindexComplete = vi.fn();
 
     render(<Settings onReindexComplete={onReindexComplete} />);

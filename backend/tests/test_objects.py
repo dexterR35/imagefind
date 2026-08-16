@@ -95,12 +95,16 @@ def test_get_tag_embedding_blends_text_with_reference_images(tmp_path, monkeypat
     assert np.allclose(result, expected, atol=1e-5)
 
 
-def test_clear_custom_tag_cache_forces_recomputation(monkeypatch):
+def test_clear_custom_tag_cache_forces_recomputation(tmp_path, monkeypatch):
     calls = []
     monkeypatch.setattr(
         objects_mod.embeddings, "embed_text",
         lambda tag: calls.append(tag) or np.array([1.0, 0.0], dtype=np.float32),
     )
+    # This test is about cache invalidation only. Keep it independent from
+    # any real reference image that happens to be checked into the default
+    # reference directory (and whose production embedding is 512D).
+    monkeypatch.setattr(objects_mod.config, "RAM_CUSTOM_TAG_REFERENCE_DIR", tmp_path)
     objects_mod._tag_embedding_cache.clear()
 
     objects_mod._get_tag_embedding("zeus")

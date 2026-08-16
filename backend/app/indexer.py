@@ -1,5 +1,6 @@
 import logging
 import threading
+import time
 import uuid
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -10,6 +11,7 @@ from PIL import Image
 from . import colors as colors_mod
 from . import config
 from . import embeddings
+from . import image_utils
 from . import objects as objects_mod
 from . import ocr
 from . import thumbnails
@@ -71,6 +73,13 @@ class Indexer:
         thumbnails.make_thumbnail(path, thumb_path)
 
         with Image.open(path) as img:
+            # Captured before .convert() below, which returns a new Image
+            # object with .format unset and no EXIF - both must be read off
+            # the freshly-opened original.
+            width, height = img.size
+            img_format = img.format or path.suffix.lstrip(".").upper()
+            date_taken = image_utils.extract_date_taken(img, fallback=stat.st_mtime)
+
             img = img.convert("RGBA")
             color_names = colors_mod.extract_dominant_colors(
                 img, k=settings.color_clusters, min_share=settings.color_min_share
@@ -89,6 +98,8 @@ class Indexer:
             id=image_id, path=str(path), thumbnail_path=str(thumb_path),
             ocr_text=text, colors=color_names, objects=object_labels,
             mtime=stat.st_mtime, size=stat.st_size,
+            width=width, height=height, format=img_format,
+            date_taken=date_taken, indexed_at=time.time(),
         )
         return entry, embedding
 
