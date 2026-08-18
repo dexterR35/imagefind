@@ -53,4 +53,15 @@ describe("SearchFilters", () => {
       vi.useRealTimers();
     }
   });
+
+  it("keeps text search usable when optional filter lists fail to load", async () => {
+    vi.spyOn(api, "fetchColors").mockRejectedValue(new Error("offline"));
+    vi.spyOn(api, "fetchObjects").mockRejectedValue(new Error("offline"));
+
+    render(<SearchFilters onChange={vi.fn()} />);
+
+    await waitFor(() => expect(api.fetchColors).toHaveBeenCalled());
+    expect(screen.getByPlaceholderText("Search text or tags...")).toBeInTheDocument();
+    expect(screen.getByRole("combobox")).toBeInTheDocument();
+  });
 });

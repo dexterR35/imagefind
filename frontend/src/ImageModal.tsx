@@ -26,7 +26,7 @@ function formatDate(timestamp: number): string {
 }
 
 export function ImageModal({ image, onClose, onFindSimilar }: Props) {
-  const filename = image.path.split("/").pop() ?? image.path;
+  const filename = image.path.split(/[\\/]/).pop() ?? image.path;
   return (
     <div className="modal-backdrop" role="presentation" onClick={onClose}>
       <div className="modal" role="dialog" aria-modal="true" aria-labelledby="image-title" onClick={(e) => e.stopPropagation()}>

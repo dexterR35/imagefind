@@ -1,4 +1,4 @@
-import { useCallback, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import {
   findSimilar,
   search,
@@ -29,12 +29,18 @@ export default function App() {
   const requestId = useRef(0);
   const filtersRef = useRef<Filters>({});
   const sortRef = useRef<SortOption>("date_desc");
+  const abortRef = useRef<AbortController | null>(null);
+
+  useEffect(() => () => abortRef.current?.abort(), []);
 
   const runSearch = useCallback(async (f: Filters, nextSort: SortOption, nextPage: number) => {
     setFilters(f);
     filtersRef.current = f;
     setPage(nextPage);
     setShowingSimilar(false);
+    abortRef.current?.abort();
+    const controller = new AbortController();
+    abortRef.current = controller;
     const id = ++requestId.current;
     setLoading(true);
     try {
@@ -42,6 +48,7 @@ export default function App() {
         sort: nextSort,
         offset: (nextPage - 1) * PAGE_SIZE,
         limit: PAGE_SIZE,
+        signal: controller.signal,
       });
       if (id !== requestId.current) return; // a newer search already superseded this one
       setImages(response.results);
@@ -71,10 +78,13 @@ export default function App() {
   }
 
   async function handleFindSimilar(id: string) {
+    abortRef.current?.abort();
+    const controller = new AbortController();
+    abortRef.current = controller;
     const reqId = ++requestId.current;
     setLoading(true);
     try {
-      const results = await findSimilar(id);
+      const results = await findSimilar(id, controller.signal);
       if (reqId !== requestId.current) return;
       setImages(results);
       setTotal(results.length);

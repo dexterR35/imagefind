@@ -162,8 +162,35 @@ def test_search_paginates_and_reports_metadata(tmp_path, monkeypatch):
 
     assert client.get("/search", params={"sort": "not-a-real-sort"}).status_code == 422
     assert client.get("/search", params={"offset": -1}).status_code == 422
+    assert client.get("/search", params={"offset": 10_000_001}).status_code == 422
     assert client.get("/search", params={"limit": 0}).status_code == 422
     assert client.get("/search", params={"limit": 1000}).status_code == 422
+
+
+def test_search_validates_lengths_and_rejects_control_characters(tmp_path, monkeypatch):
+    main, _ = _fresh_app(tmp_path, monkeypatch)
+    client = TestClient(main.app)
+
+    assert client.get("/search", params={"text": "x" * 201}).status_code == 422
+    assert client.get("/search", params={"color": "x" * 65}).status_code == 422
+    assert client.get("/search", params={"object": "x" * 129}).status_code == 422
+    response = client.get("/search", params={"text": "hello\x01world"})
+    assert response.status_code == 422
+    assert "control characters" in response.json()["detail"]
+
+
+def test_search_rate_limit_returns_429_with_retry_after(tmp_path, monkeypatch):
+    main, _ = _fresh_app(tmp_path, monkeypatch)
+    from app.rate_limit import SlidingWindowRateLimiter
+
+    main._search_rate_limiter = SlidingWindowRateLimiter(2, 60.0)
+    client = TestClient(main.app)
+
+    assert client.get("/search").status_code == 200
+    assert client.get("/search").status_code == 200
+    limited = client.get("/search")
+    assert limited.status_code == 429
+    assert limited.headers["retry-after"]
 
 
 def test_get_settings_returns_current_config_values(tmp_path, monkeypatch):
@@ -191,6 +218,36 @@ def test_post_settings_updates_images_dir_and_indexer(tmp_path, monkeypatch):
     # Indexer snapshots images_dir at construction time, so a runtime change
     # needs to be pushed to it explicitly, same as custom_tags.
     assert main.indexer.images_dir == other_dir
+
+
+def test_post_settings_rejects_images_dir_change_during_reindex(tmp_path, monkeypatch):
+    main, images_dir = _fresh_app(tmp_path, monkeypatch)
+    from app.indexer import ReindexJob
+
+    main.jobs["active"] = ReindexJob(id="active")
+    other_dir = tmp_path / "other_images"
+    other_dir.mkdir()
+
+    response = TestClient(main.app).post("/settings", json={"images_dir": str(other_dir)})
+
+    assert response.status_code == 409
+    assert main.config.IMAGES_DIR == images_dir
+    assert main.indexer.images_dir == images_dir
+
+
+def test_post_settings_rejects_images_dir_change_during_reconciliation(tmp_path, monkeypatch):
+    main, images_dir = _fresh_app(tmp_path, monkeypatch)
+    other_dir = tmp_path / "other_images"
+    other_dir.mkdir()
+    assert main._catalog_run_lock.acquire(blocking=False)
+    try:
+        response = TestClient(main.app).post("/settings", json={"images_dir": str(other_dir)})
+    finally:
+        main._catalog_run_lock.release()
+
+    assert response.status_code == 409
+    assert main.config.IMAGES_DIR == images_dir
+    assert main.indexer.images_dir == images_dir
 
 
 def test_post_settings_rejects_nonexistent_images_dir(tmp_path, monkeypatch):
@@ -366,6 +423,21 @@ def test_thumbnail_serves_cached_file(tmp_path, monkeypatch):
     assert client.get("/thumbnail/missing").status_code == 404
 
 
+def test_thumbnail_returns_404_when_database_file_reference_is_stale(tmp_path, monkeypatch):
+    main, _ = _fresh_app(tmp_path, monkeypatch)
+    from app.storage import ImageEntry
+
+    main.store.upsert(
+        ImageEntry(
+            id="stale", path="/imgs/a.png", thumbnail_path=str(tmp_path / "missing.jpg"),
+            ocr_text="", colors=[], objects=[], mtime=0.0, size=0,
+        ),
+        np.ones(512, dtype=np.float32),
+    )
+
+    assert TestClient(main.app).get("/thumbnail/stale").status_code == 404
+
+
 def test_cors_allowed_origins_configurable_via_env(tmp_path, monkeypatch):
     monkeypatch.setenv("CORS_ALLOWED_ORIGINS", "http://192.168.1.50:5173,http://localhost:5173")
     main, _ = _fresh_app(tmp_path, monkeypatch)
@@ -406,6 +478,22 @@ def test_download_endpoint_404_for_unknown_id(tmp_path, monkeypatch):
     main, _ = _fresh_app(tmp_path, monkeypatch)
     client = TestClient(main.app)
     assert client.get("/download/missing").status_code == 404
+
+
+def test_download_endpoint_404_when_original_was_deleted(tmp_path, monkeypatch):
+    main, _ = _fresh_app(tmp_path, monkeypatch)
+    from app.storage import ImageEntry
+
+    main.store.upsert(
+        ImageEntry(
+            id="stale", path=str(tmp_path / "gone.png"),
+            thumbnail_path=str(tmp_path / "stale.jpg"), ocr_text="",
+            colors=[], objects=[], mtime=0.0, size=0,
+        ),
+        np.ones(512, dtype=np.float32),
+    )
+
+    assert TestClient(main.app).get("/download/stale").status_code == 404
 
 
 def test_model_status_reports_not_installed_when_checkpoint_missing(tmp_path, monkeypatch):

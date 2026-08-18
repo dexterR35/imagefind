@@ -4,6 +4,7 @@ import sqlite3
 import threading
 
 import numpy as np
+import pytest
 
 from app.storage import ImageEntry, IndexStore
 
@@ -27,6 +28,7 @@ def test_upsert_save_load_roundtrip(tmp_path):
     assert reloaded.get("a1").ocr_text == "NETBET"
     assert reloaded.get_embedding("a1").tolist() == [1.0, 0.0, 0.0, 0.0]
     assert reloaded.get_by_path("/imgs/a.png").id == "a1"
+    assert reloaded._conn.execute("PRAGMA user_version").fetchone()[0] == 3
 
 
 def test_upsert_save_load_roundtrip_preserves_new_metadata_fields(tmp_path):
@@ -197,6 +199,22 @@ def test_corrupt_db_resets_to_empty(tmp_path):
     assert store.all() == []
     assert store.embeddings.shape == (0, 4)
     assert store.get("a1") is None
+    assert list(tmp_path.glob("index.db.corrupt-*"))
+
+
+def test_database_locked_error_is_not_misclassified_as_corruption(tmp_path, monkeypatch):
+    db_path = tmp_path / "index.db"
+    db_path.write_bytes(b"must remain untouched")
+
+    def locked(_self):
+        raise sqlite3.OperationalError("database is locked")
+
+    monkeypatch.setattr(IndexStore, "_connect", locked)
+    with pytest.raises(sqlite3.OperationalError, match="locked"):
+        IndexStore(tmp_path, embedding_dim=4)
+
+    assert db_path.read_bytes() == b"must remain untouched"
+    assert not list(tmp_path.glob("index.db.corrupt-*"))
 
 
 def test_migrates_legacy_json_and_npy_on_first_load(tmp_path):
@@ -358,6 +376,13 @@ def test_corrupt_db_recovery_also_clears_stale_wal_sidecar(tmp_path):
     assert store.all() == []
     assert store.embeddings.shape == (0, 4)
     assert store.get("a1") is None
+    # SQLite may remove invalid sidecars itself while the first connection is
+    # failing, or the replacement database may create fresh valid sidecars.
+    # Either way, the stale bytes must not remain available for replay.
+    wal = tmp_path / "index.db-wal"
+    shm = tmp_path / "index.db-shm"
+    assert not wal.exists() or wal.read_bytes() != b"stale wal bytes that must not be replayed"
+    assert not shm.exists() or shm.read_bytes() != b"stale shm bytes"
 
 
 def test_migration_logs_warning_on_duplicate_ids_but_keeps_last(tmp_path, caplog):
@@ -391,6 +416,10 @@ def test_migration_logs_warning_on_duplicate_ids_but_keeps_last(tmp_path, caplog
 def test_load_recovers_from_malformed_embedding_blob(tmp_path):
     store = IndexStore(tmp_path, embedding_dim=4)
     store.load()
+    store.upsert(
+        _entry(id="good1", path="/imgs/good.png"),
+        np.array([1.0, 0.0, 0.0, 0.0], dtype=np.float32),
+    )
     # Bypass upsert() to simulate row-level corruption surviving whatever
     # validation exists elsewhere (e.g. a partial/corrupt write at the SQLite
     # row level) - "short" is 5 bytes, not a multiple of float32's 4-byte
@@ -404,10 +433,22 @@ def test_load_recovers_from_malformed_embedding_blob(tmp_path):
     store._conn.commit()
 
     fresh = IndexStore(tmp_path, embedding_dim=4)
-    fresh.load()  # must not raise, per spec's "reset to empty rather than crash" policy
+    fresh.load()
 
-    assert fresh.all() == []
-    assert fresh.embeddings.shape == (0, 4)
+    assert [entry.id for entry in fresh.all()] == ["good1"]
+    assert fresh.embeddings.shape == (1, 4)
+
+
+def test_failed_derived_upsert_rolls_back_the_primary_row(tmp_path, monkeypatch):
+    store = IndexStore(tmp_path, embedding_dim=4)
+    store.load()
+
+    monkeypatch.setattr(store, "_sync_derived", lambda *args: (_ for _ in ()).throw(RuntimeError("boom")))
+    with pytest.raises(RuntimeError, match="boom"):
+        store.upsert(_entry(), np.zeros(4, dtype=np.float32))
+
+    assert store.get("a1") is None
+    assert store.count() == 0
 
 
 def test_upsert_keeps_large_catalog_in_sqlite_without_an_in_memory_buffer(tmp_path):

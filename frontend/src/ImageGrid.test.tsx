@@ -24,4 +24,12 @@ describe("ImageGrid", () => {
     render(<ImageGrid images={[]} onSelect={vi.fn()} />);
     expect(screen.getByText("No images match these filters.")).toBeInTheDocument();
   });
+
+  it("shows only the filename for Windows NAS paths", () => {
+    const windowsImage = { ...sample[0], path: "Z:\\campaign\\Promo ™.png" };
+    render(<ImageGrid images={[windowsImage]} onSelect={vi.fn()} />);
+
+    expect(screen.getByAltText("Promo ™.png")).toBeInTheDocument();
+    expect(screen.queryByText(windowsImage.path)).not.toBeInTheDocument();
+  });
 });

@@ -2,6 +2,7 @@ import logging
 import queue
 import threading
 import time
+from _thread import LockType
 from pathlib import Path
 from typing import TYPE_CHECKING, Callable, Literal
 
@@ -10,7 +11,6 @@ from watchdog.observers import Observer
 
 from . import config
 from .indexer import IMAGE_EXTENSIONS, Indexer
-from .storage import IndexStore
 
 if TYPE_CHECKING:
     from .indexer import ReindexJob
@@ -22,16 +22,17 @@ _WorkKind = Literal["changed", "deleted", "scan_directory", "deleted_directory"]
 
 
 def _wait_until_stable(path: Path, checks: int = 3, interval: float = _STABLE_CHECK_INTERVAL) -> bool:
-    """Return true once a copied file's size has stopped changing."""
-    last_size = -1
+    """Return true once a copied file's size and mtime have stopped changing."""
+    last_signature: tuple[int, int] | None = None
     for _ in range(checks):
         try:
-            size = path.stat().st_size
+            stat = path.stat()
+            signature = (stat.st_size, getattr(stat, "st_mtime_ns", 0))
         except OSError:
             return False
-        if size == last_size:
+        if signature == last_signature:
             return True
-        last_size = size
+        last_signature = signature
         time.sleep(interval)
     return False
 
@@ -40,11 +41,9 @@ class _Handler(FileSystemEventHandler):
     def __init__(
         self,
         indexer: Indexer,
-        store: IndexStore,
         submit: Callable[[_WorkKind, Path], None] | None = None,
     ):
         self._indexer = indexer
-        self._store = store
         # Tests and direct callers remain synchronous; production passes the
         # queue's submit method so watchdog's OS event thread is never blocked
         # by OCR/RAM++ inference.
@@ -105,7 +104,7 @@ class _Handler(FileSystemEventHandler):
         if not _wait_until_stable(path, interval=_STABLE_CHECK_INTERVAL):
             return
         try:
-            changed = self._indexer.index_path_if_needed(path)
+            self._indexer.index_path_if_needed(path)
         except (FileNotFoundError, OSError):
             # A newer rename/delete event will handle a file that disappeared
             # while this older create/modify event was waiting in the queue.
@@ -113,8 +112,6 @@ class _Handler(FileSystemEventHandler):
         except Exception:
             logger.warning("watcher: failed to process %s", path, exc_info=True)
             return
-        if changed:
-            self._store.save()
 
     def _process_deleted(self, path: Path) -> None:
         # Never turn a temporary loss of the NAS root into mass index deletion.
@@ -130,7 +127,7 @@ class _Handler(FileSystemEventHandler):
             images = sorted(
                 candidate
                 for candidate in path.rglob("*")
-                if candidate.suffix.lower() in IMAGE_EXTENSIONS
+                if candidate.is_file() and candidate.suffix.lower() in IMAGE_EXTENSIONS
             )
         except OSError:
             logger.warning("watcher: failed to scan new directory %s", path, exc_info=True)
@@ -147,12 +144,12 @@ class _Handler(FileSystemEventHandler):
 class RealtimeWatcher:
     """Fast event capture plus one serialized model-processing worker."""
 
-    def __init__(self, indexer: Indexer, store: IndexStore):
+    def __init__(self, indexer: Indexer):
         self._queue: queue.Queue[tuple[_WorkKind, Path] | None] = queue.Queue()
         self._pending: set[tuple[_WorkKind, str]] = set()
         self._pending_lock = threading.Lock()
         self._stop_event = threading.Event()
-        self._handler = _Handler(indexer, store, self.submit)
+        self._handler = _Handler(indexer, self.submit)
         self._observer = Observer()
         self._observer.schedule(self._handler, str(indexer.images_dir), recursive=True)
         self._worker = threading.Thread(
@@ -201,10 +198,10 @@ class RealtimeWatcher:
         self._worker.join(timeout=timeout)
 
 
-def start_watcher(indexer: Indexer, store: IndexStore) -> RealtimeWatcher:
+def start_watcher(indexer: Indexer) -> RealtimeWatcher:
     if not indexer.images_dir.is_dir():
         raise FileNotFoundError(f"images_dir {indexer.images_dir} is not reachable")
-    return RealtimeWatcher(indexer, store)
+    return RealtimeWatcher(indexer)
 
 
 def start_reconciliation_loop(
@@ -213,6 +210,7 @@ def start_reconciliation_loop(
     interval_seconds: float,
     stop_event: threading.Event,
     can_run: Callable[[], bool] | None = None,
+    run_lock: LockType | None = None,
 ) -> threading.Thread:
     def loop():
         while not stop_event.wait(interval_seconds):
@@ -220,7 +218,11 @@ def start_reconciliation_loop(
                 continue
             job = job_factory()
             try:
-                indexer.run_reindex(job, confirm_deletions=True)
+                if run_lock is None:
+                    indexer.run_reindex(job, confirm_deletions=True)
+                else:
+                    with run_lock:
+                        indexer.run_reindex(job, confirm_deletions=True)
                 if job.error:
                     logger.warning("reconciliation failed: %s", job.error)
             except Exception:

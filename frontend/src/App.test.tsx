@@ -40,7 +40,7 @@ describe("App", () => {
     fireEvent.click(screen.getByAltText("clover.png"));
     fireEvent.click(screen.getByText("Find Similar"));
 
-    await waitFor(() => expect(api.findSimilar).toHaveBeenCalledWith("a1"));
+    await waitFor(() => expect(api.findSimilar).toHaveBeenCalledWith("a1", expect.anything()));
   });
 
   it("shows an inline error state when search fails, and clears it once a search succeeds", async () => {
@@ -107,10 +107,14 @@ describe("App", () => {
 
     fireEvent.click(screen.getByText("Next"));
     await screen.findByAltText("last.png");
-    expect(searchSpy).toHaveBeenLastCalledWith({}, { sort: "date_desc", offset: 60, limit: 60 });
+    expect(searchSpy).toHaveBeenLastCalledWith({}, {
+      sort: "date_desc", offset: 60, limit: 60, signal: expect.anything(),
+    });
 
     fireEvent.change(screen.getByLabelText("Sort by"), { target: { value: "name_asc" } });
     await screen.findByAltText("sorted.png");
-    expect(searchSpy).toHaveBeenLastCalledWith({}, { sort: "name_asc", offset: 0, limit: 60 });
+    expect(searchSpy).toHaveBeenLastCalledWith({}, {
+      sort: "name_asc", offset: 0, limit: 60, signal: expect.anything(),
+    });
   });
 });

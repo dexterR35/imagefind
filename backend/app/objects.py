@@ -15,6 +15,7 @@ _ram_model = None
 _ram_transform = None
 _ram_default_class_threshold = None
 _ram_load_error: Exception | None = None
+_ram_load_error_signature: tuple[bool, int, int] | None = None
 _load_lock = threading.Lock()
 # Loading, inference, and unloading must not overlap. In particular, clearing
 # the process-wide model while a watcher thread is using it could make another
@@ -35,26 +36,40 @@ _RAM_CHECKPOINT_URL = (
 )
 
 
+def _checkpoint_signature() -> tuple[bool, int, int]:
+    try:
+        stat = config.RAM_CHECKPOINT_PATH.stat()
+        return True, stat.st_size, stat.st_mtime_ns
+    except OSError:
+        return False, 0, 0
+
+
 def _get_ram():
-    global _ram_model, _ram_transform, _ram_default_class_threshold, _ram_load_error
-    if _ram_load_error is not None:
-        # A previous attempt already failed (missing/corrupt checkpoint) -
-        # re-raise the same clear error instead of retrying (and re-failing)
-        # a slow model load on every single image in a reindex run.
-        raise _ram_load_error
+    global _ram_model, _ram_transform, _ram_default_class_threshold
+    global _ram_load_error, _ram_load_error_signature
     if _ram_model is None:
         # Double-checked locking: the reindex background thread and a
         # /search-triggered request thread can both race to lazy-load the
         # model on first use, so the actual load must happen under a lock,
         # with the outer unlocked check kept only as a fast path afterward.
         with _load_lock:
-            if _ram_model is None and _ram_load_error is None:
+            if _ram_model is None:
+                signature = _checkpoint_signature()
+                if _ram_load_error is not None and signature == _ram_load_error_signature:
+                    # Re-raise a cached failure while the checkpoint is still
+                    # unchanged, but automatically retry after install or
+                    # replacement without requiring a backend restart.
+                    raise _ram_load_error
+                if signature != _ram_load_error_signature:
+                    _ram_load_error = None
+                    _ram_load_error_signature = None
                 if not config.RAM_CHECKPOINT_PATH.is_file():
                     _ram_load_error = FileNotFoundError(
                         f"RAM++ checkpoint not found at '{config.RAM_CHECKPOINT_PATH}'. "
                         f"Download ram_plus_swin_large_14m.pth from {_RAM_CHECKPOINT_URL} "
                         "and place it there before indexing."
                     )
+                    _ram_load_error_signature = signature
                     raise _ram_load_error
                 try:
                     _ram_transform = get_transform(image_size=config.RAM_IMAGE_SIZE)
@@ -69,12 +84,15 @@ def _get_ram():
                         f"RAM++ checkpoint at '{config.RAM_CHECKPOINT_PATH}' failed to load: {exc}. "
                         f"It may be incomplete or corrupt - re-download it from {_RAM_CHECKPOINT_URL}."
                     )
+                    _ram_load_error_signature = _checkpoint_signature()
                     raise _ram_load_error from exc
                 # Saved once here so a later conf override can be undone: the
                 # checkpoint's per-tag tuned thresholds only exist in this one
                 # in-memory copy, nowhere else to recover them from otherwise.
                 _ram_default_class_threshold = model.class_threshold.clone()
                 _ram_model = model
+                _ram_load_error = None
+                _ram_load_error_signature = None
     return _ram_transform, _ram_model
 
 

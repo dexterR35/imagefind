@@ -26,6 +26,7 @@ export function Settings({ onReindexComplete }: Props) {
   const [open, setOpen] = useState(false);
   const [settings, setSettings] = useState<SettingsType | null>(null);
   const [customTagsText, setCustomTagsText] = useState("");
+  const [settingsLoadError, setSettingsLoadError] = useState<string | null>(null);
   const [saving, setSaving] = useState(false);
   const [stopping, setStopping] = useState(false);
   const [status, setStatus] = useState<ReindexStatus | null>(null);
@@ -40,10 +41,13 @@ export function Settings({ onReindexComplete }: Props) {
 
   useEffect(() => {
     if (open && settings === null) {
-      fetchSettings().then((s) => {
-        setSettings(s);
-        setCustomTagsText(s.ram_custom_tags.join(", "));
-      });
+      setSettingsLoadError(null);
+      fetchSettings()
+        .then((s) => {
+          setSettings(s);
+          setCustomTagsText(s.ram_custom_tags.join(", "));
+        })
+        .catch(() => setSettingsLoadError("Could not load settings. Check the backend connection."));
     }
     if (open && modelInstalled === null) {
       fetchModelStatus()
@@ -201,6 +205,9 @@ export function Settings({ onReindexComplete }: Props) {
       <button type="button" className="settings-toggle" onClick={() => setOpen((o) => !o)}>
         {open ? "Close Settings" : "Settings"}
       </button>
+      {open && settingsLoadError && (
+        <span className="reindex-error" role="alert">{settingsLoadError}</span>
+      )}
       {open && settings && (
         <div className="settings-panel">
           {modelInstalled === false && (

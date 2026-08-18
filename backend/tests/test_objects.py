@@ -1,4 +1,5 @@
 import numpy as np
+import pytest
 import torch
 from PIL import Image
 
@@ -22,6 +23,37 @@ def test_unload_ram_model_releases_model_and_cuda_cache(monkeypatch):
     assert objects_mod._ram_transform is None
     assert objects_mod._ram_default_class_threshold is None
     assert empty_cache_calls == [True]
+
+
+def test_get_ram_retries_cached_failure_after_checkpoint_is_installed(tmp_path, monkeypatch):
+    checkpoint = tmp_path / "ram_plus.pth"
+    monkeypatch.setattr(objects_mod.config, "RAM_CHECKPOINT_PATH", checkpoint)
+    monkeypatch.setattr(objects_mod, "_ram_model", None)
+    monkeypatch.setattr(objects_mod, "_ram_transform", None)
+    monkeypatch.setattr(objects_mod, "_ram_default_class_threshold", None)
+    monkeypatch.setattr(objects_mod, "_ram_load_error", None)
+    monkeypatch.setattr(objects_mod, "_ram_load_error_signature", None)
+
+    with pytest.raises(FileNotFoundError):
+        objects_mod._get_ram()
+
+    checkpoint.write_bytes(b"installed")
+
+    class FakeModel:
+        class_threshold = torch.tensor([0.5])
+
+        def eval(self):
+            return self
+
+        def to(self, _device):
+            return self
+
+    monkeypatch.setattr(objects_mod, "get_transform", lambda image_size: "transform")
+    monkeypatch.setattr(objects_mod, "ram_plus", lambda **kwargs: FakeModel())
+
+    transform, model = objects_mod._get_ram()
+    assert transform == "transform"
+    assert isinstance(model, FakeModel)
 
 
 def test_detect_ram_objects_returns_deduped_sorted_list(tmp_path):

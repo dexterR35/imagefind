@@ -3,10 +3,11 @@ from app.model_download import ModelDownloadJob, is_ram_checkpoint_installed, ru
 
 
 class _FakeResponse:
-    def __init__(self, chunks: list[bytes], status_code: int = 200):
+    def __init__(self, chunks: list[bytes], status_code: int = 200, content_length: int | None = None):
         self._chunks = chunks
         self.status_code = status_code
-        self.headers = {"content-length": str(sum(len(c) for c in chunks))}
+        expected = sum(len(c) for c in chunks) if content_length is None else content_length
+        self.headers = {"content-length": str(expected)}
 
     def raise_for_status(self):
         if self.status_code >= 400:
@@ -84,5 +85,22 @@ def test_run_download_records_error_and_cleans_up_on_failure(tmp_path, monkeypat
     assert job.done is True
     assert job.error is not None
     assert "network unreachable" in job.error
+    assert not dest.exists()
+    assert not dest.with_suffix(dest.suffix + ".part").exists()
+
+
+def test_run_download_rejects_a_truncated_response(tmp_path, monkeypatch):
+    dest = tmp_path / "ram_plus.pth"
+    monkeypatch.setattr(config, "RAM_CHECKPOINT_PATH", dest)
+    monkeypatch.setattr(
+        "app.model_download.requests.get",
+        lambda *a, **k: _FakeResponse([b"partial"], content_length=100),
+    )
+
+    job = ModelDownloadJob(id="j4")
+    run_download(job)
+
+    assert job.done is True
+    assert job.error is not None and "incomplete download" in job.error
     assert not dest.exists()
     assert not dest.with_suffix(dest.suffix + ".part").exists()

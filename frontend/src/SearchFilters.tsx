@@ -16,8 +16,24 @@ export function SearchFilters({ onChange }: Props) {
   const [object, setObject] = useState<string | undefined>(undefined);
 
   useEffect(() => {
-    fetchColors().then(setColors);
-    fetchObjects().then(setObjects);
+    let active = true;
+    Promise.all([fetchColors(), fetchObjects()])
+      .then(([nextColors, nextObjects]) => {
+        if (!active) return;
+        setColors(nextColors);
+        setObjects(nextObjects);
+      })
+      .catch(() => {
+        // Filters are optional search aids. Keep the text search usable when
+        // the backend is temporarily unavailable and avoid an unhandled
+        // promise rejection in the browser.
+        if (!active) return;
+        setColors([]);
+        setObjects([]);
+      });
+    return () => {
+      active = false;
+    };
   }, []);
 
   // Debounce the free-text input only: every keystroke would otherwise trigger
@@ -37,6 +53,7 @@ export function SearchFilters({ onChange }: Props) {
       <input
         type="text"
         placeholder="Search text or tags..."
+        maxLength={200}
         value={text}
         onChange={(e) => setText(e.target.value)}
       />

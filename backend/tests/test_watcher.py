@@ -46,6 +46,23 @@ def test_wait_until_stable_returns_false_when_size_keeps_changing(tmp_path, monk
     assert _wait_until_stable(scoped_path, checks=3, interval=0.01) is False
 
 
+def test_wait_until_stable_detects_same_size_content_changes(tmp_path, monkeypatch):
+    path = tmp_path / "still-changing.png"
+    path.write_bytes(b"xxxx")
+    mtimes = iter([1, 2, 3])
+
+    class _OneOffPath(type(path)):
+        pass
+
+    scoped_path = _OneOffPath(path)
+    monkeypatch.setattr(
+        _OneOffPath,
+        "stat",
+        lambda self: SimpleNamespace(st_size=4, st_mtime_ns=next(mtimes)),
+    )
+    assert _wait_until_stable(scoped_path, checks=3, interval=0.01) is False
+
+
 def test_handler_on_modified_processes_and_upserts_image(tmp_path, monkeypatch):
     images_dir = tmp_path / "images"
     images_dir.mkdir()
@@ -70,7 +87,7 @@ def test_handler_on_modified_processes_and_upserts_image(tmp_path, monkeypatch):
     monkeypatch.setattr(indexer, "process_image", fake_process_image)
     monkeypatch.setattr("app.watcher._STABLE_CHECK_INTERVAL", 0.01)
 
-    handler = _Handler(indexer, store)
+    handler = _Handler(indexer)
     handler.on_modified(_fake_event(img_path))
 
     assert store.get_by_path(str(img_path)) is not None
@@ -108,7 +125,7 @@ def test_handler_on_modified_skips_reprocessing_an_already_indexed_unchanged_fil
     monkeypatch.setattr(indexer, "process_image", fake_process_image)
     monkeypatch.setattr("app.watcher._STABLE_CHECK_INTERVAL", 0.01)
 
-    handler = _Handler(indexer, store)
+    handler = _Handler(indexer)
     handler.on_modified(_fake_event(img_path))
     handler.on_modified(_fake_event(img_path))
 
@@ -127,7 +144,7 @@ def test_handler_ignores_non_image_and_directory_events(tmp_path, monkeypatch):
     calls = []
     monkeypatch.setattr(indexer, "process_image", lambda path, settings: calls.append(path))
 
-    handler = _Handler(indexer, store)
+    handler = _Handler(indexer)
     handler.on_modified(_fake_event(images_dir / "notes.txt"))
     handler.on_modified(_fake_event(images_dir / "subfolder", is_directory=True))
 
@@ -152,7 +169,7 @@ def test_handler_on_deleted_removes_entry(tmp_path):
     )
     indexer = Indexer(images_dir, index_dir, store)
 
-    handler = _Handler(indexer, store)
+    handler = _Handler(indexer)
     handler.on_deleted(_fake_event(img_path))
 
     assert store.get_by_path(str(img_path)) is None
@@ -192,7 +209,7 @@ def test_handler_on_moved_removes_old_path_and_indexes_destination(tmp_path, mon
     monkeypatch.setattr(indexer, "index_path_if_needed", fake_index)
     monkeypatch.setattr("app.watcher._STABLE_CHECK_INTERVAL", 0.01)
 
-    _Handler(indexer, store).on_moved(_fake_event(old_path, destination=new_path))
+    _Handler(indexer).on_moved(_fake_event(old_path, destination=new_path))
 
     assert store.get_by_path(str(old_path)) is None
     assert store.get_by_path(str(new_path)).id == "new1"
@@ -224,7 +241,7 @@ def test_handler_on_deleted_directory_removes_children_and_thumbnails(tmp_path):
         )
 
     indexer = Indexer(images_dir, index_dir, store)
-    _Handler(indexer, store).on_deleted(_fake_event(deleted_dir, is_directory=True))
+    _Handler(indexer).on_deleted(_fake_event(deleted_dir, is_directory=True))
 
     assert store.count() == 0
     assert all(not thumbnail.exists() for thumbnail in thumbnails)
@@ -247,7 +264,7 @@ def test_handler_does_not_delete_index_when_nas_root_is_unreachable(tmp_path):
     )
     images_dir.rmdir()
 
-    _Handler(Indexer(images_dir, index_dir, store), store).on_deleted(_fake_event(image_path))
+    _Handler(Indexer(images_dir, index_dir, store)).on_deleted(_fake_event(image_path))
 
     assert store.get_by_path(str(image_path)) is not None
 

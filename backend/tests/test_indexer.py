@@ -63,6 +63,54 @@ def test_process_image_captures_dimensions_format_and_falls_back_date_taken(tmp_
     assert entry.indexed_at > 0
 
 
+def test_process_image_removes_temporary_thumbnail_after_pipeline_failure(tmp_path, monkeypatch):
+    images_dir = tmp_path / "images"
+    _make_images(images_dir, count=1)
+    index_dir = tmp_path / "index"
+    store = IndexStore(index_dir, embedding_dim=512)
+    store.load()
+    indexer = Indexer(images_dir, index_dir, store)
+    monkeypatch.setattr("app.indexer.embeddings.embed_image", lambda image: np.zeros(512, dtype=np.float32))
+    monkeypatch.setattr("app.indexer.ocr.extract_text", lambda path: (_ for _ in ()).throw(RuntimeError("OCR failed")))
+
+    with pytest.raises(RuntimeError, match="OCR failed"):
+        indexer.process_image(images_dir / "img000.png", indexer._current_settings())
+
+    assert list((index_dir / "thumbnails").glob("*")) == []
+
+
+def test_cleanup_orphan_thumbnails_preserves_referenced_cache(tmp_path):
+    images_dir = tmp_path / "images"
+    images_dir.mkdir()
+    index_dir = tmp_path / "index"
+    thumbs = index_dir / "thumbnails"
+    thumbs.mkdir(parents=True)
+    referenced = thumbs / "keep.jpg"
+    orphan = thumbs / "orphan.jpg"
+    abandoned_temp = thumbs / "abandoned.jpg.tmp"
+    unrelated = thumbs / "notes.txt"
+    for path in (referenced, orphan, abandoned_temp, unrelated):
+        path.write_bytes(b"cache")
+
+    store = IndexStore(index_dir, embedding_dim=512)
+    store.load()
+    store.upsert(
+        ImageEntry(
+            id="keep", path=str(images_dir / "keep.png"), thumbnail_path=str(referenced),
+            ocr_text="", colors=[], objects=[], mtime=0.0, size=0,
+        ),
+        np.zeros(512, dtype=np.float32),
+    )
+
+    removed = Indexer(images_dir, index_dir, store).cleanup_orphan_thumbnails()
+
+    assert removed == 2
+    assert referenced.exists()
+    assert unrelated.exists()
+    assert not orphan.exists()
+    assert not abandoned_temp.exists()
+
+
 def test_run_reindex_processes_new_and_skips_unchanged(tmp_path, monkeypatch):
     images_dir = tmp_path / "images"
     _make_images(images_dir)

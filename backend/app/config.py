@@ -97,3 +97,10 @@ WATCHER_STABLE_CHECK_SECONDS = float(os.environ.get("WATCHER_STABLE_CHECK_SECOND
 # needs_reindex()-gated scan, same as the manual Reindex button, just run on
 # a low-frequency timer instead of only on click.
 RECONCILE_INTERVAL_SECONDS = float(os.environ.get("RECONCILE_INTERVAL_SECONDS", str(4 * 60 * 60)))
+
+# Search protection for a LAN-facing server. The frontend already debounces
+# typing, while this server-side window also covers scripts and other clients.
+SEARCH_RATE_LIMIT_REQUESTS = max(1, int(os.environ.get("SEARCH_RATE_LIMIT_REQUESTS", "30")))
+SEARCH_RATE_LIMIT_WINDOW_SECONDS = max(
+    0.1, float(os.environ.get("SEARCH_RATE_LIMIT_WINDOW_SECONDS", "10"))
+)

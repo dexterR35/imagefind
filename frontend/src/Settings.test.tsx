@@ -33,6 +33,15 @@ describe("Settings", () => {
     expect(screen.getByDisplayValue("/photos")).toBeInTheDocument();
   });
 
+  it("shows a connection error when settings fail to load", async () => {
+    vi.spyOn(api, "fetchSettings").mockRejectedValue(new Error("offline"));
+
+    render(<Settings onReindexComplete={vi.fn()} />);
+    fireEvent.click(screen.getByText("Settings"));
+
+    expect(await screen.findByRole("alert")).toHaveTextContent("Could not load settings");
+  });
+
   it("includes the edited image folder path when saving", async () => {
     vi.spyOn(api, "fetchSettings").mockResolvedValue(sampleSettings);
     const updateSpy = vi.spyOn(api, "updateSettings").mockResolvedValue({

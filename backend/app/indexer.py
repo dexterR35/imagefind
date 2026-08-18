@@ -76,48 +76,70 @@ class Indexer:
         image_id = existing.id if existing else uuid.uuid4().hex
 
         thumb_path = self.index_dir / "thumbnails" / f"{image_id}.jpg"
-        thumbnails.make_thumbnail(path, thumb_path)
+        temporary_thumb = thumb_path.with_suffix(".jpg.tmp")
+        try:
+            thumbnails.make_thumbnail(path, temporary_thumb)
 
-        with Image.open(path) as img:
-            # Captured before .convert() below, which returns a new Image
-            # object with .format unset and no EXIF - both must be read off
-            # the freshly-opened original.
-            width, height = img.size
-            img_format = img.format or path.suffix.lstrip(".").upper()
-            date_taken = image_utils.extract_date_taken(img, fallback=stat.st_mtime)
+            with Image.open(path) as img:
+                # Captured before .convert() below, which returns a new Image
+                # object with .format unset and no EXIF - both must be read off
+                # the freshly-opened original.
+                width, height = img.size
+                img_format = img.format or path.suffix.lstrip(".").upper()
+                date_taken = image_utils.extract_date_taken(img, fallback=stat.st_mtime)
 
-            img = img.convert("RGBA")
-            color_names = colors_mod.extract_dominant_colors(
-                img, k=settings.color_clusters, min_share=settings.color_min_share
+                img = img.convert("RGBA")
+                color_names = colors_mod.extract_dominant_colors(
+                    img, k=settings.color_clusters, min_share=settings.color_min_share
+                )
+                embedding = embeddings.embed_image(img)
+
+            text = ocr.extract_text(path)
+            object_labels = set(objects_mod.detect_ram_objects(path, conf=settings.ram_confidence))
+            if settings.custom_tags:
+                object_labels |= set(
+                    objects_mod.detect_custom_tags(
+                        embedding, settings.custom_tags, settings.custom_tag_threshold
+                    )
+                )
+            object_labels = sorted(object_labels)
+
+            entry = ImageEntry(
+                id=image_id, path=str(path), thumbnail_path=str(thumb_path),
+                ocr_text=text, colors=color_names, objects=object_labels,
+                mtime=stat.st_mtime, size=stat.st_size,
+                width=width, height=height, format=img_format,
+                date_taken=date_taken, indexed_at=time.time(),
             )
-            embedding = embeddings.embed_image(img)
-
-        text = ocr.extract_text(path)
-        object_labels = set(objects_mod.detect_ram_objects(path, conf=settings.ram_confidence))
-        if settings.custom_tags:
-            object_labels |= set(
-                objects_mod.detect_custom_tags(embedding, settings.custom_tags, settings.custom_tag_threshold)
-            )
-        object_labels = sorted(object_labels)
-
-        entry = ImageEntry(
-            id=image_id, path=str(path), thumbnail_path=str(thumb_path),
-            ocr_text=text, colors=color_names, objects=object_labels,
-            mtime=stat.st_mtime, size=stat.st_size,
-            width=width, height=height, format=img_format,
-            date_taken=date_taken, indexed_at=time.time(),
-        )
-        return entry, embedding
+            os.replace(temporary_thumb, thumb_path)
+            return entry, embedding
+        finally:
+            temporary_thumb.unlink(missing_ok=True)
 
     def index_path_if_needed(
-        self, path: Path, settings: ReindexSettings | None = None, force: bool = False
+        self,
+        path: Path,
+        settings: ReindexSettings | None = None,
+        force: bool = False,
+        persist: bool = True,
     ) -> bool:
         """Index one path exactly once across watcher/reindex threads."""
         with self._processing_lock:
             if not force and not self.store.needs_reindex(path):
                 return False
+            existing = self.store.get_by_path(str(path))
             entry, embedding = self.process_image(path, settings or self._current_settings())
-            self.store.upsert(entry, embedding)
+            try:
+                self.store.upsert(entry, embedding)
+                if persist:
+                    # Watcher events index one file outside a batch and must
+                    # survive a process restart immediately. Full reindexes
+                    # opt out and retain their periodic 50-image commits.
+                    self.store.save()
+            except Exception:
+                if existing is None:
+                    self._remove_thumbnails([entry.thumbnail_path])
+                raise
             return True
 
     def _remove_thumbnails(self, thumbnails: list[str]) -> None:
@@ -143,6 +165,30 @@ class Indexer:
             removed_thumbnails = self.store.delete_under_directory(str(path))
             self._remove_thumbnails(removed_thumbnails)
             return len(removed_thumbnails)
+
+    def cleanup_orphan_thumbnails(self) -> int:
+        """Remove cached files that no database row can serve."""
+        with self._processing_lock:
+            thumbnail_root = (self.index_dir / "thumbnails").resolve()
+            if not thumbnail_root.is_dir():
+                return 0
+            referenced = {
+                Path(path).resolve() for path in self.store.all_thumbnail_paths()
+            }
+            removed = 0
+            for thumbnail in thumbnail_root.iterdir():
+                if (
+                    not thumbnail.is_file()
+                    or (thumbnail.suffix.lower() != ".jpg" and not thumbnail.name.endswith(".jpg.tmp"))
+                    or thumbnail.resolve() in referenced
+                ):
+                    continue
+                try:
+                    thumbnail.unlink()
+                    removed += 1
+                except OSError:
+                    logger.warning("failed to remove orphan thumbnail %s", thumbnail, exc_info=True)
+            return removed
 
     def _list_image_paths(self) -> list[Path]:
         if not self.images_dir.is_dir():
@@ -191,7 +237,7 @@ class Indexer:
                         objects_mod.ensure_ram_ready()
                         ram_ready = True
                     try:
-                        self.index_path_if_needed(path, settings, force=force)
+                        self.index_path_if_needed(path, settings, force=force, persist=False)
                     except Exception as exc:
                         job.failed += 1
                         logger.warning("skipping %s: %s", path, exc)

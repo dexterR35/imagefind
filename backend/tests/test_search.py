@@ -1,12 +1,13 @@
 import numpy as np
+import pytest
 
 from app.search import find_similar, search
 from app.storage import ImageEntry, IndexStore
 
 
-def _entry(id, colors=None, objects=None, ocr_text="", date_taken=0.0, size=0):
+def _entry(id, colors=None, objects=None, ocr_text="", date_taken=0.0, size=0, path=None):
     return ImageEntry(
-        id=id, path=f"/imgs/{id}.png", thumbnail_path=f"/t/{id}.jpg",
+        id=id, path=path or f"/imgs/{id}.png", thumbnail_path=f"/t/{id}.jpg",
         ocr_text=ocr_text, colors=colors or [], objects=objects or [],
         mtime=0.0, size=size, date_taken=date_taken,
     )
@@ -47,6 +48,53 @@ def test_search_text_matches_object_tags_too(tmp_path):
     ])
     result, _ = search(store, text="clover")
     assert [e.id for e in result] == ["a"]
+
+
+def test_search_text_matches_filename_folder_and_color(tmp_path):
+    store = _store_with(tmp_path, [
+        (_entry("filename", path="/campaigns/summer/Christmas Banner.png"), [1.0, 0.0]),
+        (_entry("folder", path="/campaigns/roulette/photo.png"), [1.0, 0.0]),
+        (_entry("color", colors=["magenta"]), [1.0, 0.0]),
+        (_entry("other", path="/unrelated/photo.png", colors=["blue"]), [1.0, 0.0]),
+    ])
+
+    assert [e.id for e in search(store, text="Christmas")[0]] == ["filename"]
+    assert [e.id for e in search(store, text="roulette")[0]] == ["folder"]
+    assert [e.id for e in search(store, text="magenta")[0]] == ["color"]
+
+
+def test_short_search_matches_all_metadata_without_fts(tmp_path):
+    store = _store_with(tmp_path, [
+        (_entry("filename", path="/images/AI.png"), [1.0, 0.0]),
+        (_entry("ocr", ocr_text="AI"), [1.0, 0.0]),
+        (_entry("object", objects=["AI"]), [1.0, 0.0]),
+        (_entry("color", colors=["AI"]), [1.0, 0.0]),
+    ])
+
+    results, total = search(store, text="AI")
+    assert total == 4
+    assert {entry.id for entry in results} == {"filename", "ocr", "object", "color"}
+
+
+def test_search_quotes_fts_input_instead_of_treating_it_as_query_syntax(tmp_path):
+    store = _store_with(tmp_path, [
+        (_entry("literal", ocr_text='sale "OR" bonus'), [1.0, 0.0]),
+        (_entry("unrelated", ocr_text="sale only"), [1.0, 0.0]),
+    ])
+
+    results, total = search(store, text='sale "OR" bonus')
+    assert total == 1
+    assert [entry.id for entry in results] == ["literal"]
+
+
+@pytest.mark.parametrize("payload", ["'", '"', '" OR *', "NEAR(", "***", "%_[]", "\\", "😀"])
+def test_search_special_characters_never_become_fts_syntax(tmp_path, payload):
+    store = _store_with(tmp_path, [(_entry("safe", ocr_text="ordinary text"), [1.0, 0.0])])
+
+    results, total = search(store, text=payload)
+
+    assert results == []
+    assert total == 0
 
 
 def test_search_text_has_no_semantic_fallback(tmp_path):

@@ -6,7 +6,7 @@ interface Props {
 }
 
 export function ImageCard({ image, onClick }: Props) {
-  const filename = image.path.split("/").pop() ?? image.path;
+  const filename = image.path.split(/[\\/]/).pop() ?? image.path;
   const details = [
     image.format,
     image.width > 0 && image.height > 0 ? `${image.width} × ${image.height}` : "",

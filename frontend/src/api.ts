@@ -32,6 +32,7 @@ export interface SearchOptions {
   sort?: SortOption;
   offset?: number;
   limit?: number;
+  signal?: AbortSignal;
 }
 
 export interface SearchResponse {
@@ -115,14 +116,16 @@ export async function search(
   if (options.sort) params.set("sort", options.sort);
   if (options.offset !== undefined) params.set("offset", String(options.offset));
   if (options.limit !== undefined) params.set("limit", String(options.limit));
-  const res = await fetch(`${BASE_URL}/search?${params.toString()}`);
+  const url = `${BASE_URL}/search?${params.toString()}`;
+  const res = options.signal ? await fetch(url, { signal: options.signal }) : await fetch(url);
   if (!res.ok) throw new Error(`search failed: ${res.status}`);
   const data: SearchResponse = await res.json();
   return { ...data, results: toAbsolute(data.results) };
 }
 
-export async function findSimilar(imageId: string): Promise<ImageResult[]> {
-  const res = await fetch(`${BASE_URL}/search/similar/${imageId}`);
+export async function findSimilar(imageId: string, signal?: AbortSignal): Promise<ImageResult[]> {
+  const url = `${BASE_URL}/search/similar/${imageId}`;
+  const res = signal ? await fetch(url, { signal }) : await fetch(url);
   if (!res.ok) throw new Error(`find similar failed: ${res.status}`);
   const data: ImageResult[] = await res.json();
   return toAbsolute(data);

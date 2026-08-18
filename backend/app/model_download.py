@@ -55,9 +55,19 @@ def run_download(job: ModelDownloadJob) -> None:
                     if chunk:
                         f.write(chunk)
                         job.downloaded_bytes += len(chunk)
+        # A cancel request may arrive after the final chunk but before the
+        # atomic rename. Honour it here as well so the endpoint never reports
+        # cancelled while a checkpoint was installed anyway.
+        if job.cancel_event.is_set():
+            job.cancelled = True
         if job.cancelled:
             tmp.unlink(missing_ok=True)
         else:
+            if job.total_bytes and job.downloaded_bytes != job.total_bytes:
+                raise IOError(
+                    "incomplete download: "
+                    f"received {job.downloaded_bytes} of {job.total_bytes} bytes"
+                )
             os.replace(tmp, dest)
     except Exception as exc:
         tmp.unlink(missing_ok=True)

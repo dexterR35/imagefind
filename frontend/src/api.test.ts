@@ -46,6 +46,22 @@ describe("search", () => {
     );
   });
 
+  it("passes an AbortSignal so stale searches can be cancelled", async () => {
+    const mockFetch = vi.fn().mockResolvedValue({
+      ok: true,
+      json: async () => ({ results: [], total: 0 }),
+    });
+    vi.stubGlobal("fetch", mockFetch);
+    const controller = new AbortController();
+
+    await search({}, { signal: controller.signal });
+
+    expect(mockFetch).toHaveBeenCalledWith(
+      "http://localhost:8000/search?",
+      { signal: controller.signal },
+    );
+  });
+
   it("throws when the response is not ok", async () => {
     const mockFetch = vi.fn().mockResolvedValue({ ok: false, status: 500, json: async () => ({}) });
     vi.stubGlobal("fetch", mockFetch);

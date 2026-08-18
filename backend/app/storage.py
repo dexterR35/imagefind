@@ -2,6 +2,7 @@ import json
 import logging
 import sqlite3
 import threading
+import time
 from dataclasses import dataclass, fields
 from pathlib import Path
 
@@ -42,8 +43,11 @@ CREATE TABLE IF NOT EXISTS image_objects (
 );
 
 CREATE VIRTUAL TABLE IF NOT EXISTS image_fts USING fts5(
+    filename,
+    path,
     ocr_text,
     objects,
+    colors,
     tokenize='trigram'
 );
 
@@ -77,7 +81,8 @@ _INSERT_COLUMNS = (
     "width, height, format, date_taken, indexed_at, embedding"
 )
 _PLACEHOLDERS = ", ".join("?" * 15)
-_DERIVED_SCHEMA_VERSION = "2"
+_DATABASE_SCHEMA_VERSION = 3
+_DERIVED_SCHEMA_VERSION = "3"
 
 
 @dataclass
@@ -142,68 +147,84 @@ class IndexStore:
             conn.close()
             raise
 
+    @staticmethod
+    def _is_corruption_error(exc: sqlite3.DatabaseError) -> bool:
+        code = getattr(exc, "sqlite_errorcode", None)
+        if code in (sqlite3.SQLITE_CORRUPT, sqlite3.SQLITE_NOTADB):
+            return True
+        message = str(exc).lower()
+        return "malformed" in message or "not a database" in message
+
+    def _quarantine_corrupt_database(self) -> None:
+        timestamp = time.time_ns()
+        for suffix in ("", "-wal", "-shm"):
+            source = self.db_path.with_name(self.db_path.name + suffix)
+            if source.exists():
+                destination = source.with_name(source.name + f".corrupt-{timestamp}")
+                source.replace(destination)
+
+    def _initialize_schema(self, conn: sqlite3.Connection) -> None:
+        # The original images table may predate the new columns, so it must be
+        # created/migrated before the rest of the schema refers to filename.
+        conn.execute(
+            "CREATE TABLE IF NOT EXISTS images ("
+            "id TEXT PRIMARY KEY, path TEXT UNIQUE NOT NULL, filename TEXT NOT NULL DEFAULT '', "
+            "thumbnail_path TEXT NOT NULL, ocr_text TEXT NOT NULL, colors TEXT NOT NULL, "
+            "objects TEXT NOT NULL, mtime REAL NOT NULL, size INTEGER NOT NULL, "
+            "width INTEGER NOT NULL DEFAULT 0, height INTEGER NOT NULL DEFAULT 0, "
+            "format TEXT NOT NULL DEFAULT '', date_taken REAL NOT NULL DEFAULT 0, "
+            "indexed_at REAL NOT NULL DEFAULT 0, embedding BLOB NOT NULL)"
+        )
+        self._migrate_add_metadata_columns(conn)
+        fts_columns = [
+            row[1] for row in conn.execute("PRAGMA table_info(image_fts)").fetchall()
+        ]
+        expected_fts_columns = ["filename", "path", "ocr_text", "objects", "colors"]
+        if fts_columns and fts_columns != expected_fts_columns:
+            # FTS5 virtual tables cannot be ALTERed to add searchable fields.
+            # Drop only this derived table; load() rebuilds it from images.
+            conn.execute("DROP TABLE image_fts")
+        conn.executescript(_SCHEMA)
+        vector_schema = conn.execute(
+            "SELECT sql FROM sqlite_master WHERE type='table' AND name='image_vectors'"
+        ).fetchone()
+        expected_dimension = f"float[{self.embedding_dim}]"
+        if vector_schema and expected_dimension not in vector_schema[0]:
+            # Preserve image rows if a future embedding model changes
+            # dimensions; only the derived vec0 index needs rebuilding.
+            conn.execute("DROP TABLE image_vectors")
+        conn.execute(
+            f"CREATE VIRTUAL TABLE IF NOT EXISTS image_vectors USING vec0("
+            f"embedding float[{self.embedding_dim}] distance_metric=cosine)"
+        )
+        conn.execute(
+            "CREATE TRIGGER IF NOT EXISTS images_delete_derived AFTER DELETE ON images BEGIN "
+            "DELETE FROM image_colors WHERE image_id=OLD.id; "
+            "DELETE FROM image_objects WHERE image_id=OLD.id; "
+            "DELETE FROM image_fts WHERE rowid=OLD.rowid; "
+            "DELETE FROM image_vectors WHERE rowid=OLD.rowid; END"
+        )
+        conn.commit()
+
     def _open_db(self) -> sqlite3.Connection:
         try:
             conn = self._connect()
-        except sqlite3.DatabaseError:
-            logger.warning("IndexStore: %s is corrupt, resetting to a fresh empty index", self.db_path)
-            for suffix in ("", "-wal", "-shm"):
-                self.db_path.with_name(self.db_path.name + suffix).unlink(missing_ok=True)
+        except sqlite3.DatabaseError as exc:
+            if not self._is_corruption_error(exc):
+                raise
+            logger.warning("IndexStore: %s is corrupt; quarantining it", self.db_path)
+            self._quarantine_corrupt_database()
             conn = self._connect()
         try:
-            # The original images table may predate the new columns, so it
-            # must be created/migrated before the rest of the schema refers
-            # to filename in an index.
-            conn.execute(
-                "CREATE TABLE IF NOT EXISTS images ("
-                "id TEXT PRIMARY KEY, path TEXT UNIQUE NOT NULL, filename TEXT NOT NULL DEFAULT '', "
-                "thumbnail_path TEXT NOT NULL, ocr_text TEXT NOT NULL, colors TEXT NOT NULL, "
-                "objects TEXT NOT NULL, mtime REAL NOT NULL, size INTEGER NOT NULL, "
-                "width INTEGER NOT NULL DEFAULT 0, height INTEGER NOT NULL DEFAULT 0, "
-                "format TEXT NOT NULL DEFAULT '', date_taken REAL NOT NULL DEFAULT 0, "
-                "indexed_at REAL NOT NULL DEFAULT 0, embedding BLOB NOT NULL)"
-            )
-            self._migrate_add_metadata_columns(conn)
-            conn.executescript(_SCHEMA)
-            vector_schema = conn.execute(
-                "SELECT sql FROM sqlite_master WHERE type='table' AND name='image_vectors'"
-            ).fetchone()
-            expected_dimension = f"float[{self.embedding_dim}]"
-            if vector_schema and expected_dimension not in vector_schema[0]:
-                # Preserve image rows if a future embedding model changes
-                # dimensions; only the derived vec0 index needs rebuilding.
-                conn.execute("DROP TABLE image_vectors")
-            conn.execute(
-                f"CREATE VIRTUAL TABLE IF NOT EXISTS image_vectors USING vec0("
-                f"embedding float[{self.embedding_dim}] distance_metric=cosine)"
-            )
-            conn.execute(
-                "CREATE TRIGGER IF NOT EXISTS images_delete_derived AFTER DELETE ON images BEGIN "
-                "DELETE FROM image_colors WHERE image_id=OLD.id; "
-                "DELETE FROM image_objects WHERE image_id=OLD.id; "
-                "DELETE FROM image_fts WHERE rowid=OLD.rowid; "
-                "DELETE FROM image_vectors WHERE rowid=OLD.rowid; END"
-            )
-            conn.commit()
-        except sqlite3.DatabaseError:
-            logger.warning("IndexStore: %s is corrupt, resetting to a fresh empty index", self.db_path)
+            self._initialize_schema(conn)
+        except sqlite3.DatabaseError as exc:
             conn.close()
-            for suffix in ("", "-wal", "-shm"):
-                self.db_path.with_name(self.db_path.name + suffix).unlink(missing_ok=True)
+            if not self._is_corruption_error(exc):
+                raise
+            logger.warning("IndexStore: %s is corrupt; quarantining it", self.db_path)
+            self._quarantine_corrupt_database()
             conn = self._connect()
-            conn.executescript(_SCHEMA)
-            conn.execute(
-                f"CREATE VIRTUAL TABLE image_vectors USING vec0("
-                f"embedding float[{self.embedding_dim}] distance_metric=cosine)"
-            )
-            conn.execute(
-                "CREATE TRIGGER images_delete_derived AFTER DELETE ON images BEGIN "
-                "DELETE FROM image_colors WHERE image_id=OLD.id; "
-                "DELETE FROM image_objects WHERE image_id=OLD.id; "
-                "DELETE FROM image_fts WHERE rowid=OLD.rowid; "
-                "DELETE FROM image_vectors WHERE rowid=OLD.rowid; END"
-            )
-            conn.commit()
+            self._initialize_schema(conn)
         return conn
 
     @staticmethod
@@ -241,8 +262,16 @@ class IndexStore:
             [(entry.id, label) for label in sorted(set(entry.objects))],
         )
         self._conn.execute(
-            "INSERT INTO image_fts(rowid, ocr_text, objects) VALUES (?, ?, ?)",
-            (rowid, entry.ocr_text, " ".join(entry.objects)),
+            "INSERT INTO image_fts(rowid, filename, path, ocr_text, objects, colors) "
+            "VALUES (?, ?, ?, ?, ?, ?)",
+            (
+                rowid,
+                Path(entry.path).name,
+                entry.path,
+                entry.ocr_text,
+                " ".join(entry.objects),
+                " ".join(entry.colors),
+            ),
         )
         self._conn.execute(
             "INSERT INTO image_vectors(rowid, embedding) VALUES (?, ?)",
@@ -305,50 +334,57 @@ class IndexStore:
         return image_count != vector_count or image_count != fts_count
 
     def _rebuild_derived_indexes(self) -> None:
-        self._conn.execute("DELETE FROM image_colors")
-        self._conn.execute("DELETE FROM image_objects")
-        self._conn.execute("DELETE FROM image_fts")
-        self._conn.execute("DELETE FROM image_vectors")
-        rows = self._conn.execute(
-            f"SELECT rowid, {_SELECT_COLUMNS}, embedding FROM images ORDER BY rowid"
-        ).fetchall()
-        for row in rows:
-            rowid = row[0]
-            entry = _row_to_entry(row[1:14])
-            vector = np.frombuffer(row[14], dtype=np.float32)
-            if vector.shape != (self.embedding_dim,):
-                raise ValueError(f"unreadable embedding for {entry.id!r}")
+        self._conn.execute("SAVEPOINT rebuild_derived_indexes")
+        try:
+            self._conn.execute("DELETE FROM image_colors")
+            self._conn.execute("DELETE FROM image_objects")
+            self._conn.execute("DELETE FROM image_fts")
+            self._conn.execute("DELETE FROM image_vectors")
+            rows = self._conn.execute(
+                f"SELECT rowid, {_SELECT_COLUMNS}, embedding FROM images ORDER BY rowid"
+            ).fetchall()
+            for row in rows:
+                rowid = row[0]
+                try:
+                    entry = _row_to_entry(row[1:14])
+                    vector = np.frombuffer(row[14], dtype=np.float32)
+                    if vector.shape != (self.embedding_dim,):
+                        raise ValueError(
+                            f"embedding shape {vector.shape}; expected ({self.embedding_dim},)"
+                        )
+                except (json.JSONDecodeError, TypeError, ValueError) as exc:
+                    # A single malformed primary row is recoverable from its
+                    # source image. Do not discard the rest of a large index.
+                    logger.warning("dropping unreadable image rowid %s: %s", rowid, exc)
+                    self._conn.execute("DELETE FROM images WHERE rowid=?", (rowid,))
+                    continue
+                self._conn.execute(
+                    "UPDATE images SET filename=? WHERE rowid=?",
+                    (Path(entry.path).name, rowid),
+                )
+                self._sync_derived(rowid, entry, vector)
             self._conn.execute(
-                "UPDATE images SET filename=? WHERE rowid=?",
-                (Path(entry.path).name, rowid),
+                "INSERT OR REPLACE INTO index_store_meta(key, value) "
+                "VALUES ('derived_schema_version', ?)",
+                (f"{_DERIVED_SCHEMA_VERSION}:{self.embedding_dim}",),
             )
-            self._sync_derived(rowid, entry, vector)
-        self._conn.execute(
-            "INSERT OR REPLACE INTO index_store_meta(key, value) VALUES ('derived_schema_version', ?)",
-            (f"{_DERIVED_SCHEMA_VERSION}:{self.embedding_dim}",),
-        )
-        self._conn.commit()
+            self._conn.execute("RELEASE SAVEPOINT rebuild_derived_indexes")
+            self._conn.commit()
+        except Exception:
+            self._conn.execute("ROLLBACK TO SAVEPOINT rebuild_derived_indexes")
+            self._conn.execute("RELEASE SAVEPOINT rebuild_derived_indexes")
+            raise
 
     def load(self) -> None:
         with self.lock:
+            user_version = self._conn.execute("PRAGMA user_version").fetchone()[0]
             if self.legacy_index_path.exists():
-                user_version = self._conn.execute("PRAGMA user_version").fetchone()[0]
                 if user_version == 0:
                     self._migrate_from_legacy_files()
-            try:
-                if self._derived_indexes_need_rebuild():
-                    self._rebuild_derived_indexes()
-            except (json.JSONDecodeError, sqlite3.DatabaseError, ValueError) as exc:
-                logger.warning(
-                    "IndexStore: %s contains unreadable indexed data, resetting to empty: %s",
-                    self.db_path, exc,
-                )
-                self._conn.execute("DELETE FROM images")
-                self._conn.execute("DELETE FROM image_colors")
-                self._conn.execute("DELETE FROM image_objects")
-                self._conn.execute("DELETE FROM image_fts")
-                self._conn.execute("DELETE FROM image_vectors")
-                self._conn.commit()
+            if self._derived_indexes_need_rebuild():
+                self._rebuild_derived_indexes()
+            self._conn.execute(f"PRAGMA user_version={_DATABASE_SCHEMA_VERSION}")
+            self._conn.commit()
 
     def save(self) -> None:
         with self.lock:
@@ -367,35 +403,58 @@ class IndexStore:
 
     def upsert(self, entry: ImageEntry, embedding: np.ndarray) -> None:
         with self.lock:
-            values = self._entry_values(entry, embedding)
-            row = self._conn.execute(
-                f"INSERT INTO images ({_INSERT_COLUMNS}) VALUES ({_PLACEHOLDERS}) "
-                "ON CONFLICT(path) DO UPDATE SET "
-                "id=excluded.id, filename=excluded.filename, thumbnail_path=excluded.thumbnail_path, "
-                "ocr_text=excluded.ocr_text, colors=excluded.colors, objects=excluded.objects, "
-                "mtime=excluded.mtime, size=excluded.size, width=excluded.width, height=excluded.height, "
-                "format=excluded.format, date_taken=excluded.date_taken, indexed_at=excluded.indexed_at, "
-                "embedding=excluded.embedding RETURNING rowid",
-                values,
-            ).fetchone()
-            self._sync_derived(row[0], entry, embedding)
+            # Keep reindex writes batched until save(), as before, while the
+            # nested savepoint guarantees one bad derived-index write cannot
+            # leave a half-updated primary row in that batch.
+            if not self._conn.in_transaction:
+                self._conn.execute("BEGIN")
+            self._conn.execute("SAVEPOINT upsert_image")
+            try:
+                values = self._entry_values(entry, embedding)
+                row = self._conn.execute(
+                    f"INSERT INTO images ({_INSERT_COLUMNS}) VALUES ({_PLACEHOLDERS}) "
+                    "ON CONFLICT(path) DO UPDATE SET "
+                    "id=excluded.id, filename=excluded.filename, thumbnail_path=excluded.thumbnail_path, "
+                    "ocr_text=excluded.ocr_text, colors=excluded.colors, objects=excluded.objects, "
+                    "mtime=excluded.mtime, size=excluded.size, width=excluded.width, height=excluded.height, "
+                    "format=excluded.format, date_taken=excluded.date_taken, indexed_at=excluded.indexed_at, "
+                    "embedding=excluded.embedding RETURNING rowid",
+                    values,
+                ).fetchone()
+                self._sync_derived(row[0], entry, embedding)
+                self._conn.execute("RELEASE SAVEPOINT upsert_image")
+            except Exception:
+                self._conn.execute("ROLLBACK TO SAVEPOINT upsert_image")
+                self._conn.execute("RELEASE SAVEPOINT upsert_image")
+                raise
 
     def prune(self, keep_paths: set[str]) -> list[str]:
         with self.lock:
-            self._conn.execute("CREATE TEMP TABLE IF NOT EXISTS keep_paths(path TEXT PRIMARY KEY)")
-            self._conn.execute("DELETE FROM keep_paths")
-            self._conn.executemany("INSERT INTO keep_paths(path) VALUES (?)", [(path,) for path in keep_paths])
-            removed_thumbnails = [
-                row[0]
-                for row in self._conn.execute(
-                    "SELECT thumbnail_path FROM images "
-                    "WHERE path NOT IN (SELECT path FROM keep_paths)"
-                ).fetchall()
-            ]
-            self._conn.execute("DELETE FROM images WHERE path NOT IN (SELECT path FROM keep_paths)")
-            self._conn.execute("DROP TABLE keep_paths")
-            self._conn.commit()
-            return removed_thumbnails
+            self._conn.execute("SAVEPOINT prune_images")
+            try:
+                self._conn.execute("CREATE TEMP TABLE IF NOT EXISTS keep_paths(path TEXT PRIMARY KEY)")
+                self._conn.execute("DELETE FROM keep_paths")
+                self._conn.executemany(
+                    "INSERT INTO keep_paths(path) VALUES (?)", [(path,) for path in keep_paths]
+                )
+                removed_thumbnails = [
+                    row[0]
+                    for row in self._conn.execute(
+                        "SELECT thumbnail_path FROM images "
+                        "WHERE path NOT IN (SELECT path FROM keep_paths)"
+                    ).fetchall()
+                ]
+                self._conn.execute(
+                    "DELETE FROM images WHERE path NOT IN (SELECT path FROM keep_paths)"
+                )
+                self._conn.execute("DROP TABLE keep_paths")
+                self._conn.execute("RELEASE SAVEPOINT prune_images")
+                self._conn.commit()
+                return removed_thumbnails
+            except Exception:
+                self._conn.execute("ROLLBACK TO SAVEPOINT prune_images")
+                self._conn.execute("RELEASE SAVEPOINT prune_images")
+                raise
 
     def get(self, image_id: str) -> ImageEntry | None:
         with self.lock:
@@ -429,6 +488,12 @@ class IndexStore:
         with self.lock:
             return {row[0] for row in self._conn.execute("SELECT path FROM images")}
 
+    def all_thumbnail_paths(self) -> set[str]:
+        with self.lock:
+            return {
+                row[0] for row in self._conn.execute("SELECT thumbnail_path FROM images")
+            }
+
     @property
     def entries(self) -> list[ImageEntry]:
         # Compatibility for maintenance/tests; normal application paths use
@@ -451,6 +516,10 @@ class IndexStore:
     def count(self) -> int:
         with self.lock:
             return self._conn.execute("SELECT count(*) FROM images").fetchone()[0]
+
+    def close(self) -> None:
+        with self.lock:
+            self._conn.close()
 
     def distinct_colors(self) -> list[str]:
         with self.lock:
@@ -483,11 +552,15 @@ class IndexStore:
                 params.append('"' + text.replace('"', '""') + '"')
             else:
                 clauses.append(
-                    "(instr(lower(images.ocr_text), lower(?)) > 0 OR EXISTS ("
+                    "(instr(lower(images.filename), lower(?)) > 0 "
+                    "OR instr(lower(images.path), lower(?)) > 0 "
+                    "OR instr(lower(images.ocr_text), lower(?)) > 0 OR EXISTS ("
                     "SELECT 1 FROM image_objects o WHERE o.image_id=images.id "
-                    "AND instr(lower(o.label), lower(?)) > 0))"
+                    "AND instr(lower(o.label), lower(?)) > 0) OR EXISTS ("
+                    "SELECT 1 FROM image_colors c WHERE c.image_id=images.id "
+                    "AND instr(lower(c.color), lower(?)) > 0))"
                 )
-                params.extend((text, text))
+                params.extend((text, text, text, text, text))
 
         where = " WHERE " + " AND ".join(clauses) if clauses else ""
         order_by = {

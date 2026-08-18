@@ -1,10 +1,12 @@
-import threading
-import uuid
 import logging
+import math
+import threading
+import unicodedata
+import uuid
 from pathlib import Path
 from typing import Literal
 
-from fastapi import FastAPI, HTTPException, Query
+from fastapi import FastAPI, HTTPException, Query, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
 from pydantic import BaseModel, Field, field_validator
@@ -14,6 +16,7 @@ SortOption = Literal["date_desc", "date_asc", "name_asc", "name_desc", "size_des
 from . import config
 from .indexer import Indexer, ReindexJob
 from .model_download import ModelDownloadJob, is_ram_checkpoint_installed, run_download
+from .rate_limit import SlidingWindowRateLimiter
 from .search import find_similar as run_find_similar
 from .search import search as run_search
 from .storage import IndexStore
@@ -33,7 +36,16 @@ store.load()
 indexer = Indexer(config.IMAGES_DIR, config.INDEX_DIR, store, config.RAM_CUSTOM_TAGS)
 jobs: dict[str, ReindexJob] = {}
 MAX_JOB_HISTORY = 10
+_jobs_lock = threading.Lock()
 model_download_jobs: dict[str, ModelDownloadJob] = {}
+MAX_MODEL_DOWNLOAD_JOB_HISTORY = 10
+_model_download_jobs_lock = threading.Lock()
+_settings_lock = threading.Lock()
+_catalog_run_lock = threading.Lock()
+_search_rate_limiter = SlidingWindowRateLimiter(
+    config.SEARCH_RATE_LIMIT_REQUESTS,
+    config.SEARCH_RATE_LIMIT_WINDOW_SECONDS,
+)
 
 _watcher_observer = None
 _reconciliation_stop = threading.Event()
@@ -46,7 +58,7 @@ def _start_realtime_watcher() -> None:
         return
     from .watcher import start_watcher
     try:
-        _watcher_observer = start_watcher(indexer, store)
+        _watcher_observer = start_watcher(indexer)
     except (OSError, RuntimeError):
         # A NAS can be temporarily unavailable when the server boots. Keep
         # search online and let a later restart/reconfiguration retry instead
@@ -63,6 +75,22 @@ def _stop_realtime_watcher() -> None:
     _watcher_observer = None
 
 
+def _no_reindex_running() -> bool:
+    with _jobs_lock:
+        return not any(not job.done for job in jobs.values())
+
+
+def _cleanup_orphan_thumbnails() -> None:
+    removed = indexer.cleanup_orphan_thumbnails()
+    if removed:
+        logger.info("removed %d orphan thumbnail(s)", removed)
+
+
+def _run_manual_reindex(job: ReindexJob, force: bool) -> None:
+    with _catalog_run_lock:
+        indexer.run_reindex(job, force)
+
+
 if config.ENABLE_WATCHER:
     from .watcher import start_reconciliation_loop
 
@@ -72,8 +100,14 @@ if config.ENABLE_WATCHER:
         lambda: ReindexJob(id=uuid.uuid4().hex),
         config.RECONCILE_INTERVAL_SECONDS,
         _reconciliation_stop,
-        can_run=lambda: not any(not job.done for job in jobs.values()),
+        can_run=_no_reindex_running,
+        run_lock=_catalog_run_lock,
     )
+    threading.Thread(
+        target=_cleanup_orphan_thumbnails,
+        name="imagefind-thumbnail-cleanup",
+        daemon=True,
+    ).start()
 
 
 @app.on_event("shutdown")
@@ -94,6 +128,26 @@ def _entry_to_dict(e) -> dict:
     }
 
 
+def _sanitize_search_value(value: str | None, field: str) -> str | None:
+    if value is None:
+        return None
+    value = unicodedata.normalize("NFC", value).strip()
+    if any(unicodedata.category(character) == "Cc" for character in value):
+        raise HTTPException(status_code=422, detail=f"{field} contains control characters")
+    return value or None
+
+
+def _enforce_search_rate_limit(request: Request) -> None:
+    client_key = request.client.host if request.client else "unknown"
+    retry_after = _search_rate_limiter.retry_after(client_key)
+    if retry_after is not None:
+        raise HTTPException(
+            status_code=429,
+            detail="too many search requests",
+            headers={"Retry-After": str(max(1, math.ceil(retry_after)))},
+        )
+
+
 @app.get("/health")
 def health():
     return {"status": "ok", "indexed": store.count()}
@@ -101,13 +155,18 @@ def health():
 
 @app.get("/search")
 def search_endpoint(
-    text: str | None = None,
-    color: str | None = None,
-    object: str | None = None,
+    request: Request,
+    text: str | None = Query(None, max_length=200),
+    color: str | None = Query(None, max_length=64),
+    object: str | None = Query(None, max_length=128),
     sort: SortOption = "date_desc",
-    offset: int = Query(0, ge=0),
+    offset: int = Query(0, ge=0, le=10_000_000),
     limit: int = Query(60, ge=1, le=200),
 ):
+    _enforce_search_rate_limit(request)
+    text = _sanitize_search_value(text, "text")
+    color = _sanitize_search_value(color, "color")
+    object = _sanitize_search_value(object, "object")
     results, total = run_search(
         store, text=text, color=color, obj=object, sort=sort, offset=offset, limit=limit
     )
@@ -115,7 +174,8 @@ def search_endpoint(
 
 
 @app.get("/search/similar/{image_id}")
-def similar_endpoint(image_id: str):
+def similar_endpoint(request: Request, image_id: str):
+    _enforce_search_rate_limit(request)
     results = run_find_similar(store, image_id)
     if results is None:
         raise HTTPException(status_code=404, detail="image not found")
@@ -124,23 +184,25 @@ def similar_endpoint(image_id: str):
 
 @app.post("/reindex")
 def reindex_endpoint(force: bool = False):
-    if any(not j.done for j in jobs.values()):
-        raise HTTPException(status_code=409, detail="a reindex job is already running")
-    # Evict the oldest completed jobs so `jobs` doesn't grow unbounded on a
-    # long-running server where reindex gets triggered repeatedly.
-    if len(jobs) >= MAX_JOB_HISTORY:
-        for old_id in list(jobs.keys())[: len(jobs) - MAX_JOB_HISTORY + 1]:
-            del jobs[old_id]
-    job = ReindexJob(id=uuid.uuid4().hex)
-    jobs[job.id] = job
-    thread = threading.Thread(target=indexer.run_reindex, args=(job, force), daemon=True)
+    with _jobs_lock:
+        if any(not job.done for job in jobs.values()):
+            raise HTTPException(status_code=409, detail="a reindex job is already running")
+        # Evict the oldest completed jobs so `jobs` doesn't grow unbounded on
+        # a long-running server where reindex gets triggered repeatedly.
+        if len(jobs) >= MAX_JOB_HISTORY:
+            for old_id in list(jobs.keys())[: len(jobs) - MAX_JOB_HISTORY + 1]:
+                del jobs[old_id]
+        job = ReindexJob(id=uuid.uuid4().hex)
+        jobs[job.id] = job
+    thread = threading.Thread(target=_run_manual_reindex, args=(job, force), daemon=True)
     thread.start()
     return {"job_id": job.id}
 
 
 @app.get("/reindex/status/{job_id}")
 def reindex_status(job_id: str):
-    job = jobs.get(job_id)
+    with _jobs_lock:
+        job = jobs.get(job_id)
     if job is None:
         raise HTTPException(status_code=404, detail="job not found")
     return {
@@ -151,7 +213,8 @@ def reindex_status(job_id: str):
 
 @app.post("/reindex/{job_id}/cancel")
 def reindex_cancel(job_id: str):
-    job = jobs.get(job_id)
+    with _jobs_lock:
+        job = jobs.get(job_id)
     if job is None:
         raise HTTPException(status_code=404, detail="job not found")
     if job.done:
@@ -165,7 +228,10 @@ def thumbnail_endpoint(image_id: str):
     entry = store.get(image_id)
     if entry is None:
         raise HTTPException(status_code=404, detail="image not found")
-    return FileResponse(entry.thumbnail_path)
+    thumbnail = Path(entry.thumbnail_path)
+    if not thumbnail.is_file():
+        raise HTTPException(status_code=404, detail="thumbnail file not found")
+    return FileResponse(thumbnail)
 
 
 @app.get("/download/{image_id}")
@@ -173,7 +239,10 @@ def download_endpoint(image_id: str):
     entry = store.get(image_id)
     if entry is None:
         raise HTTPException(status_code=404, detail="image not found")
-    return FileResponse(entry.path, filename=Path(entry.path).name)
+    original = Path(entry.path)
+    if not original.is_file():
+        raise HTTPException(status_code=404, detail="original image file not found")
+    return FileResponse(original, filename=original.name)
 
 
 @app.get("/colors")
@@ -195,10 +264,15 @@ def model_status_endpoint():
 def model_download_endpoint():
     if is_ram_checkpoint_installed():
         raise HTTPException(status_code=409, detail="RAM++ checkpoint is already installed")
-    if any(not j.done for j in model_download_jobs.values()):
-        raise HTTPException(status_code=409, detail="a model download is already running")
-    job = ModelDownloadJob(id=uuid.uuid4().hex)
-    model_download_jobs[job.id] = job
+    with _model_download_jobs_lock:
+        if any(not job.done for job in model_download_jobs.values()):
+            raise HTTPException(status_code=409, detail="a model download is already running")
+        if len(model_download_jobs) >= MAX_MODEL_DOWNLOAD_JOB_HISTORY:
+            remove_count = len(model_download_jobs) - MAX_MODEL_DOWNLOAD_JOB_HISTORY + 1
+            for old_id in list(model_download_jobs.keys())[:remove_count]:
+                del model_download_jobs[old_id]
+        job = ModelDownloadJob(id=uuid.uuid4().hex)
+        model_download_jobs[job.id] = job
     thread = threading.Thread(target=run_download, args=(job,), daemon=True)
     thread.start()
     return {"job_id": job.id}
@@ -206,7 +280,8 @@ def model_download_endpoint():
 
 @app.get("/model/download/status/{job_id}")
 def model_download_status(job_id: str):
-    job = model_download_jobs.get(job_id)
+    with _model_download_jobs_lock:
+        job = model_download_jobs.get(job_id)
     if job is None:
         raise HTTPException(status_code=404, detail="job not found")
     return {
@@ -217,7 +292,8 @@ def model_download_status(job_id: str):
 
 @app.post("/model/download/{job_id}/cancel")
 def model_download_cancel(job_id: str):
-    job = model_download_jobs.get(job_id)
+    with _model_download_jobs_lock:
+        job = model_download_jobs.get(job_id)
     if job is None:
         raise HTTPException(status_code=404, detail="job not found")
     if job.done:
@@ -272,28 +348,59 @@ def update_settings(update: SettingsUpdate):
     # ram_confidence needs that distinction since null is how the frontend
     # clears it back to "use the model's own defaults", which is a real,
     # meaningful value here, not the same thing as "leave it untouched".
-    fields_set = update.model_fields_set
-    if "ram_confidence" in fields_set:
-        config.RAM_CONFIDENCE = update.ram_confidence
-    if update.ram_custom_tags is not None:
-        config.RAM_CUSTOM_TAGS = update.ram_custom_tags
-        # Indexer snapshots custom_tags at construction time, so a runtime
-        # change to config.RAM_CUSTOM_TAGS needs to be pushed to it
-        # explicitly to actually take effect on the next reindex.
-        indexer.custom_tags = update.ram_custom_tags
-    images_dir_changed = (
-        update.images_dir is not None and Path(update.images_dir) != config.IMAGES_DIR
-    )
-    if images_dir_changed:
-        _stop_realtime_watcher()
-    if update.images_dir is not None:
-        config.IMAGES_DIR = Path(update.images_dir)
-        indexer.images_dir = config.IMAGES_DIR
-    # Persists the full current snapshot (not just whichever field this call
-    # touched) so ram_confidence/ram_custom_tags survive a restart the same
-    # way images_dir already did, regardless of which fields this particular
-    # request set.
-    config.save_settings(config.IMAGES_DIR, config.RAM_CONFIDENCE, config.RAM_CUSTOM_TAGS)
-    if images_dir_changed:
-        _start_realtime_watcher()
-    return _settings_dict()
+    with _settings_lock:
+        fields_set = update.model_fields_set
+        next_confidence = (
+            update.ram_confidence if "ram_confidence" in fields_set else config.RAM_CONFIDENCE
+        )
+        next_tags = (
+            update.ram_custom_tags
+            if update.ram_custom_tags is not None
+            else config.RAM_CUSTOM_TAGS
+        )
+        next_images_dir = (
+            Path(update.images_dir) if update.images_dir is not None else config.IMAGES_DIR
+        )
+        images_dir_changed = next_images_dir != config.IMAGES_DIR
+
+        # Persist the complete next snapshot before changing live objects. If
+        # the atomic settings write fails, the running configuration and NAS
+        # watcher remain untouched.
+        if images_dir_changed:
+            with _jobs_lock:
+                if any(not job.done for job in jobs.values()):
+                    raise HTTPException(
+                        status_code=409,
+                        detail="cannot change images_dir while a reindex job is running",
+                    )
+            if not _catalog_run_lock.acquire(blocking=False):
+                raise HTTPException(
+                    status_code=409,
+                    detail="cannot change images_dir while reconciliation is running",
+                )
+            try:
+                # Recheck after reserving the catalog: a manual job may have
+                # been submitted between the first check and this lock.
+                with _jobs_lock:
+                    if any(not job.done for job in jobs.values()):
+                        raise HTTPException(
+                            status_code=409,
+                            detail="cannot change images_dir while a reindex job is running",
+                        )
+                config.save_settings(next_images_dir, next_confidence, next_tags)
+                _stop_realtime_watcher()
+                config.IMAGES_DIR = next_images_dir
+                indexer.images_dir = next_images_dir
+                indexer._last_reconcile_missing.clear()
+                config.RAM_CONFIDENCE = next_confidence
+                config.RAM_CUSTOM_TAGS = next_tags
+                indexer.custom_tags = next_tags
+                _start_realtime_watcher()
+            finally:
+                _catalog_run_lock.release()
+        else:
+            config.save_settings(next_images_dir, next_confidence, next_tags)
+            config.RAM_CONFIDENCE = next_confidence
+            config.RAM_CUSTOM_TAGS = next_tags
+            indexer.custom_tags = next_tags
+        return _settings_dict()
