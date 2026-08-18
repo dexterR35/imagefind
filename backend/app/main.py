@@ -1,5 +1,6 @@
 import threading
 import uuid
+import logging
 from pathlib import Path
 from typing import Literal
 
@@ -12,9 +13,12 @@ SortOption = Literal["date_desc", "date_asc", "name_asc", "name_desc", "size_des
 
 from . import config
 from .indexer import Indexer, ReindexJob
+from .model_download import ModelDownloadJob, is_ram_checkpoint_installed, run_download
 from .search import find_similar as run_find_similar
 from .search import search as run_search
 from .storage import IndexStore
+
+logger = logging.getLogger(__name__)
 
 app = FastAPI(title="ImageFind")
 app.add_middleware(
@@ -29,28 +33,52 @@ store.load()
 indexer = Indexer(config.IMAGES_DIR, config.INDEX_DIR, store, config.RAM_CUSTOM_TAGS)
 jobs: dict[str, ReindexJob] = {}
 MAX_JOB_HISTORY = 10
+model_download_jobs: dict[str, ModelDownloadJob] = {}
 
 _watcher_observer = None
 _reconciliation_stop = threading.Event()
 _reconciliation_thread = None
 
-if config.ENABLE_WATCHER:
-    from .watcher import start_reconciliation_loop, start_watcher
 
-    _watcher_observer = start_watcher(indexer, store)
+def _start_realtime_watcher() -> None:
+    global _watcher_observer
+    if not config.ENABLE_WATCHER or _watcher_observer is not None:
+        return
+    from .watcher import start_watcher
+    try:
+        _watcher_observer = start_watcher(indexer, store)
+    except (OSError, RuntimeError):
+        # A NAS can be temporarily unavailable when the server boots. Keep
+        # search online and let a later restart/reconfiguration retry instead
+        # of crashing the entire API process.
+        logger.warning("real-time watcher could not start for %s", indexer.images_dir, exc_info=True)
+
+
+def _stop_realtime_watcher() -> None:
+    global _watcher_observer
+    if _watcher_observer is None:
+        return
+    _watcher_observer.stop()
+    _watcher_observer.join(timeout=5)
+    _watcher_observer = None
+
+
+if config.ENABLE_WATCHER:
+    from .watcher import start_reconciliation_loop
+
+    _start_realtime_watcher()
     _reconciliation_thread = start_reconciliation_loop(
         indexer,
         lambda: ReindexJob(id=uuid.uuid4().hex),
         config.RECONCILE_INTERVAL_SECONDS,
         _reconciliation_stop,
+        can_run=lambda: not any(not job.done for job in jobs.values()),
     )
 
 
 @app.on_event("shutdown")
 def _stop_watcher():
-    if _watcher_observer is not None:
-        _watcher_observer.stop()
-        _watcher_observer.join(timeout=5)
+    _stop_realtime_watcher()
     _reconciliation_stop.set()
     if _reconciliation_thread is not None:
         _reconciliation_thread.join(timeout=5)
@@ -158,6 +186,46 @@ def objects_endpoint():
     return store.distinct_objects()
 
 
+@app.get("/model/status")
+def model_status_endpoint():
+    return {"installed": is_ram_checkpoint_installed()}
+
+
+@app.post("/model/download")
+def model_download_endpoint():
+    if is_ram_checkpoint_installed():
+        raise HTTPException(status_code=409, detail="RAM++ checkpoint is already installed")
+    if any(not j.done for j in model_download_jobs.values()):
+        raise HTTPException(status_code=409, detail="a model download is already running")
+    job = ModelDownloadJob(id=uuid.uuid4().hex)
+    model_download_jobs[job.id] = job
+    thread = threading.Thread(target=run_download, args=(job,), daemon=True)
+    thread.start()
+    return {"job_id": job.id}
+
+
+@app.get("/model/download/status/{job_id}")
+def model_download_status(job_id: str):
+    job = model_download_jobs.get(job_id)
+    if job is None:
+        raise HTTPException(status_code=404, detail="job not found")
+    return {
+        "downloaded_bytes": job.downloaded_bytes, "total_bytes": job.total_bytes,
+        "done": job.done, "error": job.error, "cancelled": job.cancelled,
+    }
+
+
+@app.post("/model/download/{job_id}/cancel")
+def model_download_cancel(job_id: str):
+    job = model_download_jobs.get(job_id)
+    if job is None:
+        raise HTTPException(status_code=404, detail="job not found")
+    if job.done:
+        raise HTTPException(status_code=409, detail="job already finished")
+    job.cancel_event.set()
+    return {"status": "cancelling"}
+
+
 class SettingsUpdate(BaseModel):
     ram_confidence: float | None = Field(default=None, ge=0.0, le=1.0)
     ram_custom_tags: list[str] | None = None
@@ -213,6 +281,11 @@ def update_settings(update: SettingsUpdate):
         # change to config.RAM_CUSTOM_TAGS needs to be pushed to it
         # explicitly to actually take effect on the next reindex.
         indexer.custom_tags = update.ram_custom_tags
+    images_dir_changed = (
+        update.images_dir is not None and Path(update.images_dir) != config.IMAGES_DIR
+    )
+    if images_dir_changed:
+        _stop_realtime_watcher()
     if update.images_dir is not None:
         config.IMAGES_DIR = Path(update.images_dir)
         indexer.images_dir = config.IMAGES_DIR
@@ -221,4 +294,6 @@ def update_settings(update: SettingsUpdate):
     # way images_dir already did, regardless of which fields this particular
     # request set.
     config.save_settings(config.IMAGES_DIR, config.RAM_CONFIDENCE, config.RAM_CUSTOM_TAGS)
+    if images_dir_changed:
+        _start_realtime_watcher()
     return _settings_dict()

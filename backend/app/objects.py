@@ -16,6 +16,10 @@ _ram_transform = None
 _ram_default_class_threshold = None
 _ram_load_error: Exception | None = None
 _load_lock = threading.Lock()
+# Loading, inference, and unloading must not overlap. In particular, clearing
+# the process-wide model while a watcher thread is using it could make another
+# thread load a second 3 GB copy before the first one has actually died.
+_inference_lock = threading.Lock()
 _tag_embedding_cache: dict[str, np.ndarray] = {}
 _tag_cache_lock = threading.Lock()
 _REFERENCE_IMAGE_EXTENSIONS = {".png", ".jpg", ".jpeg", ".webp", ".bmp"}
@@ -82,6 +86,29 @@ def ensure_ram_ready() -> None:
     _get_ram()
 
 
+def unload_ram_model() -> None:
+    """Release RAM++ and PyTorch's now-unused CUDA cache.
+
+    CLIP and EasyOCR have their own process-wide models and deliberately stay
+    loaded; this only drops the large tagger that is not needed for search
+    while the indexer is idle.
+    """
+    global _ram_model, _ram_transform, _ram_default_class_threshold
+    with _inference_lock:
+        with _load_lock:
+            model = _ram_model
+            _ram_model = None
+            _ram_transform = None
+            # This clone lives on the same device as the model, so it must be
+            # cleared too (even though it is tiny compared with the weights).
+            _ram_default_class_threshold = None
+        del model
+        if torch.cuda.is_available():
+            # PyTorch otherwise keeps the peak inference blocks reserved for
+            # this process, which makes Task Manager report high idle VRAM.
+            torch.cuda.empty_cache()
+
+
 def detect_ram_objects(image_path: Path, conf: float | None = None) -> list[str]:
     # conf stays None by default rather than reading config.RAM_CONFIDENCE at call
     # time being the only option — RAM++'s checkpoint ships with per-tag tuned
@@ -89,20 +116,21 @@ def detect_ram_objects(image_path: Path, conf: float | None = None) -> list[str]
     # (from settings or a caller) overrides every tag's threshold uniformly.
     if conf is None:
         conf = config.RAM_CONFIDENCE
-    transform, model = _get_ram()
-    image = _load_rgb(image_path)
-    tensor = transform(image).unsqueeze(0).to(_device)
-    # Always explicitly set the threshold (override or restore) rather than only
-    # mutating it when conf is not None — model.class_threshold is a shared,
-    # mutable array on the process-lifetime singleton model, so a previous call's
-    # override would otherwise silently stick around forever once conf goes back
-    # to None, even though that's supposed to mean "use the model's own defaults".
-    model.class_threshold = (
-        torch.ones_like(model.class_threshold) * conf if conf is not None
-        else _ram_default_class_threshold
-    )
-    with torch.no_grad():
-        tags, _ = _ram_inference(tensor, model)
+    with _inference_lock:
+        transform, model = _get_ram()
+        image = _load_rgb(image_path)
+        tensor = transform(image).unsqueeze(0).to(_device)
+        # Always explicitly set the threshold (override or restore) rather than only
+        # mutating it when conf is not None — model.class_threshold is a shared,
+        # mutable array on the process-lifetime singleton model, so a previous call's
+        # override would otherwise silently stick around forever once conf goes back
+        # to None, even though that's supposed to mean "use the model's own defaults".
+        model.class_threshold = (
+            torch.ones_like(model.class_threshold) * conf if conf is not None
+            else _ram_default_class_threshold
+        )
+        with torch.no_grad():
+            tags, _ = _ram_inference(tensor, model)
     return sorted({t.strip() for t in tags.split("|") if t.strip()})
 
 

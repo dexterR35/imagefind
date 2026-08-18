@@ -15,6 +15,7 @@ def _skip_real_ram_load(monkeypatch):
     # nothing to do with RAM++ itself - stub out the eager readiness check
     # so they don't need a real multi-GB checkpoint on disk to pass.
     monkeypatch.setattr(objects_mod, "ensure_ram_ready", lambda: None)
+    monkeypatch.setattr(objects_mod, "unload_ram_model", lambda: None)
 
 
 def _make_images(images_dir, count=2):
@@ -92,6 +93,25 @@ def test_run_reindex_processes_new_and_skips_unchanged(tmp_path, monkeypatch):
     assert calls == []
 
 
+def test_run_reindex_unloads_ram_model_when_finished(tmp_path, monkeypatch):
+    images_dir = tmp_path / "images"
+    _make_images(images_dir, count=1)
+    index_dir = tmp_path / "index"
+    store = IndexStore(index_dir, embedding_dim=512)
+    store.load()
+    indexer = Indexer(images_dir, index_dir, store)
+    monkeypatch.setattr(indexer, "process_image", _fake_process_image(index_dir))
+
+    unload_calls = []
+    monkeypatch.setattr(objects_mod, "unload_ram_model", lambda: unload_calls.append(True))
+
+    job = ReindexJob(id="job1")
+    indexer.run_reindex(job)
+
+    assert job.done is True
+    assert unload_calls == [True]
+
+
 def test_run_reindex_skips_corrupt_image_without_aborting(tmp_path):
     images_dir = tmp_path / "images"
     _make_images(images_dir)
@@ -134,6 +154,43 @@ def test_run_reindex_prunes_entries_for_deleted_files(tmp_path):
     assert deleted_path not in remaining_paths
     assert len(store.all()) == 1
     assert store.embeddings.shape[0] == 1
+
+
+def test_reconciliation_confirms_missed_delete_twice_before_pruning(tmp_path, monkeypatch):
+    images_dir = tmp_path / "images"
+    _make_images(images_dir, count=1)
+    index_dir = tmp_path / "index"
+    store = IndexStore(index_dir, embedding_dim=512)
+    store.load()
+    indexer = Indexer(images_dir, index_dir, store)
+    monkeypatch.setattr(indexer, "process_image", _fake_process_image(index_dir))
+
+    indexer.run_reindex(ReindexJob(id="initial"))
+    image_path = images_dir / "img000.png"
+    image_path.unlink()
+
+    indexer.run_reindex(ReindexJob(id="reconcile1"), confirm_deletions=True)
+    assert store.get_by_path(str(image_path)) is not None
+
+    indexer.run_reindex(ReindexJob(id="reconcile2"), confirm_deletions=True)
+    assert store.get_by_path(str(image_path)) is None
+
+
+def test_no_change_reconciliation_does_not_load_ram(tmp_path, monkeypatch):
+    images_dir = tmp_path / "images"
+    _make_images(images_dir, count=1)
+    index_dir = tmp_path / "index"
+    store = IndexStore(index_dir, embedding_dim=512)
+    store.load()
+    indexer = Indexer(images_dir, index_dir, store)
+    monkeypatch.setattr(indexer, "process_image", _fake_process_image(index_dir))
+    indexer.run_reindex(ReindexJob(id="initial"))
+
+    calls = []
+    monkeypatch.setattr(objects_mod, "ensure_ram_ready", lambda: calls.append(True))
+    indexer.run_reindex(ReindexJob(id="reconcile"), confirm_deletions=True)
+
+    assert calls == []
 
 
 def test_run_reindex_aborts_without_pruning_when_images_dir_is_unreachable(tmp_path, monkeypatch):
@@ -357,6 +414,8 @@ def test_run_reindex_fails_fast_without_processing_any_images_when_ram_not_ready
         raise FileNotFoundError("RAM++ checkpoint not found at '...'")
 
     monkeypatch.setattr(objects_mod, "ensure_ram_ready", _boom)
+    unload_calls = []
+    monkeypatch.setattr(objects_mod, "unload_ram_model", lambda: unload_calls.append(True))
     calls = []
     monkeypatch.setattr(indexer, "process_image", lambda p, s: calls.append(p))
 
@@ -369,6 +428,7 @@ def test_run_reindex_fails_fast_without_processing_any_images_when_ram_not_ready
     assert job.done is True
     assert job.error is not None and "checkpoint" in job.error.lower()
     assert len(store.all()) == 0
+    assert unload_calls == [True]
 
 
 def test_run_reindex_stops_when_cancelled_and_keeps_partial_progress(tmp_path, monkeypatch):
@@ -391,6 +451,8 @@ def test_run_reindex_stops_when_cancelled_and_keeps_partial_progress(tmp_path, m
         return result
 
     monkeypatch.setattr(indexer, "process_image", process_then_cancel)
+    unload_calls = []
+    monkeypatch.setattr(objects_mod, "unload_ram_model", lambda: unload_calls.append(True))
 
     indexer.run_reindex(job)
 
@@ -399,3 +461,4 @@ def test_run_reindex_stops_when_cancelled_and_keeps_partial_progress(tmp_path, m
     assert job.error is None
     assert job.processed == 1
     assert len(store.all()) == 1, "the one image already processed before cancelling must stay indexed"
+    assert unload_calls == [True]

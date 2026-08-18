@@ -10,7 +10,12 @@ const sampleSettings: api.Settings = {
 };
 
 describe("Settings", () => {
-  beforeEach(() => vi.useFakeTimers({ shouldAdvanceTime: true }));
+  beforeEach(() => {
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    // Most tests aren't exercising the model-install feature, so default to
+    // "already installed" (no install button) unless a test overrides this.
+    vi.spyOn(api, "fetchModelStatus").mockResolvedValue({ installed: true });
+  });
   afterEach(() => {
     vi.useRealTimers();
     vi.restoreAllMocks();
@@ -121,5 +126,68 @@ describe("Settings", () => {
       expect(screen.getByText(/settings saved, but failed to start reindex/i)).toBeInTheDocument()
     );
     expect(screen.getByText("Save & Reindex")).not.toBeDisabled();
+  });
+
+  it("does not show an install button when the model is already installed", async () => {
+    vi.spyOn(api, "fetchSettings").mockResolvedValue(sampleSettings);
+    vi.spyOn(api, "fetchModelStatus").mockResolvedValue({ installed: true });
+
+    render(<Settings onReindexComplete={vi.fn()} />);
+    fireEvent.click(screen.getByText("Settings"));
+
+    await waitFor(() => expect(screen.getByDisplayValue("/photos")).toBeInTheDocument());
+    expect(screen.queryByText("Install RAM++ Model")).not.toBeInTheDocument();
+  });
+
+  it("shows an install button when the model isn't installed, and installs it", async () => {
+    vi.spyOn(api, "fetchSettings").mockResolvedValue(sampleSettings);
+    vi.spyOn(api, "fetchModelStatus").mockResolvedValue({ installed: false });
+    vi.spyOn(api, "startModelDownload").mockResolvedValue("model-job1");
+    const statusSpy = vi
+      .spyOn(api, "fetchModelDownloadStatus")
+      .mockResolvedValueOnce({
+        downloaded_bytes: 50 * 1024 * 1024, total_bytes: 100 * 1024 * 1024,
+        done: false, error: null, cancelled: false,
+      })
+      .mockResolvedValue({
+        downloaded_bytes: 100 * 1024 * 1024, total_bytes: 100 * 1024 * 1024,
+        done: true, error: null, cancelled: false,
+      });
+
+    render(<Settings onReindexComplete={vi.fn()} />);
+    fireEvent.click(screen.getByText("Settings"));
+
+    const installButton = await screen.findByText("Install RAM++ Model");
+    fireEvent.click(installButton);
+
+    await vi.advanceTimersByTimeAsync(500);
+    await waitFor(() => expect(screen.getByText("50 / 100 MB")).toBeInTheDocument());
+
+    await vi.advanceTimersByTimeAsync(500);
+    await waitFor(() => expect(statusSpy).toHaveBeenCalledTimes(2));
+    // Once the download completes, the button disappears since the model is
+    // now considered installed.
+    await waitFor(() => expect(screen.queryByText("Install RAM++ Model")).not.toBeInTheDocument());
+  });
+
+  it("shows an error if the model download fails", async () => {
+    vi.spyOn(api, "fetchSettings").mockResolvedValue(sampleSettings);
+    vi.spyOn(api, "fetchModelStatus").mockResolvedValue({ installed: false });
+    vi.spyOn(api, "startModelDownload").mockResolvedValue("model-job1");
+    vi.spyOn(api, "fetchModelDownloadStatus").mockResolvedValue({
+      downloaded_bytes: 0, total_bytes: 0, done: true, cancelled: false,
+      error: "Failed to download RAM++ checkpoint: connection reset",
+    });
+
+    render(<Settings onReindexComplete={vi.fn()} />);
+    fireEvent.click(screen.getByText("Settings"));
+
+    const installButton = await screen.findByText("Install RAM++ Model");
+    fireEvent.click(installButton);
+
+    await vi.advanceTimersByTimeAsync(500);
+    await waitFor(() => expect(screen.getByText(/connection reset/i)).toBeInTheDocument());
+    // The button is shown again (not stuck disabled) so the user can retry.
+    expect(screen.getByText("Install RAM++ Model")).not.toBeDisabled();
   });
 });

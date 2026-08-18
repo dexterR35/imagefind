@@ -1,4 +1,5 @@
 import logging
+import os
 import threading
 import time
 import uuid
@@ -54,6 +55,11 @@ class Indexer:
         self.index_dir = Path(index_dir)
         self.store = store
         self.custom_tags = custom_tags if custom_tags is not None else []
+        # All model pipelines share process-wide GPU/CPU state. Serializing
+        # one image at a time also makes a watcher event and a reconciliation
+        # scan atomically re-check needs_reindex() before doing expensive work.
+        self._processing_lock = threading.RLock()
+        self._last_reconcile_missing: set[str] = set()
 
     def _current_settings(self) -> ReindexSettings:
         return ReindexSettings(
@@ -103,13 +109,61 @@ class Indexer:
         )
         return entry, embedding
 
-    def _list_image_paths(self) -> list[Path]:
-        return [
-            p for p in sorted(self.images_dir.rglob("*"))
-            if p.suffix.lower() in IMAGE_EXTENSIONS
-        ]
+    def index_path_if_needed(
+        self, path: Path, settings: ReindexSettings | None = None, force: bool = False
+    ) -> bool:
+        """Index one path exactly once across watcher/reindex threads."""
+        with self._processing_lock:
+            if not force and not self.store.needs_reindex(path):
+                return False
+            entry, embedding = self.process_image(path, settings or self._current_settings())
+            self.store.upsert(entry, embedding)
+            return True
 
-    def run_reindex(self, job: ReindexJob, force: bool = False) -> None:
+    def _remove_thumbnails(self, thumbnails: list[str]) -> None:
+        thumbnail_root = (self.index_dir / "thumbnails").resolve()
+        for thumbnail_path in thumbnails:
+            try:
+                thumbnail = Path(thumbnail_path).resolve()
+                if thumbnail_root == thumbnail.parent or thumbnail_root in thumbnail.parents:
+                    thumbnail.unlink(missing_ok=True)
+            except OSError:
+                logger.warning("failed to remove thumbnail %s", thumbnail_path, exc_info=True)
+
+    def delete_path(self, path: Path) -> bool:
+        with self._processing_lock:
+            removed_thumbnail = self.store.delete_by_path(str(path))
+            if removed_thumbnail is None:
+                return False
+            self._remove_thumbnails([removed_thumbnail])
+            return True
+
+    def delete_directory(self, path: Path) -> int:
+        with self._processing_lock:
+            removed_thumbnails = self.store.delete_under_directory(str(path))
+            self._remove_thumbnails(removed_thumbnails)
+            return len(removed_thumbnails)
+
+    def _list_image_paths(self) -> list[Path]:
+        if not self.images_dir.is_dir():
+            return []
+        errors: list[OSError] = []
+        paths: list[Path] = []
+        for root, dirnames, filenames in os.walk(
+            self.images_dir, onerror=errors.append
+        ):
+            dirnames.sort()
+            for filename in sorted(filenames):
+                path = Path(root) / filename
+                if path.suffix.lower() in IMAGE_EXTENSIONS:
+                    paths.append(path)
+        if errors:
+            raise OSError(f"incomplete image scan: {errors[0]}")
+        return sorted(paths)
+
+    def run_reindex(
+        self, job: ReindexJob, force: bool = False, confirm_deletions: bool = False
+    ) -> None:
         try:
             settings = self._current_settings()
             # Every reindex re-embeds custom tags from scratch, so adding or
@@ -118,25 +172,29 @@ class Indexer:
             objects_mod.clear_custom_tag_cache()
             paths = self._list_image_paths()
             job.total = len(paths)
-            if paths:
-                # Fails once, up front, with a clear message if the RAM++
-                # checkpoint is missing or corrupt - rather than every single
-                # image failing individually with a cryptic error and nothing
-                # ever getting indexed. Skipped entirely when there's nothing
-                # to process, so an empty (or fully up-to-date) folder never
-                # needs the model at all.
-                objects_mod.ensure_ram_ready()
+            ram_ready = False
             for path in paths:
                 if job.cancel_event.is_set():
                     job.cancelled = True
                     break
                 try:
-                    if force or self.store.needs_reindex(path):
-                        entry, embedding = self.process_image(path, settings)
-                        self.store.upsert(entry, embedding)
+                    should_index = force or self.store.needs_reindex(path)
                 except Exception as exc:
                     job.failed += 1
                     logger.warning("skipping %s: %s", path, exc)
+                    should_index = False
+                if should_index:
+                    # Load RAM++ only when the scan actually finds work. Keep
+                    # readiness outside the per-image error handler so a bad
+                    # checkpoint still fails the whole job once, clearly.
+                    if not ram_ready:
+                        objects_mod.ensure_ram_ready()
+                        ram_ready = True
+                    try:
+                        self.index_path_if_needed(path, settings, force=force)
+                    except Exception as exc:
+                        job.failed += 1
+                        logger.warning("skipping %s: %s", path, exc)
                 job.processed += 1
                 if job.processed % 50 == 0:
                     self.store.save()
@@ -158,9 +216,34 @@ class Indexer:
             # (after being listed but before its turn in the loop) must not
             # survive pruning just because it was present at the start.
             current_paths = {str(p) for p in self._list_image_paths()}
-            self.store.prune(current_paths)
+            if confirm_deletions:
+                # NAS directory listings can be incomplete during a brief SMB
+                # interruption even while the share root still exists. Only
+                # delete a path after two clean reconciliation scans agree it
+                # is absent. Real filesystem delete events remain immediate.
+                known_paths = self.store.all_paths()
+                missing = known_paths - current_paths
+                confirmed_missing = missing & self._last_reconcile_missing
+                keep_paths = current_paths | (missing - confirmed_missing)
+                removed_thumbnails = self.store.prune(keep_paths)
+                self._last_reconcile_missing = missing
+            else:
+                removed_thumbnails = self.store.prune(current_paths)
+                self._last_reconcile_missing.clear()
+            self._remove_thumbnails(removed_thumbnails)
             self.store.save()
         except Exception as exc:
             job.error = str(exc)
         finally:
-            job.done = True
+            try:
+                # RAM++ is only needed while indexing. Drop its large model
+                # and PyTorch's cached peak allocations so the app does not
+                # occupy most of the GPU while it is sitting idle. The next
+                # changed image or reindex run will lazily load it again.
+                objects_mod.unload_ram_model()
+            except Exception:
+                # Cleanup must never turn an otherwise successful reindex into
+                # a failed job; log it while preserving the original outcome.
+                logger.warning("failed to unload RAM++ after reindex", exc_info=True)
+            finally:
+                job.done = True

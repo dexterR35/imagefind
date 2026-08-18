@@ -11,10 +11,9 @@ def _fresh_app(tmp_path, monkeypatch):
     images_dir.mkdir()
     monkeypatch.setenv("IMAGES_DIR", str(images_dir))
     monkeypatch.setenv("INDEX_DIR", str(tmp_path / "index"))
-    # A developer's shell may have ENABLE_WATCHER=true set for real deployment
-    # use; every _fresh_app call must start from a clean slate or it would
-    # spin up a real watchdog Observer + reconciliation thread during tests.
-    monkeypatch.delenv("ENABLE_WATCHER", raising=False)
+    # Real-time NAS indexing is enabled by default in the application. Tests
+    # explicitly disable it so module reloads never leave background threads.
+    monkeypatch.setenv("ENABLE_WATCHER", "false")
     from app import config, main
     importlib.reload(config)
     importlib.reload(main)
@@ -107,7 +106,7 @@ def test_cancel_reindex_returns_409_for_an_already_finished_job(tmp_path, monkey
     assert client.post(f"/reindex/{job_id}/cancel").status_code == 409
 
 
-def test_watcher_disabled_by_default(tmp_path, monkeypatch):
+def test_watcher_can_be_disabled_for_maintenance(tmp_path, monkeypatch):
     main, _ = _fresh_app(tmp_path, monkeypatch)
     assert main._watcher_observer is None
     assert main._reconciliation_thread is None
@@ -407,3 +406,131 @@ def test_download_endpoint_404_for_unknown_id(tmp_path, monkeypatch):
     main, _ = _fresh_app(tmp_path, monkeypatch)
     client = TestClient(main.app)
     assert client.get("/download/missing").status_code == 404
+
+
+def test_model_status_reports_not_installed_when_checkpoint_missing(tmp_path, monkeypatch):
+    main, _ = _fresh_app(tmp_path, monkeypatch)
+    monkeypatch.setattr(main.config, "RAM_CHECKPOINT_PATH", tmp_path / "does-not-exist.pth")
+    client = TestClient(main.app)
+    assert client.get("/model/status").json() == {"installed": False}
+
+
+def test_model_status_reports_installed_when_checkpoint_present(tmp_path, monkeypatch):
+    main, _ = _fresh_app(tmp_path, monkeypatch)
+    checkpoint = tmp_path / "ram_plus.pth"
+    checkpoint.write_bytes(b"fake-checkpoint")
+    monkeypatch.setattr(main.config, "RAM_CHECKPOINT_PATH", checkpoint)
+    client = TestClient(main.app)
+    assert client.get("/model/status").json() == {"installed": True}
+
+
+def test_model_download_returns_409_when_already_installed(tmp_path, monkeypatch):
+    main, _ = _fresh_app(tmp_path, monkeypatch)
+    checkpoint = tmp_path / "ram_plus.pth"
+    checkpoint.write_bytes(b"fake-checkpoint")
+    monkeypatch.setattr(main.config, "RAM_CHECKPOINT_PATH", checkpoint)
+    client = TestClient(main.app)
+    assert client.post("/model/download").status_code == 409
+
+
+def test_model_download_reports_progress_until_done(tmp_path, monkeypatch):
+    main, _ = _fresh_app(tmp_path, monkeypatch)
+    monkeypatch.setattr(main.config, "RAM_CHECKPOINT_PATH", tmp_path / "ram_plus.pth")
+    release = threading.Event()
+
+    def fake_run_download(job):
+        job.total_bytes = 100
+        job.downloaded_bytes = 40
+        release.wait(timeout=5)
+        job.downloaded_bytes = 100
+        job.done = True
+
+    monkeypatch.setattr(main, "run_download", fake_run_download)
+    client = TestClient(main.app)
+
+    job_id = client.post("/model/download").json()["job_id"]
+    try:
+        mid = client.get(f"/model/download/status/{job_id}").json()
+        assert mid["done"] is False
+        assert mid["downloaded_bytes"] == 40
+        assert mid["total_bytes"] == 100
+    finally:
+        release.set()
+
+    for _ in range(40):
+        final = client.get(f"/model/download/status/{job_id}").json()
+        if final["done"]:
+            break
+        time.sleep(0.05)
+
+    assert final == {
+        "downloaded_bytes": 100, "total_bytes": 100, "done": True, "error": None, "cancelled": False,
+    }
+
+
+def test_second_model_download_while_one_is_running_returns_409(tmp_path, monkeypatch):
+    main, _ = _fresh_app(tmp_path, monkeypatch)
+    monkeypatch.setattr(main.config, "RAM_CHECKPOINT_PATH", tmp_path / "ram_plus.pth")
+    release = threading.Event()
+
+    def fake_run_download(job):
+        release.wait(timeout=5)
+        job.done = True
+
+    monkeypatch.setattr(main, "run_download", fake_run_download)
+    client = TestClient(main.app)
+
+    first = client.post("/model/download")
+    assert first.status_code == 200
+    try:
+        second = client.post("/model/download")
+        assert second.status_code == 409
+    finally:
+        release.set()
+
+
+def test_cancel_model_download_sets_the_job_cancel_event(tmp_path, monkeypatch):
+    main, _ = _fresh_app(tmp_path, monkeypatch)
+    monkeypatch.setattr(main.config, "RAM_CHECKPOINT_PATH", tmp_path / "ram_plus.pth")
+    release = threading.Event()
+
+    def fake_run_download(job):
+        release.wait(timeout=5)
+        job.done = True
+
+    monkeypatch.setattr(main, "run_download", fake_run_download)
+    client = TestClient(main.app)
+
+    job_id = client.post("/model/download").json()["job_id"]
+    try:
+        response = client.post(f"/model/download/{job_id}/cancel")
+        assert response.status_code == 200
+        assert main.model_download_jobs[job_id].cancel_event.is_set()
+    finally:
+        release.set()
+
+
+def test_cancel_model_download_returns_404_for_unknown_job(tmp_path, monkeypatch):
+    main, _ = _fresh_app(tmp_path, monkeypatch)
+    client = TestClient(main.app)
+    assert client.post("/model/download/does-not-exist/cancel").status_code == 404
+
+
+def test_cancel_model_download_returns_409_for_an_already_finished_job(tmp_path, monkeypatch):
+    main, _ = _fresh_app(tmp_path, monkeypatch)
+    monkeypatch.setattr(main.config, "RAM_CHECKPOINT_PATH", tmp_path / "ram_plus.pth")
+
+    def instant_run_download(job):
+        job.done = True
+
+    monkeypatch.setattr(main, "run_download", instant_run_download)
+    client = TestClient(main.app)
+
+    job_id = client.post("/model/download").json()["job_id"]
+    for _ in range(40):
+        status = client.get(f"/model/download/status/{job_id}").json()
+        if status["done"]:
+            break
+        time.sleep(0.05)
+
+    assert client.post(f"/model/download/{job_id}/cancel").status_code == 409

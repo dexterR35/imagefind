@@ -7,6 +7,23 @@ from app.embeddings import cosine_similarity, embed_image, embed_text
 from app.objects import detect_custom_tags, detect_ram_objects
 
 
+def test_unload_ram_model_releases_model_and_cuda_cache(monkeypatch):
+    fake_model = object()
+    monkeypatch.setattr(objects_mod, "_ram_model", fake_model)
+    monkeypatch.setattr(objects_mod, "_ram_transform", object())
+    monkeypatch.setattr(objects_mod, "_ram_default_class_threshold", object())
+    monkeypatch.setattr(objects_mod.torch.cuda, "is_available", lambda: True)
+    empty_cache_calls = []
+    monkeypatch.setattr(objects_mod.torch.cuda, "empty_cache", lambda: empty_cache_calls.append(True))
+
+    objects_mod.unload_ram_model()
+
+    assert objects_mod._ram_model is None
+    assert objects_mod._ram_transform is None
+    assert objects_mod._ram_default_class_threshold is None
+    assert empty_cache_calls == [True]
+
+
 def test_detect_ram_objects_returns_deduped_sorted_list(tmp_path):
     # A synthetic blank image won't reliably trigger real detections; this
     # test verifies the pipeline runs end-to-end without erroring and

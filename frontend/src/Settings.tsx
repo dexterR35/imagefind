@@ -1,16 +1,25 @@
 import { useEffect, useRef, useState } from "react";
 import {
+  cancelModelDownload,
   cancelReindex,
+  fetchModelDownloadStatus,
+  fetchModelStatus,
   fetchReindexStatus,
   fetchSettings,
+  startModelDownload,
   startReindex,
   updateSettings,
+  type ModelDownloadStatus,
   type ReindexStatus,
   type Settings as SettingsType,
 } from "./api";
 
 interface Props {
   onReindexComplete: () => void;
+}
+
+function formatMB(bytes: number): string {
+  return (bytes / (1024 * 1024)).toFixed(0);
 }
 
 export function Settings({ onReindexComplete }: Props) {
@@ -23,6 +32,12 @@ export function Settings({ onReindexComplete }: Props) {
   const pollRef = useRef<number | null>(null);
   const jobIdRef = useRef<string | null>(null);
 
+  const [modelInstalled, setModelInstalled] = useState<boolean | null>(null);
+  const [modelDownloading, setModelDownloading] = useState(false);
+  const [modelStatus, setModelStatus] = useState<ModelDownloadStatus | null>(null);
+  const modelPollRef = useRef<number | null>(null);
+  const modelJobIdRef = useRef<string | null>(null);
+
   useEffect(() => {
     if (open && settings === null) {
       fetchSettings().then((s) => {
@@ -30,16 +45,79 @@ export function Settings({ onReindexComplete }: Props) {
         setCustomTagsText(s.ram_custom_tags.join(", "));
       });
     }
-  }, [open, settings]);
+    if (open && modelInstalled === null) {
+      fetchModelStatus()
+        .then((s) => setModelInstalled(s.installed))
+        .catch(() => setModelInstalled(null));
+    }
+  }, [open, settings, modelInstalled]);
 
   useEffect(() => {
-    return () => stopPolling();
+    return () => {
+      stopPolling();
+      stopModelPolling();
+    };
   }, []);
 
   function stopPolling() {
     if (pollRef.current !== null) {
       window.clearInterval(pollRef.current);
       pollRef.current = null;
+    }
+  }
+
+  function stopModelPolling() {
+    if (modelPollRef.current !== null) {
+      window.clearInterval(modelPollRef.current);
+      modelPollRef.current = null;
+    }
+  }
+
+  async function handleInstallModel() {
+    setModelDownloading(true);
+    setModelStatus(null);
+    let jobId: string;
+    try {
+      jobId = await startModelDownload();
+    } catch (err) {
+      setModelDownloading(false);
+      setModelStatus({
+        downloaded_bytes: 0, total_bytes: 0, done: true, cancelled: false,
+        error: `Failed to start download: ${err instanceof Error ? err.message : String(err)}`,
+      });
+      return;
+    }
+    modelJobIdRef.current = jobId;
+
+    modelPollRef.current = window.setInterval(async () => {
+      try {
+        const s = await fetchModelDownloadStatus(jobId);
+        setModelStatus(s);
+        if (s.done) {
+          stopModelPolling();
+          setModelDownloading(false);
+          modelJobIdRef.current = null;
+          if (!s.error && !s.cancelled) setModelInstalled(true);
+        }
+      } catch {
+        stopModelPolling();
+        setModelDownloading(false);
+        modelJobIdRef.current = null;
+        setModelStatus({
+          downloaded_bytes: 0, total_bytes: 0, done: true, cancelled: false,
+          error: "Lost connection while checking download status.",
+        });
+      }
+    }, 500);
+  }
+
+  async function handleCancelInstallModel() {
+    if (!modelJobIdRef.current) return;
+    try {
+      await cancelModelDownload(modelJobIdRef.current);
+    } catch {
+      // best-effort — the polling loop above will still notice job.done and
+      // stop showing a "downloading" state either way
     }
   }
 
@@ -125,6 +203,26 @@ export function Settings({ onReindexComplete }: Props) {
       </button>
       {open && settings && (
         <div className="settings-panel">
+          {modelInstalled === false && (
+            <div className="model-install">
+              <span>RAM++ object-tagging model isn't installed yet.</span>
+              <button type="button" onClick={handleInstallModel} disabled={modelDownloading}>
+                {modelDownloading ? "Installing..." : "Install RAM++ Model"}
+              </button>
+              {modelDownloading && modelStatus && !modelStatus.done && (
+                <button type="button" onClick={handleCancelInstallModel}>
+                  Cancel
+                </button>
+              )}
+              {modelStatus && !modelStatus.done && modelStatus.total_bytes > 0 && (
+                <span>
+                  {formatMB(modelStatus.downloaded_bytes)} / {formatMB(modelStatus.total_bytes)} MB
+                </span>
+              )}
+              {modelStatus?.done && modelStatus.cancelled && <span>Download cancelled.</span>}
+              {modelStatus?.error && <span className="reindex-error">{modelStatus.error}</span>}
+            </div>
+          )}
           <label>
             Image folder path
             <input

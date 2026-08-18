@@ -2,7 +2,9 @@ import threading
 from pathlib import Path
 
 import easyocr
+import numpy as np
 import torch
+from PIL import Image
 
 _reader = None
 _load_lock = threading.Lock()
@@ -18,5 +20,12 @@ def _get_reader():
 
 
 def extract_text(image_path: Path) -> str:
-    results = _get_reader().readtext(str(image_path), detail=0)
+    # EasyOCR passes string paths to cv2.imread(), which cannot reliably open
+    # Unicode filenames on Windows (for example names containing ™ or an en
+    # dash). Decode through Pillow first and give EasyOCR the pixel data. A
+    # grayscale array is sufficient for OCR and also avoids OpenCV/libpng
+    # warnings caused by malformed embedded PNG colour profiles.
+    with Image.open(image_path) as image:
+        grayscale = np.asarray(image.convert("L")).copy()
+    results = _get_reader().readtext(grayscale, detail=0)
     return " ".join(results).strip()

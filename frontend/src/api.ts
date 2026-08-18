@@ -54,6 +54,18 @@ export interface Settings {
   images_dir: string;
 }
 
+export interface ModelStatus {
+  installed: boolean;
+}
+
+export interface ModelDownloadStatus {
+  downloaded_bytes: number;
+  total_bytes: number;
+  done: boolean;
+  error: string | null;
+  cancelled: boolean;
+}
+
 // Override with VITE_API_BASE_URL when the frontend is served to a different
 // machine than the backend (e.g. over LAN) — "localhost" would otherwise
 // resolve to the viewer's own device instead of the server.
@@ -148,4 +160,28 @@ export async function updateSettings(settings: Settings): Promise<Settings> {
   });
   if (!res.ok) throw new Error(await errorDetail(res));
   return res.json();
+}
+
+export async function fetchModelStatus(): Promise<ModelStatus> {
+  const res = await fetch(`${BASE_URL}/model/status`);
+  if (!res.ok) throw new Error(await errorDetail(res));
+  return res.json();
+}
+
+export async function startModelDownload(): Promise<string> {
+  const res = await fetch(`${BASE_URL}/model/download`, { method: "POST" });
+  if (!res.ok) throw new Error(await errorDetail(res));
+  const data = await res.json();
+  return data.job_id;
+}
+
+export async function fetchModelDownloadStatus(jobId: string): Promise<ModelDownloadStatus> {
+  const res = await fetch(`${BASE_URL}/model/download/status/${jobId}`);
+  if (!res.ok) throw new Error(await errorDetail(res));
+  return res.json();
+}
+
+export async function cancelModelDownload(jobId: string): Promise<void> {
+  const res = await fetch(`${BASE_URL}/model/download/${jobId}/cancel`, { method: "POST" });
+  if (!res.ok) throw new Error(await errorDetail(res));
 }

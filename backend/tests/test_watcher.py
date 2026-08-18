@@ -10,8 +10,11 @@ from app.storage import IndexStore
 from app.watcher import _Handler, _wait_until_stable, start_reconciliation_loop
 
 
-def _fake_event(path, is_directory=False):
-    return SimpleNamespace(src_path=str(path), is_directory=is_directory)
+def _fake_event(path, is_directory=False, destination=None):
+    values = {"src_path": str(path), "is_directory": is_directory}
+    if destination is not None:
+        values["dest_path"] = str(destination)
+    return SimpleNamespace(**values)
 
 
 def test_wait_until_stable_returns_true_once_size_stops_changing(tmp_path):
@@ -155,6 +158,100 @@ def test_handler_on_deleted_removes_entry(tmp_path):
     assert store.get_by_path(str(img_path)) is None
 
 
+def test_handler_on_moved_removes_old_path_and_indexes_destination(tmp_path, monkeypatch):
+    images_dir = tmp_path / "images"
+    images_dir.mkdir()
+    index_dir = tmp_path / "index"
+    old_path = images_dir / "old.png"
+    new_path = images_dir / "Promo ™ – new.png"
+    Image.new("RGB", (32, 32), "white").save(new_path)
+
+    store = IndexStore(index_dir, embedding_dim=512)
+    store.load()
+    from app.storage import ImageEntry
+    store.upsert(
+        ImageEntry(
+            id="old1", path=str(old_path), thumbnail_path=str(index_dir / "old.jpg"),
+            ocr_text="", colors=[], objects=[], mtime=0.0, size=0,
+        ),
+        np.zeros(512, dtype=np.float32),
+    )
+    indexer = Indexer(images_dir, index_dir, store)
+
+    def fake_index(path, settings=None, force=False):
+        stat = path.stat()
+        store.upsert(
+            ImageEntry(
+                id="new1", path=str(path), thumbnail_path=str(index_dir / "new.jpg"),
+                ocr_text="", colors=[], objects=[], mtime=stat.st_mtime, size=stat.st_size,
+            ),
+            np.zeros(512, dtype=np.float32),
+        )
+        return True
+
+    monkeypatch.setattr(indexer, "index_path_if_needed", fake_index)
+    monkeypatch.setattr("app.watcher._STABLE_CHECK_INTERVAL", 0.01)
+
+    _Handler(indexer, store).on_moved(_fake_event(old_path, destination=new_path))
+
+    assert store.get_by_path(str(old_path)) is None
+    assert store.get_by_path(str(new_path)).id == "new1"
+
+
+def test_handler_on_deleted_directory_removes_children_and_thumbnails(tmp_path):
+    images_dir = tmp_path / "images"
+    images_dir.mkdir()
+    deleted_dir = images_dir / "deleted-campaign"
+    index_dir = tmp_path / "index"
+    thumbnails_dir = index_dir / "thumbnails"
+    thumbnails_dir.mkdir(parents=True)
+    store = IndexStore(index_dir, embedding_dim=512)
+    store.load()
+    from app.storage import ImageEntry
+
+    thumbnails = []
+    for number in range(2):
+        thumbnail = thumbnails_dir / f"gone{number}.jpg"
+        thumbnail.write_bytes(b"thumbnail")
+        thumbnails.append(thumbnail)
+        store.upsert(
+            ImageEntry(
+                id=f"gone{number}", path=str(deleted_dir / f"image{number}.png"),
+                thumbnail_path=str(thumbnail), ocr_text="", colors=[], objects=[],
+                mtime=0.0, size=0,
+            ),
+            np.zeros(512, dtype=np.float32),
+        )
+
+    indexer = Indexer(images_dir, index_dir, store)
+    _Handler(indexer, store).on_deleted(_fake_event(deleted_dir, is_directory=True))
+
+    assert store.count() == 0
+    assert all(not thumbnail.exists() for thumbnail in thumbnails)
+
+
+def test_handler_does_not_delete_index_when_nas_root_is_unreachable(tmp_path):
+    images_dir = tmp_path / "images"
+    images_dir.mkdir()
+    index_dir = tmp_path / "index"
+    image_path = images_dir / "keep.png"
+    store = IndexStore(index_dir, embedding_dim=512)
+    store.load()
+    from app.storage import ImageEntry
+    store.upsert(
+        ImageEntry(
+            id="keep1", path=str(image_path), thumbnail_path=str(index_dir / "keep.jpg"),
+            ocr_text="", colors=[], objects=[], mtime=0.0, size=0,
+        ),
+        np.zeros(512, dtype=np.float32),
+    )
+    images_dir.rmdir()
+
+    _Handler(Indexer(images_dir, index_dir, store), store).on_deleted(_fake_event(image_path))
+
+    assert store.get_by_path(str(image_path)) is not None
+
+
 def test_reconciliation_loop_calls_run_reindex_on_interval(tmp_path, monkeypatch):
     images_dir = tmp_path / "images"
     images_dir.mkdir()
@@ -164,7 +261,7 @@ def test_reconciliation_loop_calls_run_reindex_on_interval(tmp_path, monkeypatch
     indexer = Indexer(images_dir, index_dir, store)
 
     calls = []
-    monkeypatch.setattr(indexer, "run_reindex", lambda job, force=False: calls.append(job))
+    monkeypatch.setattr(indexer, "run_reindex", lambda job, **kwargs: calls.append((job, kwargs)))
 
     stop_event = threading.Event()
     thread = start_reconciliation_loop(
@@ -175,4 +272,5 @@ def test_reconciliation_loop_calls_run_reindex_on_interval(tmp_path, monkeypatch
     thread.join(timeout=2)
 
     assert len(calls) >= 1
+    assert all(kwargs == {"confirm_deletions": True} for _, kwargs in calls)
     assert not thread.is_alive()

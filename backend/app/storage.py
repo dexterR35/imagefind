@@ -126,15 +126,21 @@ class IndexStore:
 
     def _connect(self) -> sqlite3.Connection:
         conn = sqlite3.connect(str(self.db_path), check_same_thread=False)
-        conn.execute("PRAGMA foreign_keys=ON")
-        conn.execute("PRAGMA journal_mode=WAL")
-        conn.execute("PRAGMA busy_timeout=5000")
-        conn.enable_load_extension(True)
         try:
-            sqlite_vec.load(conn)
-        finally:
-            conn.enable_load_extension(False)
-        return conn
+            conn.execute("PRAGMA foreign_keys=ON")
+            conn.execute("PRAGMA journal_mode=WAL")
+            conn.execute("PRAGMA busy_timeout=5000")
+            conn.enable_load_extension(True)
+            try:
+                sqlite_vec.load(conn)
+            finally:
+                conn.enable_load_extension(False)
+            return conn
+        except Exception:
+            # On Windows an open failed connection still holds a file handle,
+            # preventing _open_db() from replacing a corrupt database.
+            conn.close()
+            raise
 
     def _open_db(self) -> sqlite3.Connection:
         try:
@@ -374,14 +380,22 @@ class IndexStore:
             ).fetchone()
             self._sync_derived(row[0], entry, embedding)
 
-    def prune(self, keep_paths: set[str]) -> None:
+    def prune(self, keep_paths: set[str]) -> list[str]:
         with self.lock:
             self._conn.execute("CREATE TEMP TABLE IF NOT EXISTS keep_paths(path TEXT PRIMARY KEY)")
             self._conn.execute("DELETE FROM keep_paths")
             self._conn.executemany("INSERT INTO keep_paths(path) VALUES (?)", [(path,) for path in keep_paths])
+            removed_thumbnails = [
+                row[0]
+                for row in self._conn.execute(
+                    "SELECT thumbnail_path FROM images "
+                    "WHERE path NOT IN (SELECT path FROM keep_paths)"
+                ).fetchall()
+            ]
             self._conn.execute("DELETE FROM images WHERE path NOT IN (SELECT path FROM keep_paths)")
             self._conn.execute("DROP TABLE keep_paths")
             self._conn.commit()
+            return removed_thumbnails
 
     def get(self, image_id: str) -> ImageEntry | None:
         with self.lock:
@@ -410,6 +424,10 @@ class IndexStore:
                     f"SELECT {_SELECT_COLUMNS} FROM images ORDER BY rowid"
                 ).fetchall()
             ]
+
+    def all_paths(self) -> set[str]:
+        with self.lock:
+            return {row[0] for row in self._conn.execute("SELECT path FROM images")}
 
     @property
     def entries(self) -> list[ImageEntry]:
@@ -510,7 +528,38 @@ class IndexStore:
             ).fetchall()
             return [_row_to_entry(result) for result in rows]
 
-    def delete_by_path(self, path: str) -> None:
+    def delete_by_path(self, path: str) -> str | None:
         with self.lock:
+            row = self._conn.execute(
+                "SELECT thumbnail_path FROM images WHERE path=?", (path,)
+            ).fetchone()
             self._conn.execute("DELETE FROM images WHERE path=?", (path,))
             self._conn.commit()
+            return row[0] if row else None
+
+    def delete_under_directory(self, directory: str) -> list[str]:
+        """Delete every indexed image below a directory path.
+
+        Both separators are accepted because an index may have been created
+        on a different OS, or a network path may have been normalized by an
+        external caller. Exact prefix comparison avoids treating ``%`` and
+        ``_`` in real folder names as SQL LIKE wildcards.
+        """
+        base = directory.rstrip("\\/")
+        prefixes = (base + "\\", base + "/")
+        predicate = (
+            "path = ? COLLATE NOCASE OR "
+            "substr(path, 1, ?) = ? COLLATE NOCASE OR "
+            "substr(path, 1, ?) = ? COLLATE NOCASE"
+        )
+        params = (base, len(prefixes[0]), prefixes[0], len(prefixes[1]), prefixes[1])
+        with self.lock:
+            removed_thumbnails = [
+                row[0]
+                for row in self._conn.execute(
+                    f"SELECT thumbnail_path FROM images WHERE {predicate}", params
+                ).fetchall()
+            ]
+            self._conn.execute(f"DELETE FROM images WHERE {predicate}", params)
+            self._conn.commit()
+            return removed_thumbnails

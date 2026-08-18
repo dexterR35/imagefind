@@ -117,6 +117,17 @@
   border-radius: 6px;
 }
 
+.model-install {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  padding: 10px 12px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  font-size: 13px;
+}
+
 .error-banner {
   color: #b00020;
   background: rgba(176, 0, 32, 0.08);

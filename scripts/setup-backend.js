@@ -45,12 +45,16 @@ if (!fs.existsSync(venvPython)) {
 console.log("Upgrading pip...");
 run(venvPython, ["-m", "pip", "install", "--upgrade", "pip"]);
 
+console.log("Installing backend dependencies (requirements.txt)...");
+run(venvPython, ["-m", "pip", "install", "-r", "requirements.txt"], { cwd: backendDir });
+
 if (useCuda) {
+  // Installed *after* requirements.txt, not before: requirements.txt doesn't
+  // pin torch itself, so its unpinned transitive dependency on torch (via
+  // open-clip-torch) can otherwise let pip pull in a plain CPU wheel from
+  // PyPI and silently overwrite the CUDA build if this ran first.
   console.log("Installing CUDA-enabled torch/torchvision (requirements-cuda.txt)...");
   run(venvPython, ["-m", "pip", "install", "-r", "requirements-cuda.txt"], { cwd: backendDir });
 }
-
-console.log("Installing backend dependencies (requirements.txt)...");
-run(venvPython, ["-m", "pip", "install", "-r", "requirements.txt"], { cwd: backendDir });
 
 console.log("\nBackend setup complete. Run `npm start` to launch the app.");
