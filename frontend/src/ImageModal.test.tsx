@@ -16,7 +16,7 @@ describe("ImageModal", () => {
 
     const link = screen.getByText("Download original") as HTMLAnchorElement;
     expect(link.tagName).toBe("A");
-    expect(link.href).toBe("http://localhost:8000/download/a1");
+    expect(link.href).toBe("http://localhost:3000/api/download/a1");
   });
 
   it("calls onFindSimilar and onClose from their respective buttons", () => {

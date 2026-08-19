@@ -67,10 +67,9 @@ export interface ModelDownloadStatus {
   cancelled: boolean;
 }
 
-// Override with VITE_API_BASE_URL when the frontend is served to a different
-// machine than the backend (e.g. over LAN) — "localhost" would otherwise
-// resolve to the viewer's own device instead of the server.
-const BASE_URL = import.meta.env.VITE_API_BASE_URL ?? "http://localhost:8000";
+// Use the Vite proxy by default so local, LAN, and tunnel visitors all call
+// the backend through the same origin that served the frontend.
+const BASE_URL = import.meta.env.VITE_API_BASE_URL ?? "/api";
 
 async function errorDetail(res: Response): Promise<string> {
   try {

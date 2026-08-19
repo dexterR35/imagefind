@@ -13,12 +13,12 @@ describe("search", () => {
 
     const results = await search({ color: "green" });
 
-    expect(mockFetch).toHaveBeenCalledWith("http://localhost:8000/search?color=green");
+    expect(mockFetch).toHaveBeenCalledWith("/api/search?color=green");
     expect(results.results[0].id).toBe("a1");
     expect(results.total).toBe(1);
   });
 
-  it("resolves thumbnail_url to an absolute backend URL, not an origin-relative path", async () => {
+  it("resolves thumbnail_url through the same-origin API proxy", async () => {
     const mockFetch = vi.fn().mockResolvedValue({
       ok: true,
       json: async () => ({ results: [
@@ -29,7 +29,7 @@ describe("search", () => {
 
     const results = await search({});
 
-    expect(results.results[0].thumbnail_url).toBe("http://localhost:8000/thumbnail/a1");
+    expect(results.results[0].thumbnail_url).toBe("/api/thumbnail/a1");
   });
 
   it("passes pagination and sorting options", async () => {
@@ -42,7 +42,7 @@ describe("search", () => {
     await search({ text: "logo" }, { sort: "name_desc", offset: 60, limit: 30 });
 
     expect(mockFetch).toHaveBeenCalledWith(
-      "http://localhost:8000/search?text=logo&sort=name_desc&offset=60&limit=30",
+      "/api/search?text=logo&sort=name_desc&offset=60&limit=30",
     );
   });
 
@@ -57,7 +57,7 @@ describe("search", () => {
     await search({}, { signal: controller.signal });
 
     expect(mockFetch).toHaveBeenCalledWith(
-      "http://localhost:8000/search?",
+      "/api/search?",
       { signal: controller.signal },
     );
   });
@@ -71,7 +71,7 @@ describe("search", () => {
 });
 
 describe("findSimilar", () => {
-  it("resolves thumbnail_url to an absolute backend URL", async () => {
+  it("resolves thumbnail_url through the same-origin API proxy", async () => {
     const mockFetch = vi.fn().mockResolvedValue({
       ok: true,
       json: async () => [
@@ -82,7 +82,7 @@ describe("findSimilar", () => {
 
     const results = await findSimilar("a1");
 
-    expect(results[0].thumbnail_url).toBe("http://localhost:8000/thumbnail/b1");
+    expect(results[0].thumbnail_url).toBe("/api/thumbnail/b1");
   });
 });
 
@@ -93,7 +93,7 @@ describe("startReindex", () => {
 
     await startReindex(true);
 
-    expect(mockFetch).toHaveBeenCalledWith("http://localhost:8000/reindex?force=true", { method: "POST" });
+    expect(mockFetch).toHaveBeenCalledWith("/api/reindex?force=true", { method: "POST" });
   });
 });
 
@@ -105,7 +105,7 @@ describe("updateSettings", () => {
 
     const result = await updateSettings(settings);
 
-    expect(mockFetch).toHaveBeenCalledWith("http://localhost:8000/settings", {
+    expect(mockFetch).toHaveBeenCalledWith("/api/settings", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(settings),

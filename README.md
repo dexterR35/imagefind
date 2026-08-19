@@ -178,7 +178,7 @@ important; it can also be regenerated from the original images.
 | `CORS_ALLOWED_ORIGINS` | `http://localhost:5173` | Comma-separated allowed frontend origins |
 | `SEARCH_RATE_LIMIT_REQUESTS` | `30` | Search requests allowed per client/window |
 | `SEARCH_RATE_LIMIT_WINDOW_SECONDS` | `10` | Search rate-limit window |
-| `VITE_API_BASE_URL` | `http://localhost:8000` | Backend URL compiled into the frontend |
+| `VITE_API_BASE_URL` | `/api` | Backend URL used by the frontend; `/api` is proxied to the local backend in development |
 
 ## Tests
 
@@ -195,6 +195,6 @@ npm run build
 ## Remote access
 
 ImageFind currently has no user login. Do not expose the backend directly to the
-public internet. For remote access, use a private VPN or an authenticated tunnel
-such as Cloudflare Tunnel with Access. A frontend tunnel must also use the
-correct public `VITE_API_BASE_URL` and matching `CORS_ALLOWED_ORIGINS`.
+public internet. The frontend uses a same-origin `/api` proxy, so a tunnel to the
+frontend can carry both UI and API traffic through one URL. Prefer a private VPN
+or an authenticated tunnel such as Cloudflare Tunnel with Access for ongoing use.
