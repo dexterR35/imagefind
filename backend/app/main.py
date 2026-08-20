@@ -148,6 +148,18 @@ def _enforce_search_rate_limit(request: Request) -> None:
         )
 
 
+def _request_came_through_tunnel(request: Request) -> bool:
+    if request.headers.get("cf-ray") or request.headers.get("cf-connecting-ip"):
+        return True
+    tunnel_markers = (
+        request.headers.get("origin", ""),
+        request.headers.get("referer", ""),
+        request.headers.get("x-forwarded-host", ""),
+        request.headers.get("forwarded", ""),
+    )
+    return any(".trycloudflare.com" in value.lower() for value in tunnel_markers)
+
+
 @app.get("/health")
 def health():
     return {"status": "ok", "indexed": store.count()}
@@ -183,7 +195,12 @@ def similar_endpoint(request: Request, image_id: str):
 
 
 @app.post("/reindex")
-def reindex_endpoint(force: bool = False):
+def reindex_endpoint(request: Request, force: bool = False):
+    if _request_came_through_tunnel(request):
+        raise HTTPException(
+            status_code=403,
+            detail="reindexing is disabled through the public tunnel; open ImageFind locally",
+        )
     with _jobs_lock:
         if any(not job.done for job in jobs.values()):
             raise HTTPException(status_code=409, detail="a reindex job is already running")

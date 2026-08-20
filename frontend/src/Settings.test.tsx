@@ -12,6 +12,7 @@ const sampleSettings: api.Settings = {
 describe("Settings", () => {
   beforeEach(() => {
     vi.useFakeTimers({ shouldAdvanceTime: true });
+    vi.spyOn(window, "confirm").mockReturnValue(true);
     // Most tests aren't exercising the model-install feature, so default to
     // "already installed" (no install button) unless a test overrides this.
     vi.spyOn(api, "fetchModelStatus").mockResolvedValue({ installed: true });
@@ -26,7 +27,7 @@ describe("Settings", () => {
     vi.spyOn(api, "fetchSettings").mockResolvedValue(sampleSettings);
 
     render(<Settings onReindexComplete={vi.fn()} />);
-    fireEvent.click(screen.getByText("Settings"));
+    fireEvent.click(screen.getByRole("button", { name: "Open settings" }));
 
     await waitFor(() => expect(screen.getByDisplayValue("0.15")).toBeInTheDocument());
     expect(screen.getByDisplayValue("zeus, lightning")).toBeInTheDocument();
@@ -37,7 +38,7 @@ describe("Settings", () => {
     vi.spyOn(api, "fetchSettings").mockRejectedValue(new Error("offline"));
 
     render(<Settings onReindexComplete={vi.fn()} />);
-    fireEvent.click(screen.getByText("Settings"));
+    fireEvent.click(screen.getByRole("button", { name: "Open settings" }));
 
     expect(await screen.findByRole("alert")).toHaveTextContent("Could not load settings");
   });
@@ -48,53 +49,64 @@ describe("Settings", () => {
       ...sampleSettings,
       images_dir: "/other-photos",
     });
-    vi.spyOn(api, "startReindex").mockResolvedValue("job1");
-    vi.spyOn(api, "fetchReindexStatus").mockResolvedValue({ processed: 1, total: 1, failed: 0, done: true, error: null, cancelled: false });
+    const reindexSpy = vi.spyOn(api, "startReindex");
 
     render(<Settings onReindexComplete={vi.fn()} />);
-    fireEvent.click(screen.getByText("Settings"));
+    fireEvent.click(screen.getByRole("button", { name: "Open settings" }));
     await waitFor(() => expect(screen.getByDisplayValue("/photos")).toBeInTheDocument());
 
     fireEvent.change(screen.getByDisplayValue("/photos"), { target: { value: "/other-photos" } });
-    fireEvent.click(screen.getByText("Save & Reindex"));
+    fireEvent.click(screen.getByText("Save"));
 
+    expect(window.confirm).toHaveBeenCalledWith(expect.stringContaining("switch the watched folder"));
     await waitFor(() =>
       expect(updateSpy).toHaveBeenCalledWith(expect.objectContaining({ images_dir: "/other-photos" }))
     );
+    expect(reindexSpy).not.toHaveBeenCalled();
   });
 
-  it("saves edited settings, triggers a forced reindex, and polls to completion", async () => {
+  it("does not save a folder change when confirmation is declined", async () => {
+    vi.spyOn(api, "fetchSettings").mockResolvedValue(sampleSettings);
+    const updateSpy = vi.spyOn(api, "updateSettings");
+    const reindexSpy = vi.spyOn(api, "startReindex");
+    vi.mocked(window.confirm).mockReturnValueOnce(false);
+
+    render(<Settings onReindexComplete={vi.fn()} />);
+    fireEvent.click(screen.getByRole("button", { name: "Open settings" }));
+    await waitFor(() => expect(screen.getByDisplayValue("/photos")).toBeInTheDocument());
+    fireEvent.change(screen.getByDisplayValue("/photos"), { target: { value: "/other-photos" } });
+    fireEvent.click(screen.getByText("Save"));
+
+    expect(updateSpy).not.toHaveBeenCalled();
+    expect(reindexSpy).not.toHaveBeenCalled();
+  });
+
+  it("saves edited settings without starting a reindex", async () => {
     vi.spyOn(api, "fetchSettings").mockResolvedValue(sampleSettings);
     const updateSpy = vi.spyOn(api, "updateSettings").mockResolvedValue({
       ...sampleSettings,
       ram_confidence: 0.05,
       ram_custom_tags: ["zeus", "statue"],
     });
-    const reindexSpy = vi.spyOn(api, "startReindex").mockResolvedValue("job1");
-    vi.spyOn(api, "fetchReindexStatus").mockResolvedValue({ processed: 1, total: 1, failed: 0, done: true, error: null, cancelled: false });
-    const onReindexComplete = vi.fn();
+    const reindexSpy = vi.spyOn(api, "startReindex");
 
-    render(<Settings onReindexComplete={onReindexComplete} />);
-    fireEvent.click(screen.getByText("Settings"));
+    render(<Settings onReindexComplete={vi.fn()} />);
+    fireEvent.click(screen.getByRole("button", { name: "Open settings" }));
     await waitFor(() => expect(screen.getByDisplayValue("0.15")).toBeInTheDocument());
 
     fireEvent.change(screen.getByDisplayValue("0.15"), { target: { value: "0.05" } });
     fireEvent.change(screen.getByDisplayValue("zeus, lightning"), {
       target: { value: "zeus, statue" },
     });
-    fireEvent.click(screen.getByText("Save & Reindex"));
+    fireEvent.click(screen.getByText("Save"));
 
     await waitFor(() =>
       expect(updateSpy).toHaveBeenCalledWith(
         expect.objectContaining({ ram_confidence: 0.05, ram_custom_tags: ["zeus", "statue"] })
       )
     );
-    // startReindex must be called with force=true — settings changes need a
-    // full re-scan, not the default skip-unchanged reindex.
-    expect(reindexSpy).toHaveBeenCalledWith(true);
-
-    await vi.advanceTimersByTimeAsync(500);
-    expect(onReindexComplete).toHaveBeenCalled();
+    expect(reindexSpy).not.toHaveBeenCalled();
+    expect(await screen.findByText("Settings saved.")).toBeInTheDocument();
   });
 
   it("shows an error and stops without reindexing if saving settings fails", async () => {
@@ -103,38 +115,37 @@ describe("Settings", () => {
     const reindexSpy = vi.spyOn(api, "startReindex");
 
     render(<Settings onReindexComplete={vi.fn()} />);
-    fireEvent.click(screen.getByText("Settings"));
+    fireEvent.click(screen.getByRole("button", { name: "Open settings" }));
     await waitFor(() => expect(screen.getByDisplayValue("0.15")).toBeInTheDocument());
 
-    fireEvent.click(screen.getByText("Save & Reindex"));
+    fireEvent.click(screen.getByText("Save"));
     await vi.advanceTimersByTimeAsync(0);
 
     await waitFor(() => expect(screen.getByText(/failed to save settings/i)).toBeInTheDocument());
     expect(reindexSpy).not.toHaveBeenCalled();
-    expect(screen.getByText("Save & Reindex")).not.toBeDisabled();
+    expect(screen.getByText("Save")).not.toBeDisabled();
   });
 
-  it("reports that settings were saved even if starting the reindex then fails", async () => {
-    // Regression test: a single try/catch around both calls used to report
-    // a generic "failed to save settings or start reindex" even when the
-    // save half had actually already succeeded (e.g. a 409 because another
-    // reindex was already running).
+  it("starts a forced reindex independently and polls to completion", async () => {
     vi.spyOn(api, "fetchSettings").mockResolvedValue(sampleSettings);
-    const updateSpy = vi.spyOn(api, "updateSettings").mockResolvedValue(sampleSettings);
-    vi.spyOn(api, "startReindex").mockRejectedValue(new Error("409 already running"));
+    const updateSpy = vi.spyOn(api, "updateSettings");
+    const reindexSpy = vi.spyOn(api, "startReindex").mockResolvedValue("job1");
+    vi.spyOn(api, "fetchReindexStatus").mockResolvedValue({
+      processed: 1, total: 1, failed: 0, done: true, error: null, cancelled: false,
+    });
+    const onReindexComplete = vi.fn();
 
-    render(<Settings onReindexComplete={vi.fn()} />);
-    fireEvent.click(screen.getByText("Settings"));
+    render(<Settings onReindexComplete={onReindexComplete} />);
+    fireEvent.click(screen.getByRole("button", { name: "Open settings" }));
     await waitFor(() => expect(screen.getByDisplayValue("0.15")).toBeInTheDocument());
 
-    fireEvent.click(screen.getByText("Save & Reindex"));
-    await vi.advanceTimersByTimeAsync(0);
+    fireEvent.click(screen.getByText("Reindex"));
+    await waitFor(() => expect(reindexSpy).toHaveBeenCalledWith(true));
+    expect(updateSpy).not.toHaveBeenCalled();
 
-    await waitFor(() => expect(updateSpy).toHaveBeenCalled());
-    await waitFor(() =>
-      expect(screen.getByText(/settings saved, but failed to start reindex/i)).toBeInTheDocument()
-    );
-    expect(screen.getByText("Save & Reindex")).not.toBeDisabled();
+    await vi.advanceTimersByTimeAsync(500);
+    await waitFor(() => expect(onReindexComplete).toHaveBeenCalled());
+    expect(screen.getByText("Reindex")).not.toBeDisabled();
   });
 
   it("does not show an install button when the model is already installed", async () => {
@@ -142,7 +153,7 @@ describe("Settings", () => {
     vi.spyOn(api, "fetchModelStatus").mockResolvedValue({ installed: true });
 
     render(<Settings onReindexComplete={vi.fn()} />);
-    fireEvent.click(screen.getByText("Settings"));
+    fireEvent.click(screen.getByRole("button", { name: "Open settings" }));
 
     await waitFor(() => expect(screen.getByDisplayValue("/photos")).toBeInTheDocument());
     expect(screen.queryByText("Install RAM++ Model")).not.toBeInTheDocument();
@@ -164,7 +175,7 @@ describe("Settings", () => {
       });
 
     render(<Settings onReindexComplete={vi.fn()} />);
-    fireEvent.click(screen.getByText("Settings"));
+    fireEvent.click(screen.getByRole("button", { name: "Open settings" }));
 
     const installButton = await screen.findByText("Install RAM++ Model");
     fireEvent.click(installButton);
@@ -189,7 +200,7 @@ describe("Settings", () => {
     });
 
     render(<Settings onReindexComplete={vi.fn()} />);
-    fireEvent.click(screen.getByText("Settings"));
+    fireEvent.click(screen.getByRole("button", { name: "Open settings" }));
 
     const installButton = await screen.findByText("Install RAM++ Model");
     fireEvent.click(installButton);

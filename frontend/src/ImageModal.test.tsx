@@ -11,6 +11,17 @@ const image: ImageResult = {
 };
 
 describe("ImageModal", () => {
+  it("locks background scrolling while open and restores it when closed", () => {
+    document.body.style.overflow = "auto";
+    const { unmount } = render(
+      <ImageModal image={image} onClose={() => {}} onFindSimilar={() => {}} />,
+    );
+
+    expect(document.body.style.overflow).toBe("hidden");
+    unmount();
+    expect(document.body.style.overflow).toBe("auto");
+  });
+
   it("renders a download link pointing at the /download endpoint for this image", () => {
     render(<ImageModal image={image} onClose={() => {}} onFindSimilar={() => {}} />);
 

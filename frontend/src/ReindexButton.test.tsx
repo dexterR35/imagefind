@@ -4,11 +4,24 @@ import * as api from "./api";
 import { ReindexButton } from "./ReindexButton";
 
 describe("ReindexButton", () => {
-  beforeEach(() => vi.useFakeTimers({ shouldAdvanceTime: true }));
+  beforeEach(() => {
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    vi.spyOn(window, "confirm").mockReturnValue(true);
+  });
   afterEach(() => {
     vi.useRealTimers();
     vi.restoreAllMocks();
     cleanup();
+  });
+
+  it("does not start reindexing when confirmation is declined", () => {
+    vi.mocked(window.confirm).mockReturnValueOnce(false);
+    const startSpy = vi.spyOn(api, "startReindex");
+
+    render(<ReindexButton onComplete={vi.fn()} />);
+    fireEvent.click(screen.getByText("Reindex"));
+
+    expect(startSpy).not.toHaveBeenCalled();
   });
 
   it("polls status until done then calls onComplete", async () => {

@@ -31,7 +31,7 @@ describe("App", () => {
     vi.spyOn(api, "findSimilar").mockResolvedValue([result]);
 
     render(<App />);
-    fireEvent.change(await screen.findByPlaceholderText("Search text or tags..."), {
+    fireEvent.change(await screen.findByRole("textbox", { name: "Search images" }), {
       target: { value: "clover" },
     });
 
@@ -54,7 +54,7 @@ describe("App", () => {
     await waitFor(() => expect(screen.getByText(/search failed/i)).toBeInTheDocument());
 
     searchSpy.mockResolvedValue({ results: [], total: 0 });
-    fireEvent.change(screen.getByPlaceholderText("Search text or tags..."), {
+    fireEvent.change(screen.getByRole("textbox", { name: "Search images" }), {
       target: { value: "clover" },
     });
 

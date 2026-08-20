@@ -15,7 +15,7 @@ describe("SearchFilters", () => {
 
     fireEvent.click(screen.getByLabelText("green"));
     fireEvent.change(screen.getByRole("combobox"), { target: { value: "clover" } });
-    fireEvent.change(screen.getByPlaceholderText("Search text or tags..."), {
+    fireEvent.change(screen.getByRole("textbox", { name: "Search images" }), {
       target: { value: "netbet" },
     });
 
@@ -34,7 +34,7 @@ describe("SearchFilters", () => {
       render(<SearchFilters onChange={onChange} />);
       expect(onChange).toHaveBeenCalledTimes(1); // initial mount call, fires without a timer
 
-      const input = screen.getByPlaceholderText("Search text or tags...");
+      const input = screen.getByRole("textbox", { name: "Search images" });
       fireEvent.change(input, { target: { value: "n" } });
       fireEvent.change(input, { target: { value: "ne" } });
       fireEvent.change(input, { target: { value: "net" } });
@@ -61,7 +61,7 @@ describe("SearchFilters", () => {
     render(<SearchFilters onChange={vi.fn()} />);
 
     await waitFor(() => expect(api.fetchColors).toHaveBeenCalled());
-    expect(screen.getByPlaceholderText("Search text or tags...")).toBeInTheDocument();
+    expect(screen.getByRole("textbox", { name: "Search images" })).toBeInTheDocument();
     expect(screen.getByRole("combobox")).toBeInTheDocument();
   });
 });

@@ -1,3 +1,4 @@
+import { useEffect } from "react";
 import { downloadUrl, type ImageResult } from "./api";
 
 interface Props {
@@ -27,6 +28,14 @@ function formatDate(timestamp: number): string {
 
 export function ImageModal({ image, onClose, onFindSimilar }: Props) {
   const filename = image.path.split(/[\\/]/).pop() ?? image.path;
+  useEffect(() => {
+    const previousOverflow = document.body.style.overflow;
+    document.body.style.overflow = "hidden";
+    return () => {
+      document.body.style.overflow = previousOverflow;
+    };
+  }, []);
+
   return (
     <div className="modal-backdrop" role="presentation" onClick={onClose}>
       <div className="modal" role="dialog" aria-modal="true" aria-labelledby="image-title" onClick={(e) => e.stopPropagation()}>

@@ -9,7 +9,6 @@ import {
 import { ImageGrid } from "./ImageGrid";
 import { ImageModal } from "./ImageModal";
 import { Pagination } from "./Pagination";
-import { ReindexButton } from "./ReindexButton";
 import { SearchFilters } from "./SearchFilters";
 import { Settings } from "./Settings";
 import "./App.css";
@@ -106,12 +105,11 @@ export default function App() {
 
   return (
     <div className="app">
-      <h1>ImageFind</h1>
-      <SearchFilters onChange={handleFiltersChange} />
-      <div className="toolbar">
-        <ReindexButton onComplete={() => runSearch(filters, sort, 1)} />
+      <header className="app-header">
+        <h1>ImageFind</h1>
         <Settings onReindexComplete={() => runSearch(filters, sort, 1)} />
-      </div>
+      </header>
+      <SearchFilters onChange={handleFiltersChange} />
       {error && <p className="error-banner">{error}</p>}
       <div className="results-toolbar">
         <p className="result-count" aria-live="polite">

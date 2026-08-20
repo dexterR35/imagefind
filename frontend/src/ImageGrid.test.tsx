@@ -16,6 +16,7 @@ describe("ImageGrid", () => {
   it("renders a card per image and reports clicks", () => {
     const onSelect = vi.fn();
     render(<ImageGrid images={sample} onSelect={onSelect} />);
+    expect(screen.getByText(/PNG.*2.00 KB.*Added/)).toBeInTheDocument();
     fireEvent.click(screen.getByAltText("clover.png"));
     expect(onSelect).toHaveBeenCalledWith(sample[0]);
   });

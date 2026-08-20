@@ -34,6 +34,7 @@ export function ReindexButton({ onComplete }: Props) {
   }
 
   async function handleClick() {
+    if (!window.confirm("Reindex all image folders now? This can take a while.\n\nContinue?")) return;
     setRunning(true);
     setStopping(false);
     setStatus(null);

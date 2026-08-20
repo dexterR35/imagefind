@@ -52,7 +52,8 @@ export function SearchFilters({ onChange }: Props) {
     <div className="search-filters">
       <input
         type="text"
-        placeholder="Search text or tags..."
+        aria-label="Search images"
+        placeholder="Search filenames, text, objects, or colors..."
         maxLength={200}
         value={text}
         onChange={(e) => setText(e.target.value)}

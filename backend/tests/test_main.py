@@ -388,6 +388,20 @@ def test_reindex_force_param_is_passed_through_to_indexer(tmp_path, monkeypatch)
     assert calls == [False, True]
 
 
+def test_reindex_is_blocked_through_cloudflare_tunnel(tmp_path, monkeypatch):
+    main, _ = _fresh_app(tmp_path, monkeypatch)
+    client = TestClient(main.app)
+
+    response = client.post(
+        "/reindex",
+        headers={"Origin": "https://example.trycloudflare.com"},
+    )
+
+    assert response.status_code == 403
+    assert "disabled through the public tunnel" in response.json()["detail"]
+    assert main.jobs == {}
+
+
 def test_jobs_history_is_capped_on_a_long_running_server(tmp_path, monkeypatch):
     main, _ = _fresh_app(tmp_path, monkeypatch)
 
