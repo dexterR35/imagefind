@@ -471,6 +471,13 @@ def test_download_endpoint_returns_original_file_as_attachment(tmp_path, monkeyp
     main, _ = _fresh_app(tmp_path, monkeypatch)
     from app.storage import ImageEntry
 
+    log_messages = []
+    monkeypatch.setattr(
+        main.activity_logger,
+        "info",
+        lambda message, *args: log_messages.append(message % args),
+    )
+
     original = tmp_path / "original.png"
     original.write_bytes(b"fake-png-bytes")
     entry = ImageEntry(
@@ -480,12 +487,15 @@ def test_download_endpoint_returns_original_file_as_attachment(tmp_path, monkeyp
     main.store.upsert(entry, np.ones(512, dtype=np.float32))
 
     client = TestClient(main.app)
-    response = client.get("/download/d1")
+    response = client.get("/download/d1", headers={"cf-connecting-ip": "203.0.113.7"})
 
     assert response.status_code == 200
     assert response.content == b"fake-png-bytes"
     assert "attachment" in response.headers["content-disposition"]
     assert "original.png" in response.headers["content-disposition"]
+    assert log_messages == [
+        "Image download requested | id=d1 | file=original.png | bytes=14 | client=203.0.113.7"
+    ]
 
 
 def test_download_endpoint_404_for_unknown_id(tmp_path, monkeypatch):

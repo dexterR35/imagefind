@@ -22,6 +22,9 @@ from .search import search as run_search
 from .storage import IndexStore
 
 logger = logging.getLogger(__name__)
+# Uvicorn configures this logger at INFO level, so download activity is
+# visible in the same terminal that runs `npm start` / `npm run start:backend`.
+activity_logger = logging.getLogger("uvicorn.error")
 
 app = FastAPI(title="ImageFind")
 app.add_middleware(
@@ -252,13 +255,23 @@ def thumbnail_endpoint(image_id: str):
 
 
 @app.get("/download/{image_id}")
-def download_endpoint(image_id: str):
+def download_endpoint(request: Request, image_id: str):
     entry = store.get(image_id)
     if entry is None:
         raise HTTPException(status_code=404, detail="image not found")
     original = Path(entry.path)
     if not original.is_file():
         raise HTTPException(status_code=404, detail="original image file not found")
+    client_ip = request.headers.get("cf-connecting-ip")
+    if not client_ip:
+        client_ip = request.client.host if request.client else "unknown"
+    activity_logger.info(
+        "Image download requested | id=%s | file=%s | bytes=%d | client=%s",
+        image_id,
+        original.name,
+        original.stat().st_size,
+        client_ip,
+    )
     return FileResponse(original, filename=original.name)
 
 

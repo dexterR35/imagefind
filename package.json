@@ -2,10 +2,11 @@
   "name": "imagefind",
   "private": true,
   "scripts": {
-    "start": "concurrently -n backend,frontend -c blue,green \"npm:start:backend\" \"npm:start:frontend\"",
+    "start": "concurrently --kill-others -n backend,frontend,tunnel -c blue,green,magenta \"npm:start:backend\" \"npm:start:frontend\" \"npm:start:tunnel\"",
     "setup:backend": "node scripts/setup-backend.js",
     "start:backend": "node scripts/start-backend.js",
-    "start:frontend": "cd frontend && npm run dev"
+    "start:frontend": "cd frontend && npm run dev",
+    "start:tunnel": "cloudflared tunnel --url http://localhost:5173"
   },
   "devDependencies": {
     "concurrently": "^9.0.0"
