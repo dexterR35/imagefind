@@ -1,7 +1,8 @@
-fastapi==0.115.0
-uvicorn[standard]==0.32.0
+fastapi==0.141.1
+starlette==1.6.0
+uvicorn[standard]==0.52.4
 numpy==1.26.4
-pillow==10.4.0
+pillow==12.3.0
 scikit-learn==1.5.2
 open-clip-torch==2.26.1
 # Pulls in opencv-python-headless as its own transitive dependency — no need
@@ -12,6 +13,9 @@ watchdog==6.0.0
 # Hugging Face with progress reporting - already pulled in transitively by
 # huggingface-hub, but pinned explicitly since app/ now imports it directly.
 requests==2.34.2
+# Password hashing for the local shared account. The argon2 extra installs
+# the maintained backend used by PasswordHash.recommended().
+pwdlib[argon2]==0.3.0
 # SQLite-native KNN vector search. Embeddings stay in index.db and are queried
 # through a vec0 virtual table instead of being loaded into a process-wide
 # NumPy matrix at startup.
@@ -20,11 +24,11 @@ sqlite-vec==0.1.9
 # used internally by the ram package (ram/models/bert.py, vit.py) and aren't
 # declared in its own package metadata, so they're pinned explicitly here.
 fairscale==0.4.13
-transformers==4.44.2
+transformers==5.15.1
 # Vendored locally in vendor/recognize-anything (pruned copy of
 # https://github.com/xinyu1205/recognize-anything, training-only code and
 # demo assets stripped) — not on PyPI, and this way `pip install -r
 # requirements.txt` doesn't need git or network access to build it.
 ./vendor/recognize-anything
-pytest==8.3.3
-httpx==0.27.2
+pytest==9.1.1
+httpx==0.28.1

@@ -1,12 +1,18 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import {
+  AUTH_REQUIRED_EVENT,
+  fetchAuthSession,
   findSimilar,
+  login,
+  logout,
   search,
+  type AuthSessionStatus,
   type ImageResult,
   type SearchFilters as Filters,
   type SortOption,
 } from "./api";
 import { ImageGrid } from "./ImageGrid";
+import { LoginScreen } from "./LoginScreen";
 import { ImageModal } from "./ImageModal";
 import { Pagination } from "./Pagination";
 import { SearchFilters } from "./SearchFilters";
@@ -15,7 +21,7 @@ import "./App.css";
 
 const PAGE_SIZE = 60;
 
-export default function App() {
+function Gallery({ onLogout }: { onLogout: () => void }) {
   const [images, setImages] = useState<ImageResult[]>([]);
   const [selected, setSelected] = useState<ImageResult | null>(null);
   const [filters, setFilters] = useState<Filters>({});
@@ -29,6 +35,7 @@ export default function App() {
   const filtersRef = useRef<Filters>({});
   const sortRef = useRef<SortOption>("date_desc");
   const abortRef = useRef<AbortController | null>(null);
+  const isTunnelAccess = window.location.hostname.endsWith(".trycloudflare.com");
 
   useEffect(() => () => abortRef.current?.abort(), []);
 
@@ -107,7 +114,12 @@ export default function App() {
     <div className="app">
       <header className="app-header">
         <h1>ImageFind</h1>
-        <Settings onReindexComplete={() => runSearch(filters, sort, 1)} />
+        <div className="header-actions">
+          {!isTunnelAccess && (
+            <Settings onReindexComplete={() => runSearch(filters, sort, 1)} />
+          )}
+          <button type="button" className="logout-button" onClick={onLogout}>Log out</button>
+        </div>
       </header>
       <SearchFilters onChange={handleFiltersChange} />
       {error && <p className="error-banner">{error}</p>}
@@ -150,4 +162,57 @@ export default function App() {
       )}
     </div>
   );
+}
+
+export default function App() {
+  const [session, setSession] = useState<AuthSessionStatus | null>(null);
+  const [sessionError, setSessionError] = useState<string | null>(null);
+  const [attempt, setAttempt] = useState(0);
+
+  useEffect(() => {
+    let active = true;
+    setSessionError(null);
+    fetchAuthSession()
+      .then((status) => { if (active) setSession(status); })
+      .catch(() => { if (active) setSessionError("Cannot connect to the ImageFind backend."); });
+    return () => { active = false; };
+  }, [attempt]);
+
+  useEffect(() => {
+    const requireLogin = () => setSession({ authenticated: false, configured: true });
+    window.addEventListener(AUTH_REQUIRED_EVENT, requireLogin);
+    return () => window.removeEventListener(AUTH_REQUIRED_EVENT, requireLogin);
+  }, []);
+
+  async function handleLogin(password: string) {
+    const status = await login(password);
+    setSession(status);
+  }
+
+  async function handleLogout() {
+    try {
+      await logout();
+    } finally {
+      setSession({ authenticated: false, configured: true });
+    }
+  }
+
+  if (sessionError) {
+    return (
+      <main className="auth-page">
+        <section className="auth-card" role="alert">
+          <h1>ImageFind</h1>
+          <p className="auth-error">{sessionError}</p>
+          <button type="button" onClick={() => setAttempt((value) => value + 1)}>Retry</button>
+        </section>
+      </main>
+    );
+  }
+  if (session === null) {
+    return <main className="auth-page"><p className="auth-loading">Checking secure session…</p></main>;
+  }
+  if (!session.authenticated) {
+    return <LoginScreen configured={session.configured} onLogin={handleLogin} />;
+  }
+  return <Gallery onLogout={handleLogout} />;
 }

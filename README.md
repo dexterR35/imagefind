@@ -73,6 +73,16 @@ npm run setup:backend -- --cuda
 
 The setup script creates `backend/.venv` and installs all Python dependencies.
 
+Configure the shared account before exposing the application:
+
+```powershell
+npm run auth:set-password
+```
+
+The command prompts securely for a password of at least 12 characters. Only
+its Argon2id hash is stored locally; changing the password revokes every
+existing browser session.
+
 ## Start
 
 ```powershell
@@ -81,13 +91,55 @@ npm start
 
 Open:
 
-- Frontend: <http://localhost:5173>
-- Backend API: <http://localhost:8000>
+- ImageFind (frontend and API): <http://localhost:8000>
 - API documentation: <http://localhost:8000/docs>
+- Public tunnel: use the temporary `trycloudflare.com` URL printed by the
+  `[tunnel]` process
+
+`npm start` first creates an optimized React production build, then starts the
+single localhost-only FastAPI server and the Cloudflare quick tunnel. Vite is
+not exposed. Press `Ctrl+C` once to stop both processes. A new temporary public
+URL is generated each time the command starts.
+
+For frontend development only, run `npm run start:frontend`; that starts Vite
+on port 5173 and proxies `/api` to the local backend.
+
+## Authentication
+
+ImageFind has one shared account designed for a small internal group. Each
+browser receives its own seven-day, revocable session after entering the
+shared password.
+
+- Passwords are hashed with Argon2id through `pwdlib`; plaintext is never
+  persisted or logged.
+- Browser cookies contain a random opaque token, not the password or user
+  data. Only the token's SHA-256 digest is stored in SQLite.
+- Session cookies are `HttpOnly`, `SameSite=Strict`, and `Secure` over the
+  HTTPS tunnel.
+- All data-bearing API routes require a valid session.
+- State-changing requests require a session-bound CSRF token.
+- Login attempts have both per-IP and global server-side limits, plus a cap on
+  concurrent Argon2 work. Search and original-image downloads have independent
+  per-session limits.
+- Settings, reindexing, and model installation/status are rejected through the
+  public tunnel even after login. They are available only from the local app.
+- The production server applies CSP, HSTS on HTTPS, anti-framing, MIME-sniffing,
+  referrer, and browser permission headers.
+
+Local account management commands:
+
+```powershell
+npm run auth:status
+npm run auth:set-password
+npm run auth:revoke-sessions
+```
+
+If no password is configured, ImageFind fails closed: the login page displays
+local setup instructions and protected API routes remain inaccessible.
 
 ## First-time setup
 
-1. Open **Settings**.
+1. Open the local app at <http://localhost:8000>, then open **Settings**.
 2. Enter the image folder, for example `Z:\Photos` or
    `Z:\##Work\NETBET`.
 3. Select **Install RAM++ Model** if the model is not installed yet.
@@ -100,6 +152,12 @@ kept; starting a normal **Reindex** later skips unchanged completed files.
 
 Changing model or tagging settings with **Save & Reindex** intentionally forces
 all images to be processed again.
+
+The RAM++ download is pinned to its immutable publisher revision and expected
+size. Its SHA-256
+`497c178836ba66698ca226c7895317e6e800034be986452dbd2593298d50e87d`
+is checked before installation and again before the PyTorch checkpoint is
+loaded. A partial or mismatched file is deleted instead of being installed.
 
 ## Automatic folder updates
 
@@ -162,6 +220,7 @@ Generated data is stored under `backend/.index/`:
 - `index.db` — SQLite catalog, FTS rows, and vector embeddings
 - `thumbnails/` — generated preview images
 - `settings.json` — selected folder and RAM++ settings
+- `auth.db` — Argon2id credential metadata and hashed, revocable sessions
 
 This directory is ignored by Git. Back it up if preserving a completed index is
 important; it can also be regenerated from the original images.
@@ -175,10 +234,19 @@ important; it can also be regenerated from the original images.
 | `ENABLE_WATCHER` | `true` | Enable realtime filesystem monitoring |
 | `RECONCILE_INTERVAL_SECONDS` | `14400` | Scheduled reconciliation interval |
 | `RAM_CHECKPOINT_PATH` | `pretrained/ram_plus_swin_large_14m.pth` | RAM++ checkpoint location |
-| `CORS_ALLOWED_ORIGINS` | `http://localhost:5173` | Comma-separated allowed frontend origins |
+| `CORS_ALLOWED_ORIGINS` | empty | Optional comma-separated additional browser origins |
 | `SEARCH_RATE_LIMIT_REQUESTS` | `30` | Search requests allowed per client/window |
 | `SEARCH_RATE_LIMIT_WINDOW_SECONDS` | `10` | Search rate-limit window |
-| `VITE_API_BASE_URL` | `/api` | Backend URL used by the frontend; `/api` is proxied to the local backend in development |
+| `AUTH_SESSION_TTL_SECONDS` | `604800` | Browser session lifetime (seven days) |
+| `AUTH_MAX_SESSIONS` | `50` | Maximum simultaneous browser sessions |
+| `AUTH_LOGIN_RATE_LIMIT_REQUESTS` | `20` | Login attempts allowed per client/window |
+| `AUTH_LOGIN_RATE_LIMIT_WINDOW_SECONDS` | `300` | Login rate-limit window |
+| `AUTH_GLOBAL_LOGIN_RATE_LIMIT_REQUESTS` | `100` | Login attempts allowed across all clients/window |
+| `AUTH_GLOBAL_LOGIN_RATE_LIMIT_WINDOW_SECONDS` | `300` | Global login rate-limit window |
+| `AUTH_MAX_CONCURRENT_LOGINS` | `4` | Maximum simultaneous password verifications |
+| `DOWNLOAD_RATE_LIMIT_REQUESTS` | `60` | Original downloads allowed per session/window |
+| `DOWNLOAD_RATE_LIMIT_WINDOW_SECONDS` | `60` | Download rate-limit window |
+| `VITE_API_BASE_URL` | `/api` in development, same origin in production | Backend URL used by the frontend |
 
 ## Tests
 
@@ -194,7 +262,8 @@ npm run build
 
 ## Remote access
 
-ImageFind currently has no user login. Do not expose the backend directly to the
-public internet. The frontend uses a same-origin `/api` proxy, so a tunnel to the
-frontend can carry both UI and API traffic through one URL. Prefer a private VPN
-or an authenticated tunnel such as Cloudflare Tunnel with Access for ongoing use.
+FastAPI serves the production frontend and API on one origin. The tunnel points
+to `127.0.0.1:8000`, while Uvicorn remains bound to localhost and runs without
+auto-reload. Share only the generated tunnel URL; do not bind port 8000 to the
+LAN or internet. Quick tunnels are temporary infrastructure and do not provide
+an uptime guarantee.

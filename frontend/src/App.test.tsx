@@ -1,5 +1,5 @@
 import { render, screen, fireEvent, waitFor } from "@testing-library/react";
-import { describe, expect, it, vi } from "vitest";
+import { beforeEach, describe, expect, it, vi } from "vitest";
 import * as api from "./api";
 import type { ImageResult } from "./api";
 import App from "./App";
@@ -23,6 +23,16 @@ function image(id: string): ImageResult {
 }
 
 describe("App", () => {
+  beforeEach(() => {
+    vi.restoreAllMocks();
+    vi.spyOn(api, "fetchAuthSession").mockResolvedValue({
+      authenticated: true,
+      configured: true,
+      expires_at: 2_000_000_000,
+      csrf_token: "test-csrf",
+    });
+  });
+
   it("runs a search on filter change and opens Find Similar results", async () => {
     vi.spyOn(api, "fetchColors").mockResolvedValue(["green"]);
     vi.spyOn(api, "fetchObjects").mockResolvedValue(["clover"]);
@@ -116,5 +126,40 @@ describe("App", () => {
     expect(searchSpy).toHaveBeenLastCalledWith({}, {
       sort: "name_asc", offset: 0, limit: 60, signal: expect.anything(),
     });
+  });
+
+  it("shows setup instructions when no shared password exists", async () => {
+    vi.mocked(api.fetchAuthSession).mockResolvedValue({ authenticated: false, configured: false });
+
+    render(<App />);
+
+    expect(await screen.findByText(/authentication has not been configured/i)).toBeInTheDocument();
+    expect(screen.getByText("npm run auth:set-password")).toBeInTheDocument();
+  });
+
+  it("logs in with the shared password and can log out", async () => {
+    vi.mocked(api.fetchAuthSession).mockResolvedValue({ authenticated: false, configured: true });
+    vi.spyOn(api, "login").mockResolvedValue({
+      authenticated: true,
+      configured: true,
+      expires_at: 2_000_000_000,
+      csrf_token: "csrf-after-login",
+    });
+    vi.spyOn(api, "logout").mockResolvedValue();
+    vi.spyOn(api, "fetchColors").mockResolvedValue([]);
+    vi.spyOn(api, "fetchObjects").mockResolvedValue([]);
+    vi.spyOn(api, "search").mockResolvedValue({ results: [], total: 0 });
+
+    render(<App />);
+    const password = await screen.findByLabelText("Shared password");
+    fireEvent.change(password, { target: { value: "correct horse battery staple" } });
+    fireEvent.click(screen.getByRole("button", { name: "Sign in" }));
+
+    const logoutButton = await screen.findByRole("button", { name: "Log out" });
+    expect(api.login).toHaveBeenCalledWith("correct horse battery staple");
+    fireEvent.click(logoutButton);
+
+    await waitFor(() => expect(api.logout).toHaveBeenCalled());
+    expect(await screen.findByLabelText("Shared password")).toBeInTheDocument();
   });
 });

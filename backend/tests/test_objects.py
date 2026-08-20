@@ -33,6 +33,11 @@ def test_get_ram_retries_cached_failure_after_checkpoint_is_installed(tmp_path, 
     monkeypatch.setattr(objects_mod, "_ram_default_class_threshold", None)
     monkeypatch.setattr(objects_mod, "_ram_load_error", None)
     monkeypatch.setattr(objects_mod, "_ram_load_error_signature", None)
+    monkeypatch.setattr(
+        objects_mod,
+        "verify_ram_checkpoint",
+        lambda: checkpoint.is_file(),
+    )
 
     with pytest.raises(FileNotFoundError):
         objects_mod._get_ram()

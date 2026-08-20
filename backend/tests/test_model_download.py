@@ -1,3 +1,5 @@
+import hashlib
+
 from app import config
 from app.model_download import ModelDownloadJob, is_ram_checkpoint_installed, run_download
 
@@ -23,17 +25,27 @@ class _FakeResponse:
         return False
 
 
+def _expect_content(monkeypatch, content: bytes) -> None:
+    monkeypatch.setattr("app.model_download.RAM_CHECKPOINT_SIZE", len(content))
+    monkeypatch.setattr(
+        "app.model_download.RAM_CHECKPOINT_SHA256",
+        hashlib.sha256(content).hexdigest(),
+    )
+
+
 def test_is_ram_checkpoint_installed_reflects_file_presence(tmp_path, monkeypatch):
     checkpoint = tmp_path / "ram_plus.pth"
     monkeypatch.setattr(config, "RAM_CHECKPOINT_PATH", checkpoint)
     assert is_ram_checkpoint_installed() is False
     checkpoint.write_bytes(b"data")
+    _expect_content(monkeypatch, b"data")
     assert is_ram_checkpoint_installed() is True
 
 
 def test_run_download_writes_checkpoint_and_marks_done(tmp_path, monkeypatch):
     dest = tmp_path / "models" / "ram_plus.pth"
     monkeypatch.setattr(config, "RAM_CHECKPOINT_PATH", dest)
+    _expect_content(monkeypatch, b"abcdefg")
     monkeypatch.setattr(
         "app.model_download.requests.get",
         lambda *a, **k: _FakeResponse([b"abc", b"defg"]),
@@ -102,5 +114,23 @@ def test_run_download_rejects_a_truncated_response(tmp_path, monkeypatch):
 
     assert job.done is True
     assert job.error is not None and "incomplete download" in job.error
+    assert not dest.exists()
+    assert not dest.with_suffix(dest.suffix + ".part").exists()
+
+
+def test_run_download_rejects_wrong_sha256_and_removes_partial_file(tmp_path, monkeypatch):
+    dest = tmp_path / "ram_plus.pth"
+    monkeypatch.setattr(config, "RAM_CHECKPOINT_PATH", dest)
+    _expect_content(monkeypatch, b"expected")
+    monkeypatch.setattr(
+        "app.model_download.requests.get",
+        lambda *a, **k: _FakeResponse([b"tampered"]),
+    )
+
+    job = ModelDownloadJob(id="j5")
+    run_download(job)
+
+    assert job.done is True
+    assert job.error is not None and "SHA-256 mismatch" in job.error
     assert not dest.exists()
     assert not dest.with_suffix(dest.suffix + ".part").exists()

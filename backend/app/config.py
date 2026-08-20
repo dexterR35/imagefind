@@ -36,13 +36,11 @@ IMAGES_DIR = (
     else Path(os.environ.get("IMAGES_DIR", "./images"))
 )
 
-# Which browser origins may call this API. Defaults to the Vite dev server
-# only; set to the server machine's actual LAN address(es) — comma-separated
-# — once other users on the network need to reach it (e.g.
-# "http://192.168.1.50:5173,http://192.168.1.50:3000").
+# Optional additional browser origins. Production and Vite development both
+# use same-origin API requests, so the secure default is no CORS access.
 CORS_ALLOWED_ORIGINS = [
     origin.strip()
-    for origin in os.environ.get("CORS_ALLOWED_ORIGINS", "http://localhost:5173").split(",")
+    for origin in os.environ.get("CORS_ALLOWED_ORIGINS", "").split(",")
     if origin.strip()
 ]
 
@@ -103,4 +101,35 @@ RECONCILE_INTERVAL_SECONDS = float(os.environ.get("RECONCILE_INTERVAL_SECONDS", 
 SEARCH_RATE_LIMIT_REQUESTS = max(1, int(os.environ.get("SEARCH_RATE_LIMIT_REQUESTS", "30")))
 SEARCH_RATE_LIMIT_WINDOW_SECONDS = max(
     0.1, float(os.environ.get("SEARCH_RATE_LIMIT_WINDOW_SECONDS", "10"))
+)
+
+# Single-account authentication. The password hash and revocable opaque
+# sessions live beside the generated index and are never committed to Git.
+AUTH_DB_PATH = INDEX_DIR / "auth.db"
+AUTH_SESSION_TTL_SECONDS = max(
+    300, int(os.environ.get("AUTH_SESSION_TTL_SECONDS", str(7 * 24 * 60 * 60)))
+)
+AUTH_MAX_SESSIONS = max(1, int(os.environ.get("AUTH_MAX_SESSIONS", "50")))
+AUTH_LOGIN_RATE_LIMIT_REQUESTS = max(
+    1, int(os.environ.get("AUTH_LOGIN_RATE_LIMIT_REQUESTS", "20"))
+)
+AUTH_LOGIN_RATE_LIMIT_WINDOW_SECONDS = max(
+    1.0, float(os.environ.get("AUTH_LOGIN_RATE_LIMIT_WINDOW_SECONDS", "300"))
+)
+# A second, process-wide window limits a distributed attack that rotates IPs.
+# The per-IP limit remains the tighter control for ordinary brute force.
+AUTH_GLOBAL_LOGIN_RATE_LIMIT_REQUESTS = max(
+    1, int(os.environ.get("AUTH_GLOBAL_LOGIN_RATE_LIMIT_REQUESTS", "100"))
+)
+AUTH_GLOBAL_LOGIN_RATE_LIMIT_WINDOW_SECONDS = max(
+    1.0, float(os.environ.get("AUTH_GLOBAL_LOGIN_RATE_LIMIT_WINDOW_SECONDS", "300"))
+)
+AUTH_MAX_CONCURRENT_LOGINS = max(
+    1, int(os.environ.get("AUTH_MAX_CONCURRENT_LOGINS", "4"))
+)
+DOWNLOAD_RATE_LIMIT_REQUESTS = max(
+    1, int(os.environ.get("DOWNLOAD_RATE_LIMIT_REQUESTS", "60"))
+)
+DOWNLOAD_RATE_LIMIT_WINDOW_SECONDS = max(
+    1.0, float(os.environ.get("DOWNLOAD_RATE_LIMIT_WINDOW_SECONDS", "60"))
 )

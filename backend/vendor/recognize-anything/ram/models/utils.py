@@ -131,7 +131,9 @@ def init_tokenizer(text_encoder_type='bert-base-uncased'):
     tokenizer = BertTokenizer.from_pretrained(text_encoder_type)
     tokenizer.add_special_tokens({'bos_token': '[DEC]'})
     tokenizer.add_special_tokens({'additional_special_tokens': ['[ENC]']})
-    tokenizer.enc_token_id = tokenizer.additional_special_tokens_ids[0]
+    # Transformers 5 removed additional_special_tokens_ids as a dynamic
+    # attribute; resolving the token explicitly works on both 4.x and 5.x.
+    tokenizer.enc_token_id = tokenizer.convert_tokens_to_ids('[ENC]')
     return tokenizer
 
 

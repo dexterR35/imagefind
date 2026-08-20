@@ -36,10 +36,9 @@ from transformers.modeling_outputs import (
     SequenceClassifierOutput,
     TokenClassifierOutput,
 )
-from transformers.modeling_utils import (
-    PreTrainedModel,
+from transformers.modeling_utils import PreTrainedModel
+from transformers.pytorch_utils import (
     apply_chunking_to_forward,
-    find_pruneable_heads_and_indices,
     prune_linear_layer,
 )
 from transformers.utils import logging
@@ -47,6 +46,18 @@ from transformers.models.bert.configuration_bert import BertConfig
 
 
 logger = logging.get_logger(__name__)
+
+
+def find_pruneable_heads_and_indices(heads, n_heads, head_size, already_pruned_heads):
+    """Compatibility copy of the helper removed in Transformers 5."""
+    mask = torch.ones(n_heads, head_size)
+    heads = set(heads) - already_pruned_heads
+    for head in heads:
+        shifted_head = head - sum(1 for pruned in already_pruned_heads if pruned < head)
+        mask[shifted_head * head_size:(shifted_head + 1) * head_size] = 0
+    mask = mask.view(-1).contiguous().eq(1)
+    index = torch.arange(mask.numel())[mask].long()
+    return heads, index
 
 
 class BertEmbeddings_nopos(nn.Module):
@@ -630,6 +641,22 @@ class BertPreTrainedModel(PreTrainedModel):
     base_model_prefix = "bert"
     _keys_to_ignore_on_load_missing = [r"position_ids"]
 
+    def get_head_mask(self, head_mask, num_hidden_layers, is_attention_chunked=False):
+        """Compatibility for the helper removed from PreTrainedModel in v5."""
+        if head_mask is None:
+            return [None] * num_hidden_layers
+        if head_mask.dim() == 1:
+            head_mask = head_mask[None, None, :, None, None]
+            head_mask = head_mask.expand(num_hidden_layers, -1, -1, -1, -1)
+        elif head_mask.dim() == 2:
+            head_mask = head_mask[:, None, :, None, None]
+        if head_mask.dim() != 5:
+            raise ValueError("head_mask must have one or two dimensions")
+        head_mask = head_mask.to(dtype=self.dtype)
+        if is_attention_chunked:
+            head_mask = head_mask.unsqueeze(-1)
+        return head_mask
+
     def _init_weights(self, module):
         """ Initialize the weights """
         if isinstance(module, (nn.Linear, nn.Embedding)):
@@ -663,7 +690,7 @@ class BertModel(BertPreTrainedModel):
 
         self.pooler = BertPooler(config) if add_pooling_layer else None
 
-        self.init_weights()
+        self.post_init()
  
 
     def get_input_embeddings(self):
@@ -893,7 +920,7 @@ class BertLMHeadModel(BertPreTrainedModel):
         self.bert = BertModel(config, add_pooling_layer=False)
         self.cls = BertOnlyMLMHead(config)
 
-        self.init_weights()
+        self.post_init()
 
     def get_output_embeddings(self):
         return self.cls.predictions.decoder

@@ -1,5 +1,13 @@
 import { describe, expect, it, vi } from "vitest";
-import { findSimilar, search, startReindex, updateSettings } from "./api";
+import {
+  fetchAuthSession,
+  findSimilar,
+  login,
+  logout,
+  search,
+  startReindex,
+  updateSettings,
+} from "./api";
 
 describe("search", () => {
   it("builds query params only for provided filters", async () => {
@@ -111,5 +119,51 @@ describe("updateSettings", () => {
       body: JSON.stringify(settings),
     });
     expect(result).toEqual(settings);
+  });
+});
+
+describe("authentication", () => {
+  it("keeps the CSRF token in memory and sends it on state-changing requests", async () => {
+    const mockFetch = vi.fn()
+      .mockResolvedValueOnce({
+        ok: true,
+        status: 200,
+        json: async () => ({
+          authenticated: true,
+          configured: true,
+          expires_at: 2_000_000_000,
+          csrf_token: "csrf-123",
+        }),
+      })
+      .mockResolvedValueOnce({ ok: true, status: 200, json: async () => ({ job_id: "j1" }) })
+      .mockResolvedValueOnce({ ok: true, status: 200, json: async () => ({ status: "logged out" }) });
+    vi.stubGlobal("fetch", mockFetch);
+
+    await fetchAuthSession();
+    await startReindex();
+    const reindexInit = mockFetch.mock.calls[1][1] as RequestInit;
+    expect(new Headers(reindexInit.headers).get("X-CSRF-Token")).toBe("csrf-123");
+
+    await logout();
+    const logoutInit = mockFetch.mock.calls[2][1] as RequestInit;
+    expect(new Headers(logoutInit.headers).get("X-CSRF-Token")).toBe("csrf-123");
+  });
+
+  it("submits only the password to the login endpoint", async () => {
+    const mockFetch = vi.fn().mockResolvedValue({
+      ok: true,
+      status: 200,
+      json: async () => ({ authenticated: true, configured: true, csrf_token: "csrf-login" }),
+    });
+    vi.stubGlobal("fetch", mockFetch);
+
+    await login("a private password");
+
+    expect(mockFetch).toHaveBeenCalledWith("/api/auth/login", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ password: "a private password" }),
+    });
+    await logout();
   });
 });

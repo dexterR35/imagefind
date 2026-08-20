@@ -32,7 +32,14 @@ if (!venvDir) {
 
 const venvPython = path.join(backendDir, venvDir, pythonRelPath);
 
-const result = spawnSync(venvPython, ["-m", "uvicorn", "app.main:app", "--reload", "--port", "8000"], {
+const result = spawnSync(venvPython, [
+  "-m", "uvicorn", "app.main:app",
+  "--host", "127.0.0.1",
+  "--port", "8000",
+  "--proxy-headers",
+  "--forwarded-allow-ips", "127.0.0.1",
+  "--no-server-header",
+], {
   cwd: backendDir,
   stdio: "inherit",
 });

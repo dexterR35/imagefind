@@ -11,6 +11,130 @@
   justify-content: space-between;
 }
 
+.header-actions {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.logout-button {
+  padding: 7px 12px;
+  color: inherit;
+  background: transparent;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  cursor: pointer;
+}
+
+.auth-page {
+  min-height: 100vh;
+  display: grid;
+  place-items: center;
+  padding: 24px;
+  box-sizing: border-box;
+  background:
+    radial-gradient(circle at top left, rgba(100, 108, 255, 0.16), transparent 36rem),
+    var(--bg);
+}
+
+.auth-card {
+  width: min(100%, 390px);
+  padding: 36px;
+  box-sizing: border-box;
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 16px;
+  box-shadow: 0 20px 60px rgba(0, 0, 0, 0.16);
+}
+
+.auth-mark {
+  width: 48px;
+  height: 48px;
+  display: grid;
+  place-items: center;
+  margin-bottom: 20px;
+  color: white;
+  background: var(--accent);
+  border-radius: 12px;
+  font-weight: 700;
+}
+
+.auth-card h1 {
+  margin: 0;
+}
+
+.auth-subtitle {
+  margin: 6px 0 28px;
+  color: var(--text);
+}
+
+.auth-card form {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.auth-card label {
+  font-size: 14px;
+  font-weight: 600;
+}
+
+.auth-card input {
+  padding: 11px 12px;
+  color: inherit;
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 7px;
+  font: inherit;
+}
+
+.auth-card button {
+  margin-top: 8px;
+  padding: 11px 14px;
+  color: white;
+  background: var(--accent);
+  border: 1px solid var(--accent);
+  border-radius: 7px;
+  font: inherit;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.auth-card button:disabled {
+  cursor: wait;
+  opacity: 0.65;
+}
+
+.auth-error {
+  margin: 4px 0;
+  color: #c62828;
+  font-size: 14px;
+}
+
+.auth-setup {
+  margin-top: 24px;
+  padding: 14px;
+  background: var(--code-bg);
+  border-radius: 8px;
+}
+
+.auth-setup p {
+  margin: 0 0 8px;
+}
+
+.auth-setup code {
+  display: block;
+  padding: 9px;
+  overflow-x: auto;
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 5px;
+}
+
+.auth-loading {
+  color: var(--text);
+}
+
 .app-header h1 {
   margin-right: 24px;
 }

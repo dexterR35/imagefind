@@ -6,7 +6,7 @@ import numpy as np
 from fastapi.testclient import TestClient
 
 
-def _fresh_app(tmp_path, monkeypatch):
+def _fresh_app(tmp_path, monkeypatch, *, bypass_auth=True):
     images_dir = tmp_path / "images"
     images_dir.mkdir()
     monkeypatch.setenv("IMAGES_DIR", str(images_dir))
@@ -17,13 +17,21 @@ def _fresh_app(tmp_path, monkeypatch):
     from app import config, main
     importlib.reload(config)
     importlib.reload(main)
+    if bypass_auth:
+        def allow_test_request(request):
+            request.state.auth_session = main.AuthSession(
+                id="test-session", csrf_token="test-csrf", expires_at=2_000_000_000
+            )
+            return None
+
+        monkeypatch.setattr(main, "_authorize_request", allow_test_request)
     return main, images_dir
 
 
 def test_health_reports_zero_indexed(tmp_path, monkeypatch):
     main, _ = _fresh_app(tmp_path, monkeypatch)
     client = TestClient(main.app)
-    assert client.get("/health").json() == {"status": "ok", "indexed": 0}
+    assert client.get("/health").json() == {"status": "ok"}
 
 
 def test_reindex_on_empty_folder_completes_immediately(tmp_path, monkeypatch):
@@ -398,8 +406,21 @@ def test_reindex_is_blocked_through_cloudflare_tunnel(tmp_path, monkeypatch):
     )
 
     assert response.status_code == 403
-    assert "disabled through the public tunnel" in response.json()["detail"]
+    assert "only from the local app" in response.json()["detail"]
     assert main.jobs == {}
+
+
+def test_admin_endpoints_are_blocked_through_cloudflare_tunnel(tmp_path, monkeypatch):
+    main, _ = _fresh_app(tmp_path, monkeypatch)
+    client = TestClient(main.app)
+    tunnel_headers = {"cf-ray": "test-ray", "cf-connecting-ip": "203.0.113.8"}
+
+    assert client.get("/settings", headers=tunnel_headers).status_code == 403
+    assert client.post("/settings", json={}, headers=tunnel_headers).status_code == 403
+    assert client.get("/model/status", headers=tunnel_headers).status_code == 403
+    assert client.post("/model/download", headers=tunnel_headers).status_code == 403
+    assert client.get("/reindex/status/unknown", headers=tunnel_headers).status_code == 403
+    assert client.post("/reindex/unknown/cancel", headers=tunnel_headers).status_code == 403
 
 
 def test_jobs_history_is_capped_on_a_long_running_server(tmp_path, monkeypatch):
@@ -494,7 +515,8 @@ def test_download_endpoint_returns_original_file_as_attachment(tmp_path, monkeyp
     assert "attachment" in response.headers["content-disposition"]
     assert "original.png" in response.headers["content-disposition"]
     assert log_messages == [
-        "Image download requested | id=d1 | file=original.png | bytes=14 | client=203.0.113.7"
+        "Image download requested | id=d1 | file=original.png | bytes=14 | "
+        "session=test-session | client=203.0.113.7"
     ]
 
 
@@ -532,6 +554,7 @@ def test_model_status_reports_installed_when_checkpoint_present(tmp_path, monkey
     checkpoint = tmp_path / "ram_plus.pth"
     checkpoint.write_bytes(b"fake-checkpoint")
     monkeypatch.setattr(main.config, "RAM_CHECKPOINT_PATH", checkpoint)
+    monkeypatch.setattr(main, "is_ram_checkpoint_installed", lambda: checkpoint.is_file())
     client = TestClient(main.app)
     assert client.get("/model/status").json() == {"installed": True}
 
@@ -541,6 +564,7 @@ def test_model_download_returns_409_when_already_installed(tmp_path, monkeypatch
     checkpoint = tmp_path / "ram_plus.pth"
     checkpoint.write_bytes(b"fake-checkpoint")
     monkeypatch.setattr(main.config, "RAM_CHECKPOINT_PATH", checkpoint)
+    monkeypatch.setattr(main, "is_ram_checkpoint_installed", lambda: checkpoint.is_file())
     client = TestClient(main.app)
     assert client.post("/model/download").status_code == 409
 

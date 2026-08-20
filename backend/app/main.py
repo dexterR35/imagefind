@@ -1,19 +1,25 @@
 import logging
 import math
+import hmac
+import json
 import threading
+import time
 import unicodedata
 import uuid
+from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Literal
 
 from fastapi import FastAPI, HTTPException, Query, Request
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, JSONResponse
+from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field, field_validator
 
 SortOption = Literal["date_desc", "date_asc", "name_asc", "name_desc", "size_desc", "size_asc"]
 
 from . import config
+from .auth import AuthSession, AuthStore, MAX_PASSWORD_BYTES
 from .indexer import Indexer, ReindexJob
 from .model_download import ModelDownloadJob, is_ram_checkpoint_installed, run_download
 from .rate_limit import SlidingWindowRateLimiter
@@ -26,7 +32,18 @@ logger = logging.getLogger(__name__)
 # visible in the same terminal that runs `npm start` / `npm run start:backend`.
 activity_logger = logging.getLogger("uvicorn.error")
 
-app = FastAPI(title="ImageFind")
+@asynccontextmanager
+async def _lifespan(_app: FastAPI):
+    try:
+        yield
+    finally:
+        _stop_realtime_watcher()
+        _reconciliation_stop.set()
+        if _reconciliation_thread is not None:
+            _reconciliation_thread.join(timeout=5)
+
+
+app = FastAPI(title="ImageFind", lifespan=_lifespan)
 app.add_middleware(
     CORSMiddleware,
     allow_origins=config.CORS_ALLOWED_ORIGINS,
@@ -49,6 +66,25 @@ _search_rate_limiter = SlidingWindowRateLimiter(
     config.SEARCH_RATE_LIMIT_REQUESTS,
     config.SEARCH_RATE_LIMIT_WINDOW_SECONDS,
 )
+_login_rate_limiter = SlidingWindowRateLimiter(
+    config.AUTH_LOGIN_RATE_LIMIT_REQUESTS,
+    config.AUTH_LOGIN_RATE_LIMIT_WINDOW_SECONDS,
+)
+_global_login_rate_limiter = SlidingWindowRateLimiter(
+    config.AUTH_GLOBAL_LOGIN_RATE_LIMIT_REQUESTS,
+    config.AUTH_GLOBAL_LOGIN_RATE_LIMIT_WINDOW_SECONDS,
+)
+_login_semaphore = threading.BoundedSemaphore(config.AUTH_MAX_CONCURRENT_LOGINS)
+_download_rate_limiter = SlidingWindowRateLimiter(
+    config.DOWNLOAD_RATE_LIMIT_REQUESTS,
+    config.DOWNLOAD_RATE_LIMIT_WINDOW_SECONDS,
+)
+auth_store = AuthStore(
+    config.AUTH_DB_PATH,
+    session_ttl_seconds=config.AUTH_SESSION_TTL_SECONDS,
+    max_sessions=config.AUTH_MAX_SESSIONS,
+)
+SESSION_COOKIE_NAME = "imagefind_session"
 
 _watcher_observer = None
 _reconciliation_stop = threading.Event()
@@ -113,14 +149,6 @@ if config.ENABLE_WATCHER:
     ).start()
 
 
-@app.on_event("shutdown")
-def _stop_watcher():
-    _stop_realtime_watcher()
-    _reconciliation_stop.set()
-    if _reconciliation_thread is not None:
-        _reconciliation_thread.join(timeout=5)
-
-
 def _entry_to_dict(e) -> dict:
     return {
         "id": e.id, "path": e.path, "thumbnail_url": f"/thumbnail/{e.id}",
@@ -141,7 +169,7 @@ def _sanitize_search_value(value: str | None, field: str) -> str | None:
 
 
 def _enforce_search_rate_limit(request: Request) -> None:
-    client_key = request.client.host if request.client else "unknown"
+    client_key = _request_rate_limit_key(request)
     retry_after = _search_rate_limiter.retry_after(client_key)
     if retry_after is not None:
         raise HTTPException(
@@ -149,6 +177,29 @@ def _enforce_search_rate_limit(request: Request) -> None:
             detail="too many search requests",
             headers={"Retry-After": str(max(1, math.ceil(retry_after)))},
         )
+
+
+def _enforce_download_rate_limit(request: Request) -> None:
+    client_key = _request_rate_limit_key(request)
+    retry_after = _download_rate_limiter.retry_after(client_key)
+    if retry_after is not None:
+        raise HTTPException(
+            status_code=429,
+            detail="too many download requests",
+            headers={"Retry-After": str(max(1, math.ceil(retry_after)))},
+        )
+
+
+def _client_ip(request: Request) -> str:
+    value = request.headers.get("cf-connecting-ip")
+    if not value:
+        value = request.client.host if request.client else "unknown"
+    return value.split(",", 1)[0].strip().replace("\r", "").replace("\n", "")[:128]
+
+
+def _request_rate_limit_key(request: Request) -> str:
+    session = getattr(request.state, "auth_session", None)
+    return f"session:{session.id}" if session is not None else f"ip:{_client_ip(request)}"
 
 
 def _request_came_through_tunnel(request: Request) -> bool:
@@ -163,9 +214,216 @@ def _request_came_through_tunnel(request: Request) -> bool:
     return any(".trycloudflare.com" in value.lower() for value in tunnel_markers)
 
 
+def _require_local_admin(request: Request) -> None:
+    if _request_came_through_tunnel(request):
+        raise HTTPException(
+            status_code=403,
+            detail="this administration action is available only from the local app",
+        )
+
+
+def _request_is_secure(request: Request) -> bool:
+    if request.url.scheme == "https":
+        return True
+    if request.headers.get("x-forwarded-proto", "").split(",", 1)[0].strip() == "https":
+        return True
+    try:
+        return json.loads(request.headers.get("cf-visitor", "{}"))["scheme"] == "https"
+    except (KeyError, TypeError, json.JSONDecodeError):
+        return False
+
+
+def _authenticate_request(request: Request) -> AuthSession | None:
+    return auth_store.get_session(request.cookies.get(SESSION_COOKIE_NAME))
+
+
+_PUBLIC_API_PATHS = {"/health", "/auth/login", "/auth/session"}
+_PUBLIC_FRONTEND_PATHS = {"/", "/index.html", "/favicon.svg"}
+_UNSAFE_METHODS = {"POST", "PUT", "PATCH", "DELETE"}
+
+
+def _authorize_request(request: Request) -> JSONResponse | None:
+    is_public_frontend = (
+        request.method in {"GET", "HEAD"}
+        and (
+            request.url.path in _PUBLIC_FRONTEND_PATHS
+            or request.url.path.startswith("/assets/")
+        )
+    )
+    if (
+        request.method == "OPTIONS"
+        or request.url.path in _PUBLIC_API_PATHS
+        or is_public_frontend
+    ):
+        return None
+    session = _authenticate_request(request)
+    if session is None:
+        return JSONResponse(
+            status_code=401,
+            content={"detail": "authentication required"},
+            headers={"Cache-Control": "no-store", "WWW-Authenticate": "Session"},
+        )
+    request.state.auth_session = session
+    if request.method in _UNSAFE_METHODS:
+        supplied = request.headers.get("x-csrf-token", "")
+        if not supplied or not hmac.compare_digest(supplied, session.csrf_token):
+            return JSONResponse(
+                status_code=403,
+                content={"detail": "invalid CSRF token"},
+                headers={"Cache-Control": "no-store"},
+            )
+    return None
+
+
+def _login_rate_limit_denial(request: Request) -> JSONResponse | None:
+    global_retry = _global_login_rate_limiter.retry_after("global")
+    ip_retry = _login_rate_limiter.retry_after(_client_ip(request))
+    retries = [retry for retry in (global_retry, ip_retry) if retry is not None]
+    if not retries:
+        return None
+    return JSONResponse(
+        status_code=429,
+        content={"detail": "too many login attempts"},
+        headers={"Retry-After": str(max(1, math.ceil(max(retries))))},
+    )
+
+
+def _add_security_headers(request: Request, response):
+    response.headers.setdefault("X-Content-Type-Options", "nosniff")
+    response.headers.setdefault("Referrer-Policy", "no-referrer")
+    response.headers.setdefault("X-Frame-Options", "DENY")
+    response.headers.setdefault(
+        "Content-Security-Policy",
+        "default-src 'self'; base-uri 'none'; frame-ancestors 'none'; "
+        "form-action 'self'; img-src 'self' data: blob:; "
+        "style-src 'self' 'unsafe-inline'; script-src 'self'; connect-src 'self'",
+    )
+    response.headers.setdefault(
+        "Permissions-Policy",
+        "camera=(), microphone=(), geolocation=(), payment=(), usb=()",
+    )
+    if _request_is_secure(request):
+        response.headers.setdefault(
+            "Strict-Transport-Security",
+            "max-age=31536000; includeSubDomains",
+        )
+    return response
+
+
+@app.middleware("http")
+async def authentication_middleware(request: Request, call_next):
+    if (
+        request.method == "POST"
+        and request.url.path == "/auth/login"
+        and auth_store.is_configured()
+    ):
+        limited = _login_rate_limit_denial(request)
+        if limited is not None:
+            return _add_security_headers(request, limited)
+    denied = _authorize_request(request)
+    if denied is not None:
+        return _add_security_headers(request, denied)
+    response = await call_next(request)
+    return _add_security_headers(request, response)
+
+
+class LoginRequest(BaseModel):
+    password: str = Field(min_length=1, max_length=MAX_PASSWORD_BYTES)
+
+
+def _session_payload(session: AuthSession) -> dict:
+    return {
+        "authenticated": True,
+        "configured": True,
+        "expires_at": session.expires_at,
+        "csrf_token": session.csrf_token,
+    }
+
+
+@app.get("/auth/session")
+def auth_session_endpoint(request: Request):
+    session = _authenticate_request(request)
+    if session is not None:
+        response = JSONResponse(_session_payload(session))
+    else:
+        response = JSONResponse({
+            "authenticated": False,
+            "configured": auth_store.is_configured(),
+        })
+        if request.cookies.get(SESSION_COOKIE_NAME):
+            response.delete_cookie(
+                SESSION_COOKIE_NAME,
+                path="/",
+                secure=_request_is_secure(request),
+                httponly=True,
+                samesite="strict",
+            )
+    response.headers["Cache-Control"] = "no-store"
+    return response
+
+
+@app.post("/auth/login")
+def auth_login_endpoint(request: Request, login: LoginRequest):
+    if not auth_store.is_configured():
+        raise HTTPException(
+            status_code=503,
+            detail="authentication is not configured; run npm run auth:set-password locally",
+        )
+    client_ip = _client_ip(request)
+    if not _login_semaphore.acquire(blocking=False):
+        raise HTTPException(
+            status_code=429,
+            detail="too many login attempts are already being processed",
+            headers={"Retry-After": "1"},
+        )
+    try:
+        created = auth_store.create_session(
+            login.password,
+            client_ip=client_ip,
+            user_agent=request.headers.get("user-agent", ""),
+        )
+    finally:
+        _login_semaphore.release()
+    if created is None:
+        activity_logger.warning("ImageFind login rejected | client=%s", client_ip)
+        raise HTTPException(status_code=401, detail="incorrect password")
+
+    token, session = created
+    response = JSONResponse(_session_payload(session))
+    response.set_cookie(
+        SESSION_COOKIE_NAME,
+        token,
+        max_age=max(0, session.expires_at - int(time.time())),
+        path="/",
+        secure=_request_is_secure(request),
+        httponly=True,
+        samesite="strict",
+    )
+    response.headers["Cache-Control"] = "no-store"
+    activity_logger.info("ImageFind login accepted | session=%s | client=%s", session.id, client_ip)
+    return response
+
+
+@app.post("/auth/logout")
+def auth_logout_endpoint(request: Request):
+    session = request.state.auth_session
+    auth_store.delete_session(request.cookies.get(SESSION_COOKIE_NAME))
+    response = JSONResponse({"status": "logged out"})
+    response.delete_cookie(
+        SESSION_COOKIE_NAME,
+        path="/",
+        secure=_request_is_secure(request),
+        httponly=True,
+        samesite="strict",
+    )
+    response.headers["Cache-Control"] = "no-store"
+    activity_logger.info("ImageFind logout | session=%s | client=%s", session.id, _client_ip(request))
+    return response
+
+
 @app.get("/health")
 def health():
-    return {"status": "ok", "indexed": store.count()}
+    return {"status": "ok"}
 
 
 @app.get("/search")
@@ -199,11 +457,7 @@ def similar_endpoint(request: Request, image_id: str):
 
 @app.post("/reindex")
 def reindex_endpoint(request: Request, force: bool = False):
-    if _request_came_through_tunnel(request):
-        raise HTTPException(
-            status_code=403,
-            detail="reindexing is disabled through the public tunnel; open ImageFind locally",
-        )
+    _require_local_admin(request)
     with _jobs_lock:
         if any(not job.done for job in jobs.values()):
             raise HTTPException(status_code=409, detail="a reindex job is already running")
@@ -220,7 +474,8 @@ def reindex_endpoint(request: Request, force: bool = False):
 
 
 @app.get("/reindex/status/{job_id}")
-def reindex_status(job_id: str):
+def reindex_status(request: Request, job_id: str):
+    _require_local_admin(request)
     with _jobs_lock:
         job = jobs.get(job_id)
     if job is None:
@@ -232,7 +487,8 @@ def reindex_status(job_id: str):
 
 
 @app.post("/reindex/{job_id}/cancel")
-def reindex_cancel(job_id: str):
+def reindex_cancel(request: Request, job_id: str):
+    _require_local_admin(request)
     with _jobs_lock:
         job = jobs.get(job_id)
     if job is None:
@@ -256,21 +512,21 @@ def thumbnail_endpoint(image_id: str):
 
 @app.get("/download/{image_id}")
 def download_endpoint(request: Request, image_id: str):
+    _enforce_download_rate_limit(request)
     entry = store.get(image_id)
     if entry is None:
         raise HTTPException(status_code=404, detail="image not found")
     original = Path(entry.path)
     if not original.is_file():
         raise HTTPException(status_code=404, detail="original image file not found")
-    client_ip = request.headers.get("cf-connecting-ip")
-    if not client_ip:
-        client_ip = request.client.host if request.client else "unknown"
+    session = getattr(request.state, "auth_session", None)
     activity_logger.info(
-        "Image download requested | id=%s | file=%s | bytes=%d | client=%s",
+        "Image download requested | id=%s | file=%s | bytes=%d | session=%s | client=%s",
         image_id,
         original.name,
         original.stat().st_size,
-        client_ip,
+        session.id if session else "unknown",
+        _client_ip(request),
     )
     return FileResponse(original, filename=original.name)
 
@@ -286,12 +542,14 @@ def objects_endpoint():
 
 
 @app.get("/model/status")
-def model_status_endpoint():
+def model_status_endpoint(request: Request):
+    _require_local_admin(request)
     return {"installed": is_ram_checkpoint_installed()}
 
 
 @app.post("/model/download")
-def model_download_endpoint():
+def model_download_endpoint(request: Request):
+    _require_local_admin(request)
     if is_ram_checkpoint_installed():
         raise HTTPException(status_code=409, detail="RAM++ checkpoint is already installed")
     with _model_download_jobs_lock:
@@ -309,7 +567,8 @@ def model_download_endpoint():
 
 
 @app.get("/model/download/status/{job_id}")
-def model_download_status(job_id: str):
+def model_download_status(request: Request, job_id: str):
+    _require_local_admin(request)
     with _model_download_jobs_lock:
         job = model_download_jobs.get(job_id)
     if job is None:
@@ -321,7 +580,8 @@ def model_download_status(job_id: str):
 
 
 @app.post("/model/download/{job_id}/cancel")
-def model_download_cancel(job_id: str):
+def model_download_cancel(request: Request, job_id: str):
+    _require_local_admin(request)
     with _model_download_jobs_lock:
         job = model_download_jobs.get(job_id)
     if job is None:
@@ -367,12 +627,14 @@ def _settings_dict() -> dict:
 
 
 @app.get("/settings")
-def get_settings():
+def get_settings(request: Request):
+    _require_local_admin(request)
     return _settings_dict()
 
 
 @app.post("/settings")
-def update_settings(update: SettingsUpdate):
+def update_settings(request: Request, update: SettingsUpdate):
+    _require_local_admin(request)
     # model_fields_set (not "is not None") distinguishes "field present in the
     # request body, even as an explicit null" from "field omitted entirely" —
     # ram_confidence needs that distinction since null is how the frontend
@@ -434,3 +696,15 @@ def update_settings(update: SettingsUpdate):
             config.RAM_CUSTOM_TAGS = next_tags
             indexer.custom_tags = next_tags
         return _settings_dict()
+
+
+FRONTEND_DIST_DIR = Path(__file__).resolve().parents[2] / "frontend" / "dist"
+if FRONTEND_DIST_DIR.is_dir():
+    # Mount last so concrete API routes always win. The login shell and hashed
+    # assets are deliberately public; every data-bearing API remains protected.
+    app.mount("/", StaticFiles(directory=FRONTEND_DIST_DIR, html=True), name="frontend")
+else:
+    logger.warning(
+        "production frontend build not found at %s; run npm run build:frontend",
+        FRONTEND_DIST_DIR,
+    )

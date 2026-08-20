@@ -9,6 +9,7 @@ from ram.models import ram_plus
 
 from . import config, embeddings
 from .image_utils import flatten_to_rgb
+from .model_download import verify_ram_checkpoint
 
 _device = "cuda" if torch.cuda.is_available() else "cpu"
 _ram_model = None
@@ -68,6 +69,13 @@ def _get_ram():
                         f"RAM++ checkpoint not found at '{config.RAM_CHECKPOINT_PATH}'. "
                         f"Download ram_plus_swin_large_14m.pth from {_RAM_CHECKPOINT_URL} "
                         "and place it there before indexing."
+                    )
+                    _ram_load_error_signature = signature
+                    raise _ram_load_error
+                if not verify_ram_checkpoint():
+                    _ram_load_error = RuntimeError(
+                        f"RAM++ checkpoint at '{config.RAM_CHECKPOINT_PATH}' failed its pinned "
+                        "SHA-256 verification. Delete it and install the verified model again."
                     )
                     _ram_load_error_signature = signature
                     raise _ram_load_error
