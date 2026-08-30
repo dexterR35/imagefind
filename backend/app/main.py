@@ -483,6 +483,7 @@ def reindex_status(request: Request, job_id: str):
     return {
         "processed": job.processed, "total": job.total, "failed": job.failed,
         "done": job.done, "error": job.error, "cancelled": job.cancelled,
+        "failures": job.failures,
     }
 
 
@@ -507,7 +508,13 @@ def thumbnail_endpoint(image_id: str):
     thumbnail = Path(entry.thumbnail_path)
     if not thumbnail.is_file():
         raise HTTPException(status_code=404, detail="thumbnail file not found")
-    return FileResponse(thumbnail)
+    # A grid re-render otherwise revalidates every visible thumbnail on every
+    # paint. The file is rewritten in place (same URL) when its source image
+    # changes, so keep the window short and let FileResponse's ETag handle
+    # revalidation after it expires.
+    return FileResponse(
+        thumbnail, headers={"Cache-Control": "private, max-age=300, stale-while-revalidate=86400"}
+    )
 
 
 @app.get("/download/{image_id}")
@@ -528,7 +535,11 @@ def download_endpoint(request: Request, image_id: str):
         session.id if session else "unknown",
         _client_ip(request),
     )
-    return FileResponse(original, filename=original.name)
+    return FileResponse(
+        original,
+        filename=original.name,
+        headers={"Cache-Control": "private, max-age=3600"},
+    )
 
 
 @app.get("/colors")

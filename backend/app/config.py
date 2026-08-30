@@ -50,6 +50,24 @@ CORS_ALLOWED_ORIGINS = [
 # set it only to override every tag's threshold uniformly.
 RAM_CHECKPOINT_PATH = Path(os.environ.get("RAM_CHECKPOINT_PATH", "pretrained/ram_plus_swin_large_14m.pth"))
 RAM_IMAGE_SIZE = int(os.environ.get("RAM_IMAGE_SIZE", "384"))
+
+# RAM++ emits a handful of near-universal tags ("photo", "image", "illustration",
+# "white background", ...) on almost every picture. They carry no search value
+# and swamp the exact-object filter dropdown, so they are dropped from each
+# image's tag list right after inference. Override with a comma-separated env
+# value; set RAM_TAG_DENYLIST="" to keep every tag RAM++ returns.
+_DEFAULT_RAM_TAG_DENYLIST = (
+    "image,images,picture,pictures,photo,photos,photograph,photography,"
+    "illustration,illustrations,drawing,painting,art,artwork,graphic,graphics,"
+    "design,render,rendering,3d render,digital art,clip art,cartoon,poster,"
+    "screenshot,screen shot,collage,background,backdrop,white background,"
+    "black background,close-up,closeup,macro,stock photo,wallpaper,text,font"
+)
+RAM_TAG_DENYLIST = frozenset(
+    tag.strip().lower()
+    for tag in os.environ.get("RAM_TAG_DENYLIST", _DEFAULT_RAM_TAG_DENYLIST).split(",")
+    if tag.strip()
+)
 if "ram_confidence" in _persisted:
     # A persisted explicit null must stay None, not fall through to the env
     # var default - same "explicit null is meaningful" rule as main.py's
@@ -85,6 +103,13 @@ COLOR_MIN_SHARE = float(os.environ.get("COLOR_MIN_SHARE", "0.08"))
 # application by default; automated tests explicitly disable background
 # threads. Set ENABLE_WATCHER=false for maintenance or one-off bulk imports.
 ENABLE_WATCHER = os.environ.get("ENABLE_WATCHER", "true").lower() == "true"
+# needs_reindex() re-processes a file when its stored mtime no longer matches
+# the file on disk. SMB/FAT/NFS commonly round mtime to whole seconds, and a
+# bare `!=` then makes every reconciliation scan re-run the full OCR/RAM++/CLIP
+# pipeline on files that never actually changed. A genuine edit moves mtime by
+# far more than this tolerance, so a small window removes the churn without
+# hiding real changes.
+MTIME_TOLERANCE_SECONDS = max(0.0, float(os.environ.get("MTIME_TOLERANCE_SECONDS", "2.0")))
 # How long a file's size must stay unchanged across polls before the watcher
 # treats a create/modify event as "the write is finished" and processes it —
 # guards against reading a file mid-copy over the NAS.

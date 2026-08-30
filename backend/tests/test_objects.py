@@ -230,6 +230,45 @@ def test_detect_ram_objects_restores_default_threshold_when_conf_goes_back_to_no
     assert torch.equal(fake_model.class_threshold, default_threshold)
 
 
+def test_detect_ram_objects_drops_denylisted_generic_tags(tmp_path, monkeypatch):
+    path = tmp_path / "x.png"
+    Image.new("RGB", (64, 64), (10, 20, 30)).save(path)
+
+    fake_model = type("FakeModel", (), {"class_threshold": torch.tensor([0.5])})()
+    monkeypatch.setattr(
+        objects_mod, "_get_ram", lambda: ((lambda image: torch.zeros(3, 4, 4)), fake_model)
+    )
+    monkeypatch.setattr(
+        objects_mod, "_ram_inference",
+        lambda tensor, model: ("photo | clover | white background | coin", ""),
+    )
+    monkeypatch.setattr(objects_mod, "_ram_default_class_threshold", torch.tensor([0.5]))
+    monkeypatch.setattr(
+        objects_mod.config, "RAM_TAG_DENYLIST", frozenset({"photo", "white background"})
+    )
+
+    assert detect_ram_objects(path) == ["clover", "coin"]
+
+
+def test_detect_ram_objects_conf_is_a_floor_not_a_flat_replacement(tmp_path, monkeypatch):
+    path = tmp_path / "x.png"
+    Image.new("RGB", (64, 64), (10, 20, 30)).save(path)
+
+    default_threshold = torch.tensor([0.1, 0.6, 0.9])
+    fake_model = type("FakeModel", (), {"class_threshold": default_threshold.clone()})()
+    monkeypatch.setattr(
+        objects_mod, "_get_ram", lambda: ((lambda image: torch.zeros(3, 4, 4)), fake_model)
+    )
+    monkeypatch.setattr(objects_mod, "_ram_inference", lambda tensor, model: ("a", ""))
+    monkeypatch.setattr(objects_mod, "_ram_default_class_threshold", default_threshold)
+
+    detect_ram_objects(path, conf=0.5)
+
+    # 0.1 is raised to the 0.5 floor; the well-calibrated 0.6 and 0.9 per-tag
+    # thresholds are kept, not flattened down to 0.5.
+    assert torch.equal(fake_model.class_threshold, torch.tensor([0.5, 0.6, 0.9]))
+
+
 def test_detect_ram_objects_handles_transparent_rgba_image(tmp_path):
     # Previously `.convert("RGB")` on an RGBA image silently flattened transparent
     # pixels onto black; this just needs to run without erroring on that input and

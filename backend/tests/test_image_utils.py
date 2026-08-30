@@ -28,6 +28,19 @@ def test_flatten_to_rgb_converts_plain_rgb_without_change():
     assert result.getpixel((5, 5)) == (10, 20, 30)
 
 
+def test_flatten_to_rgb_applies_exif_orientation():
+    # A 20x10 landscape image tagged orientation=6 ("rotate 90 CW") must come
+    # back as a 10x20 portrait, matching how it renders in a browser.
+    img = Image.new("RGB", (20, 10), (10, 20, 30))
+    exif = img.getexif()
+    exif[274] = 6
+    img.info["exif"] = exif.tobytes()
+
+    result = flatten_to_rgb(img)
+
+    assert result.size == (10, 20)
+
+
 def test_extract_date_taken_prefers_original_capture_date():
     img = Image.new("RGB", (1, 1))
     exif = img.getexif()

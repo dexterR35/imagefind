@@ -40,6 +40,11 @@ export interface SearchResponse {
   total: number;
 }
 
+export interface ReindexFailure {
+  path: string;
+  error: string;
+}
+
 export interface ReindexStatus {
   processed: number;
   total: number;
@@ -47,6 +52,7 @@ export interface ReindexStatus {
   done: boolean;
   error: string | null;
   cancelled: boolean;
+  failures?: ReindexFailure[];
 }
 
 export interface Settings {

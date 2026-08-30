@@ -1,6 +1,6 @@
 import datetime
 
-from PIL import Image
+from PIL import Image, ImageOps
 
 _EXIF_DATETIME_TAGS = (
     36867,  # DateTimeOriginal: when the camera captured the image
@@ -41,7 +41,13 @@ def flatten_to_rgb(image: Image.Image) -> Image.Image:
     CLIP embeddings, RAM++ tagging, reference-tag matching — so they all agree
     on what a transparent-background image looks like instead of each having
     their own copy of this that could quietly drift apart.
+
+    Any EXIF orientation is baked in first so a phone photo tagged "rotate 90°"
+    is thumbnailed, embedded, and tagged the same way it displays, not sideways.
+    exif_transpose is a no-op on an image whose orientation tag is missing or 1,
+    so calling it again on an already-corrected image is harmless.
     """
+    image = ImageOps.exif_transpose(image) or image
     if image.mode in ("RGBA", "LA", "P"):
         rgba = image.convert("RGBA")
         bg = Image.new("RGB", rgba.size, (255, 255, 255))

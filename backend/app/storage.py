@@ -9,6 +9,8 @@ from pathlib import Path
 import numpy as np
 import sqlite_vec
 
+from . import config
+
 logger = logging.getLogger(__name__)
 
 _SCHEMA = """
@@ -399,7 +401,8 @@ class IndexStore:
             entry.width <= 0 or entry.height <= 0 or not entry.format
             or entry.date_taken <= 0 or entry.indexed_at <= 0
         )
-        return metadata_missing or entry.mtime != stat.st_mtime or entry.size != stat.st_size
+        mtime_changed = abs(entry.mtime - stat.st_mtime) > config.MTIME_TOLERANCE_SECONDS
+        return metadata_missing or mtime_changed or entry.size != stat.st_size
 
     def upsert(self, entry: ImageEntry, embedding: np.ndarray) -> None:
         with self.lock:
@@ -540,44 +543,91 @@ class IndexStore:
     ) -> tuple[list[ImageEntry], int]:
         clauses: list[str] = []
         params: list[object] = []
+        # Each word of the query (3+ chars) becomes its own quote-escaped FTS5
+        # phrase, AND-ed together: "red cat" matches an image tagged `cat` that
+        # also has a dominant colour `red`, not only the literal string
+        # "red cat". Joining the FTS index also exposes bm25 `rank` to ORDER BY
+        # so the strongest matches, not just the newest, come first.
+        fts_terms = [term for term in text.split() if len(term) >= 3] if text else []
+        rank_by_relevance = bool(fts_terms)
+        # A one-word query is where the trigram tokenizer's substring recall
+        # hurts most - "cat" also matches inside "communication". Whole-word
+        # hits are floated above substring-only hits (both are still returned).
+        single_token = (
+            len(fts_terms) == 1 and text.strip().lower() == fts_terms[0].lower()
+        )
+        fts_join = " JOIN image_fts ON image_fts.rowid = images.rowid" if rank_by_relevance else ""
+        if rank_by_relevance:
+            clauses.append("image_fts MATCH ?")
+            params.append(" AND ".join('"' + term.replace('"', '""') + '"' for term in fts_terms))
         if color:
             clauses.append("EXISTS (SELECT 1 FROM image_colors c WHERE c.image_id=images.id AND c.color=?)")
             params.append(color)
         if obj:
             clauses.append("EXISTS (SELECT 1 FROM image_objects o WHERE o.image_id=images.id AND o.label=?)")
             params.append(obj)
-        if text:
-            if len(text) >= 3:
-                clauses.append("images.rowid IN (SELECT rowid FROM image_fts WHERE image_fts MATCH ?)")
-                params.append('"' + text.replace('"', '""') + '"')
-            else:
-                clauses.append(
-                    "(instr(lower(images.filename), lower(?)) > 0 "
-                    "OR instr(lower(images.path), lower(?)) > 0 "
-                    "OR instr(lower(images.ocr_text), lower(?)) > 0 OR EXISTS ("
-                    "SELECT 1 FROM image_objects o WHERE o.image_id=images.id "
-                    "AND instr(lower(o.label), lower(?)) > 0) OR EXISTS ("
-                    "SELECT 1 FROM image_colors c WHERE c.image_id=images.id "
-                    "AND instr(lower(c.color), lower(?)) > 0))"
-                )
-                params.extend((text, text, text, text, text))
+        if text and not rank_by_relevance:
+            clauses.append(
+                "(instr(lower(images.filename), lower(?)) > 0 "
+                "OR instr(lower(images.path), lower(?)) > 0 "
+                "OR instr(lower(images.ocr_text), lower(?)) > 0 OR EXISTS ("
+                "SELECT 1 FROM image_objects o WHERE o.image_id=images.id "
+                "AND instr(lower(o.label), lower(?)) > 0) OR EXISTS ("
+                "SELECT 1 FROM image_colors c WHERE c.image_id=images.id "
+                "AND instr(lower(c.color), lower(?)) > 0))"
+            )
+            params.extend((text, text, text, text, text))
 
         where = " WHERE " + " AND ".join(clauses) if clauses else ""
-        order_by = {
-            "date_desc": "date_taken DESC, id ASC",
-            "date_asc": "date_taken ASC, id ASC",
-            "name_asc": "filename COLLATE NOCASE ASC, id ASC",
-            "name_desc": "filename COLLATE NOCASE DESC, id ASC",
-            "size_desc": "size DESC, id ASC",
-            "size_asc": "size ASC, id ASC",
-        }.get(sort, "date_taken DESC, id ASC")
+        # Columns must be qualified: the FTS join brings its own path/filename/
+        # ocr_text columns that would otherwise make the SELECT ambiguous.
+        select_cols = ", ".join(f"images.{col.strip()}" for col in _SELECT_COLUMNS.split(","))
+        base_order = {
+            "date_desc": "images.date_taken DESC",
+            "date_asc": "images.date_taken ASC",
+            "name_asc": "images.filename COLLATE NOCASE ASC",
+            "name_desc": "images.filename COLLATE NOCASE DESC",
+            "size_desc": "images.size DESC",
+            "size_asc": "images.size ASC",
+        }.get(sort, "images.date_taken DESC")
+        order_params: list[object] = []
+        if rank_by_relevance and sort == "date_desc":
+            # "date_desc" is also the default the frontend sends when the user
+            # has picked no explicit order, so a text search leaves relevance
+            # first; any other explicit sort wins and relevance breaks ties.
+            relevance = "image_fts.rank"
+            if single_token:
+                needle = fts_terms[0].lower()
+                # 0 = query appears as a standalone word in any searchable
+                # field (path separators normalised to spaces first), 1 = it
+                # only occurs as a substring of a longer token.
+                relevance = (
+                    "(CASE WHEN "
+                    "instr(' ' || lower(images.ocr_text) || ' ', ' ' || ? || ' ') > 0 "
+                    "OR instr(' ' || replace(replace(replace(replace(replace("
+                    "lower(images.path), '/', ' '), '\\', ' '), '_', ' '), '-', ' '), '.', ' ') "
+                    "|| ' ', ' ' || ? || ' ') > 0 "
+                    "OR EXISTS (SELECT 1 FROM image_objects o WHERE o.image_id = images.id "
+                    "AND instr(' ' || lower(o.label) || ' ', ' ' || ? || ' ') > 0) "
+                    "OR EXISTS (SELECT 1 FROM image_colors c WHERE c.image_id = images.id "
+                    "AND lower(c.color) = ?) "
+                    "THEN 0 ELSE 1 END), image_fts.rank"
+                )
+                order_params = [needle, needle, needle, needle]
+            order_by = f"{relevance}, {base_order}, images.id ASC"
+        elif rank_by_relevance:
+            order_by = f"{base_order}, image_fts.rank, images.id ASC"
+        else:
+            order_by = f"{base_order}, images.id ASC"
 
         with self.lock:
-            total = self._conn.execute(f"SELECT count(*) FROM images{where}", params).fetchone()[0]
+            total = self._conn.execute(
+                f"SELECT count(*) FROM images{fts_join}{where}", params
+            ).fetchone()[0]
             rows = self._conn.execute(
-                f"SELECT {_SELECT_COLUMNS} FROM images{where} "
+                f"SELECT {select_cols} FROM images{fts_join}{where} "
                 f"ORDER BY {order_by} LIMIT ? OFFSET ?",
-                [*params, limit, offset],
+                [*params, *order_params, limit, offset],
             ).fetchall()
         return [_row_to_entry(row) for row in rows], total
 

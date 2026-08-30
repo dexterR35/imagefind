@@ -47,7 +47,8 @@ def test_reindex_on_empty_folder_completes_immediately(tmp_path, monkeypatch):
         time.sleep(0.05)
 
     assert status == {
-        "processed": 0, "total": 0, "failed": 0, "done": True, "error": None, "cancelled": False,
+        "processed": 0, "total": 0, "failed": 0, "done": True, "error": None,
+        "cancelled": False, "failures": [],
     }
 
 

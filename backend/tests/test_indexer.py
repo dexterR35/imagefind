@@ -71,7 +71,10 @@ def test_process_image_removes_temporary_thumbnail_after_pipeline_failure(tmp_pa
     store.load()
     indexer = Indexer(images_dir, index_dir, store)
     monkeypatch.setattr("app.indexer.embeddings.embed_image", lambda image: np.zeros(512, dtype=np.float32))
-    monkeypatch.setattr("app.indexer.ocr.extract_text", lambda path: (_ for _ in ()).throw(RuntimeError("OCR failed")))
+    monkeypatch.setattr(
+        "app.indexer.ocr.extract_text",
+        lambda path, *, image=None: (_ for _ in ()).throw(RuntimeError("OCR failed")),
+    )
 
     with pytest.raises(RuntimeError, match="OCR failed"):
         indexer.process_image(images_dir / "img000.png", indexer._current_settings())
@@ -177,6 +180,60 @@ def test_run_reindex_skips_corrupt_image_without_aborting(tmp_path):
     assert job.failed == 1
     assert job.done is True
     assert len(store.all()) == 2
+
+
+def test_run_reindex_records_per_file_failures_with_paths(tmp_path):
+    images_dir = tmp_path / "images"
+    _make_images(images_dir)
+    (images_dir / "broken.png").write_bytes(b"not a real image")
+
+    index_dir = tmp_path / "index"
+    store = IndexStore(index_dir, embedding_dim=512)
+    store.load()
+    indexer = Indexer(images_dir, index_dir, store)
+
+    job = ReindexJob(id="job1")
+    indexer.run_reindex(job)
+
+    assert job.failed == 1
+    assert len(job.failures) == 1
+    assert job.failures[0]["path"].endswith("broken.png")
+    assert job.failures[0]["error"]
+
+
+def test_run_reindex_survives_unreadable_subdir_and_skips_prune(tmp_path):
+    images_dir = tmp_path / "images"
+    _make_images(images_dir, count=2)
+    locked = images_dir / "locked"
+    _make_images(locked, count=1)
+
+    index_dir = tmp_path / "index"
+    store = IndexStore(index_dir, embedding_dim=512)
+    store.load()
+    indexer = Indexer(images_dir, index_dir, store)
+
+    import os as _os
+    import stat as _stat
+
+    _os.chmod(locked, 0)
+    try:
+        if _os.access(locked, _os.R_OK):  # running as root - the chmod is a no-op
+            pytest.skip("cannot make a directory unreadable as root")
+
+        job = ReindexJob(id="job1")
+        indexer.run_reindex(job)
+        assert job.error is None and job.done is True
+        assert {e.path for e in store.all()} == {
+            str(images_dir / "img000.png"), str(images_dir / "img001.png")
+        }
+
+        # A deleted top-level file must NOT be pruned while the folder scan is
+        # still incomplete - a partial listing must never be read as "deleted".
+        (images_dir / "img001.png").unlink()
+        indexer.run_reindex(ReindexJob(id="job2"))
+        assert store.get_by_path(str(images_dir / "img001.png")) is not None
+    finally:
+        _os.chmod(locked, _stat.S_IRWXU)
 
 
 def test_run_reindex_prunes_entries_for_deleted_files(tmp_path):

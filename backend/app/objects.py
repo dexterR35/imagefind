@@ -135,29 +135,45 @@ def unload_ram_model() -> None:
             torch.cuda.empty_cache()
 
 
-def detect_ram_objects(image_path: Path, conf: float | None = None) -> list[str]:
+def detect_ram_objects(
+    image_path: Path, conf: float | None = None, *, image: Image.Image | None = None
+) -> list[str]:
     # conf stays None by default rather than reading config.RAM_CONFIDENCE at call
     # time being the only option — RAM++'s checkpoint ships with per-tag tuned
     # thresholds, so leaving it None means "use those", and only an explicit value
     # (from settings or a caller) overrides every tag's threshold uniformly.
+    #
+    # `image`, when supplied, is the already-opened, EXIF-corrected, display-
+    # ready RGB image the indexer decoded once for the whole pipeline; it is
+    # equivalent to _load_rgb(image_path) but avoids re-reading the file.
     if conf is None:
         conf = config.RAM_CONFIDENCE
     with _inference_lock:
         transform, model = _get_ram()
-        image = _load_rgb(image_path)
-        tensor = transform(image).unsqueeze(0).to(_device)
+        rgb = image if image is not None else _load_rgb(image_path)
+        tensor = transform(rgb).unsqueeze(0).to(_device)
         # Always explicitly set the threshold (override or restore) rather than only
         # mutating it when conf is not None — model.class_threshold is a shared,
         # mutable array on the process-lifetime singleton model, so a previous call's
         # override would otherwise silently stick around forever once conf goes back
         # to None, even though that's supposed to mean "use the model's own defaults".
+        #
+        # `conf` is applied as a floor on the checkpoint's per-tag tuned
+        # thresholds, not a flat replacement: RAM++ ships thresholds calibrated
+        # per class, so raising every under-confident tag to at least `conf`
+        # trims noise while keeping that calibration shape intact. A flat
+        # replace made easy tags under-fire and rare tags over-fire.
         model.class_threshold = (
-            torch.ones_like(model.class_threshold) * conf if conf is not None
+            torch.clamp(_ram_default_class_threshold, min=conf) if conf is not None
             else _ram_default_class_threshold
         )
         with torch.no_grad():
             tags, _ = _ram_inference(tensor, model)
-    return sorted({t.strip() for t in tags.split("|") if t.strip()})
+    denylist = config.RAM_TAG_DENYLIST
+    return sorted({
+        tag for raw in tags.split("|")
+        if (tag := raw.strip()) and tag.lower() not in denylist
+    })
 
 
 def clear_custom_tag_cache() -> None:

@@ -97,6 +97,107 @@ def test_search_special_characters_never_become_fts_syntax(tmp_path, payload):
     assert total == 0
 
 
+def test_search_ranks_stronger_text_matches_first_by_default(tmp_path):
+    # "weak" is newer, so a pure date sort would put it first. "strong"
+    # mentions the term far more often, so bm25 relevance must win when the
+    # sort is left at its default.
+    store = _store_with(tmp_path, [
+        (_entry("weak", ocr_text="clover", date_taken=100.0), [1.0, 0.0]),
+        (_entry("strong", ocr_text="clover clover clover clover clover", date_taken=1.0), [1.0, 0.0]),
+    ])
+
+    result, total = search(store, text="clover")
+
+    assert total == 2
+    assert [e.id for e in result] == ["strong", "weak"]
+
+
+def test_search_explicit_sort_overrides_relevance(tmp_path):
+    store = _store_with(tmp_path, [
+        (_entry("weak", ocr_text="clover", date_taken=100.0), [1.0, 0.0]),
+        (_entry("strong", ocr_text="clover clover clover", date_taken=1.0), [1.0, 0.0]),
+    ])
+
+    result, _ = search(store, text="clover", sort="date_desc")
+    assert [e.id for e in result] == ["strong", "weak"]  # default: relevance first
+
+    result, _ = search(store, text="clover", sort="date_asc")
+    assert [e.id for e in result] == ["strong", "weak"]  # explicit date_asc: strong is older
+
+    result, _ = search(store, text="clover", sort="name_desc")
+    assert [e.id for e in result] == ["weak", "strong"]  # explicit name sort wins
+
+
+def test_multi_word_search_ands_terms_across_different_fields(tmp_path):
+    # "red cat" should find the image whose RAM++ tag is `cat` and whose
+    # dominant colour is `red`, even though the literal string "red cat"
+    # appears nowhere - each word is matched independently and AND-ed.
+    store = _store_with(tmp_path, [
+        (_entry("redcat", objects=["cat"], colors=["red"]), [1.0, 0.0]),
+        (_entry("bluecat", objects=["cat"], colors=["blue"]), [1.0, 0.0]),
+        (_entry("reddog", objects=["dog"], colors=["red"]), [1.0, 0.0]),
+        (_entry("redcat_ocr", ocr_text="my red cat", objects=[], colors=[]), [1.0, 0.0]),
+    ])
+
+    result, total = search(store, text="red cat")
+
+    assert total == 2
+    assert {e.id for e in result} == {"redcat", "redcat_ocr"}
+
+
+def test_object_filter_and_text_number_pinpoint_one_image(tmp_path):
+    store = _store_with(tmp_path, [
+        (_entry("p1", path="/imgs/p1.png", objects=["cat", "sofa"], ocr_text="WIN 500 COINS"), [1.0, 0.0]),
+        (_entry("p2", path="/imgs/p2.png", objects=["cat"], ocr_text="hello world"), [1.0, 0.0]),
+        (_entry("p3", path="/imgs/p3.png", objects=["dog"], ocr_text="prize 500"), [1.0, 0.0]),
+    ])
+
+    # one box: "cat 500"
+    result, total = search(store, text="cat 500")
+    assert [e.id for e in result] == ["p1"]
+    assert total == 1
+
+    # object dropdown "cat" + text "500" - exact tag match, same result
+    result, total = search(store, text="500", obj="cat")
+    assert [e.id for e in result] == ["p1"]
+    assert total == 1
+
+
+def test_multi_word_search_ignores_terms_shorter_than_three_chars(tmp_path):
+    store = _store_with(tmp_path, [
+        (_entry("hit", objects=["cat"], colors=["red"]), [1.0, 0.0]),
+        (_entry("miss", objects=["dog"], colors=["red"]), [1.0, 0.0]),
+    ])
+    # "a red cat" -> "a" is dropped, "red" AND "cat" remain.
+    result, _ = search(store, text="a red cat")
+    assert [e.id for e in result] == ["hit"]
+
+
+def test_single_word_search_floats_whole_word_matches_above_substring_hits(tmp_path):
+    # The trigram tokenizer matches "cat" inside "communication" too; the
+    # whole-word hit must rank first even though it is older, while the
+    # substring-only row is still returned.
+    store = _store_with(tmp_path, [
+        (_entry("substring", ocr_text="global communication network", date_taken=100.0), [1.0, 0.0]),
+        (_entry("wholeword", ocr_text="a cat on a mat", date_taken=1.0), [1.0, 0.0]),
+    ])
+
+    result, total = search(store, text="cat")
+
+    assert total == 2
+    assert [e.id for e in result] == ["wholeword", "substring"]
+
+
+def test_whole_word_boost_matches_across_path_separators(tmp_path):
+    store = _store_with(tmp_path, [
+        (_entry("insidewords", path="/archive/beachball/photocat.png"), [1.0, 0.0]),
+        (_entry("realword", path="/archive/cat/portrait.png"), [1.0, 0.0]),
+    ])
+
+    result, _ = search(store, text="cat")
+    assert [e.id for e in result] == ["realword", "insidewords"]
+
+
 def test_search_text_has_no_semantic_fallback(tmp_path):
     # Regression guard: text search used to also include images via a CLIP
     # similarity score even with no matching OCR text or object tag at all

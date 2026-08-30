@@ -8,6 +8,11 @@ remembering their exact location.
 The original files stay where they are. ImageFind stores only metadata,
 embeddings, and generated thumbnails in a local SQLite index.
 
+For a fuller explanation of what the app does, what each model is for, and
+search examples for every scenario, see [`docs/GUIDE.md`](docs/GUIDE.md).
+For how `npm start` is wired and every command, see
+[`docs/RUNNING.md`](docs/RUNNING.md).
+
 ## Features
 
 - Search filenames, folder paths, OCR text, object tags, custom tags, and colors.
@@ -150,6 +155,11 @@ The first run can take a long time for hundreds of thousands of images. The
 index is saved regularly. If indexing is stopped, already completed images are
 kept; starting a normal **Reindex** later skips unchanged completed files.
 
+Files that can't be processed (corrupt, removed mid-scan, or inside an
+unreadable subfolder) don't stop the run: everything reachable is still
+indexed, and the reindex status reports the failure count plus the first
+100 failing paths. An incomplete folder scan never prunes existing entries.
+
 Changing model or tagging settings with **Save & Reindex** intentionally forces
 all images to be processed again.
 
@@ -175,6 +185,10 @@ before deleting it, protecting the index during a temporary NAS interruption.
 
 ## Searching
 
+See [`docs/GUIDE.md`](docs/GUIDE.md) for worked examples of every scenario
+(object only, object + text, object + color, folder, "more like this", and so
+on). In short:
+
 The main search box searches all of these fields together:
 
 - Filename and extension
@@ -183,6 +197,13 @@ The main search box searches all of these fields together:
 - RAM++ objects
 - Custom tags
 - Dominant colors
+
+A multi-word query is split into terms and **AND-ed** (`red cat` matches an
+image tagged `cat` that also has a dominant color `red`, not only the literal
+string). Terms shorter than three characters fall back to a plain substring
+scan. When the sort is left on its default, text results are ordered by
+relevance (bm25), with whole-word matches floated above matches that only occur
+inside a longer word.
 
 The object and color controls are exact filters. Text, object, and color filters
 combine with **AND**, so searching `bonus` with object `person` and color `red`
@@ -201,13 +222,16 @@ search requests per 10 seconds.
 
 | Component | Purpose |
 |---|---|
-| RAM++ with Swin-L | Automatic object and scene tags |
+| RAM++ with Swin-L | Automatic object and scene tags (near-universal tags such as `photo` and `white background` are dropped; see `RAM_TAG_DENYLIST`) |
 | OpenCLIP ViT-B/32 (`openai`) | 512-dimensional image embeddings, Find Similar, and custom-tag matching |
 | EasyOCR | Text extraction from image pixels |
 | K-means | Dominant-color extraction |
-| SQLite FTS5 | Fast filename, path, OCR, tag, and color text search |
+| SQLite FTS5 (trigram) | Filename, path, OCR, tag, and color text search, with bm25 relevance ranking |
 | sqlite-vec | Cosine nearest-neighbor search over CLIP embeddings |
 | Watchdog | Realtime local/NAS filesystem events |
+
+Each image is decoded once and read by every stage; EXIF orientation is applied
+so rotated photos are catalogued the way they display.
 
 The RAM++ checkpoint is downloaded from Hugging Face by the Settings panel and
 stored at `backend/pretrained/ram_plus_swin_large_14m.pth`. OpenCLIP and EasyOCR
@@ -233,7 +257,9 @@ important; it can also be regenerated from the original images.
 | `INDEX_DIR` | `./.index` | Index and thumbnail directory, relative to `backend/` |
 | `ENABLE_WATCHER` | `true` | Enable realtime filesystem monitoring |
 | `RECONCILE_INTERVAL_SECONDS` | `14400` | Scheduled reconciliation interval |
+| `MTIME_TOLERANCE_SECONDS` | `2.0` | Modification-time drift ignored when deciding a file is unchanged (guards against NAS clocks that round timestamps) |
 | `RAM_CHECKPOINT_PATH` | `pretrained/ram_plus_swin_large_14m.pth` | RAM++ checkpoint location |
+| `RAM_TAG_DENYLIST` | ~40 generic tags | Comma-separated RAM++ tags dropped from every image (`photo`, `illustration`, `white background`, …); set to empty to keep all tags |
 | `CORS_ALLOWED_ORIGINS` | empty | Optional comma-separated additional browser origins |
 | `SEARCH_RATE_LIMIT_REQUESTS` | `30` | Search requests allowed per client/window |
 | `SEARCH_RATE_LIMIT_WINDOW_SECONDS` | `10` | Search rate-limit window |

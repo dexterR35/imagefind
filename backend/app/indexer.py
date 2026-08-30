@@ -7,7 +7,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 import numpy as np
-from PIL import Image
+from PIL import Image, ImageOps
 
 from . import colors as colors_mod
 from . import config
@@ -32,8 +32,16 @@ class ReindexJob:
     done: bool = False
     error: str | None = None
     cancelled: bool = False
+    # Per-file failures (corrupt image, vanished mid-scan, unreadable folder),
+    # capped so one pathological run can't grow this without bound. `failed` is
+    # the true total; this list is the first MAX_TRACKED_FAILURES of them, with
+    # enough detail for the UI to tell the user which files need attention.
+    failures: list[dict] = field(default_factory=list)
     # Not exposed to API callers directly - set via Indexer.cancel(job).
     cancel_event: threading.Event = field(default_factory=threading.Event, repr=False, compare=False)
+
+
+MAX_TRACKED_FAILURES = 100
 
 
 @dataclass
@@ -78,24 +86,37 @@ class Indexer:
         thumb_path = self.index_dir / "thumbnails" / f"{image_id}.jpg"
         temporary_thumb = thumb_path.with_suffix(".jpg.tmp")
         try:
-            thumbnails.make_thumbnail(path, temporary_thumb)
+            # Decode the original exactly once. The thumbnail, colour, CLIP,
+            # OCR and RAM++ stages used to each re-open and re-decode the file
+            # from disk (four reads per image); they now share these in-memory
+            # renditions instead:
+            #   rgba     - EXIF-corrected, alpha preserved, for dominant-colour
+            #              extraction (which ignores transparent pixels)
+            #   base_rgb - the same but composited onto white and flattened to
+            #              RGB, i.e. exactly what the UI shows and what every
+            #              model input expects
+            with Image.open(path) as raw:
+                # .format and EXIF must be read before any convert()/transpose,
+                # which return a new Image with .format unset and the EXIF
+                # orientation tag consumed.
+                img_format = raw.format or path.suffix.lstrip(".").upper()
+                date_taken = image_utils.extract_date_taken(raw, fallback=stat.st_mtime)
+                oriented = ImageOps.exif_transpose(raw) or raw
+                rgba = oriented.convert("RGBA")
+                base_rgb = image_utils.flatten_to_rgb(oriented)
+            width, height = base_rgb.size
 
-            with Image.open(path) as img:
-                # Captured before .convert() below, which returns a new Image
-                # object with .format unset and no EXIF - both must be read off
-                # the freshly-opened original.
-                width, height = img.size
-                img_format = img.format or path.suffix.lstrip(".").upper()
-                date_taken = image_utils.extract_date_taken(img, fallback=stat.st_mtime)
-
-                img = img.convert("RGBA")
-                color_names = colors_mod.extract_dominant_colors(
-                    img, k=settings.color_clusters, min_share=settings.color_min_share
+            thumbnails.make_thumbnail(path, temporary_thumb, image=base_rgb)
+            color_names = colors_mod.extract_dominant_colors(
+                rgba, k=settings.color_clusters, min_share=settings.color_min_share
+            )
+            embedding = embeddings.embed_image(base_rgb)
+            text = ocr.extract_text(path, image=base_rgb)
+            object_labels = set(
+                objects_mod.detect_ram_objects(
+                    path, conf=settings.ram_confidence, image=base_rgb
                 )
-                embedding = embeddings.embed_image(img)
-
-            text = ocr.extract_text(path)
-            object_labels = set(objects_mod.detect_ram_objects(path, conf=settings.ram_confidence))
+            )
             if settings.custom_tags:
                 object_labels |= set(
                     objects_mod.detect_custom_tags(
@@ -190,9 +211,18 @@ class Indexer:
                     logger.warning("failed to remove orphan thumbnail %s", thumbnail, exc_info=True)
             return removed
 
-    def _list_image_paths(self) -> list[Path]:
+    def _list_image_paths(self) -> tuple[list[Path], list[OSError]]:
+        """Every supported image under images_dir, plus any directories that
+        could not be read.
+
+        A single unreadable subfolder (a permission-denied share, a stale NAS
+        mount point) must NOT throw away the whole catalog build - the reachable
+        images are still indexed. The caller uses the returned errors to decide
+        whether pruning is safe: entries under a folder we could not list this
+        pass must not be deleted as if the files were gone.
+        """
         if not self.images_dir.is_dir():
-            return []
+            return [], []
         errors: list[OSError] = []
         paths: list[Path] = []
         for root, dirnames, filenames in os.walk(
@@ -203,9 +233,13 @@ class Indexer:
                 path = Path(root) / filename
                 if path.suffix.lower() in IMAGE_EXTENSIONS:
                     paths.append(path)
-        if errors:
-            raise OSError(f"incomplete image scan: {errors[0]}")
-        return sorted(paths)
+        return sorted(paths), errors
+
+    def _note_failed(self, job: "ReindexJob", path: Path, reason: object) -> None:
+        job.failed += 1
+        if len(job.failures) < MAX_TRACKED_FAILURES:
+            job.failures.append({"path": str(path), "error": str(reason)})
+        logger.warning("skipping %s: %s", path, reason)
 
     def run_reindex(
         self, job: ReindexJob, force: bool = False, confirm_deletions: bool = False
@@ -216,7 +250,13 @@ class Indexer:
             # changing reference images for a tag between runs actually takes
             # effect instead of silently reusing a stale cached embedding.
             objects_mod.clear_custom_tag_cache()
-            paths = self._list_image_paths()
+            paths, scan_errors = self._list_image_paths()
+            if scan_errors:
+                logger.warning(
+                    "reindex: %d directory(ies) under %s could not be read; "
+                    "indexing what is reachable and skipping prune this pass (first: %s)",
+                    len(scan_errors), self.images_dir, scan_errors[0],
+                )
             job.total = len(paths)
             ram_ready = False
             for path in paths:
@@ -226,8 +266,7 @@ class Indexer:
                 try:
                     should_index = force or self.store.needs_reindex(path)
                 except Exception as exc:
-                    job.failed += 1
-                    logger.warning("skipping %s: %s", path, exc)
+                    self._note_failed(job, path, exc)
                     should_index = False
                 if should_index:
                     # Load RAM++ only when the scan actually finds work. Keep
@@ -239,8 +278,7 @@ class Indexer:
                     try:
                         self.index_path_if_needed(path, settings, force=force, persist=False)
                     except Exception as exc:
-                        job.failed += 1
-                        logger.warning("skipping %s: %s", path, exc)
+                        self._note_failed(job, path, exc)
                 job.processed += 1
                 if job.processed % 50 == 0:
                     self.store.save()
@@ -261,7 +299,20 @@ class Indexer:
             # Re-list rather than reusing `paths`: a file deleted mid-scan
             # (after being listed but before its turn in the loop) must not
             # survive pruning just because it was present at the start.
-            current_paths = {str(p) for p in self._list_image_paths()}
+            current_path_list, prune_scan_errors = self._list_image_paths()
+            if scan_errors or prune_scan_errors:
+                # A partial listing looks exactly like "these files were all
+                # deleted". Persist the indexing work done above, but never
+                # prune from an incomplete view of the folder.
+                logger.warning(
+                    "reindex: skipping prune because the folder scan was incomplete "
+                    "(%d unreadable directory(ies))",
+                    len(scan_errors) + len(prune_scan_errors),
+                )
+                self._last_reconcile_missing.clear()
+                self.store.save()
+                return
+            current_paths = {str(p) for p in current_path_list}
             if confirm_deletions:
                 # NAS directory listings can be incomplete during a brief SMB
                 # interruption even while the share root still exists. Only

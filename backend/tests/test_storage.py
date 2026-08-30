@@ -127,6 +127,29 @@ def test_needs_reindex_true_when_file_changes(tmp_path):
     assert store.needs_reindex(img_path) is True
 
 
+def test_needs_reindex_tolerates_sub_second_mtime_drift(tmp_path, monkeypatch):
+    from app import config
+
+    monkeypatch.setattr(config, "MTIME_TOLERANCE_SECONDS", 2.0)
+    img_path = tmp_path / "photo.png"
+    img_path.write_bytes(b"same-size-content")
+    stat = img_path.stat()
+    store = IndexStore(tmp_path / "idx", embedding_dim=4)
+    store.load()
+    # Stored mtime is ~1s off the file's (as an SMB/FAT share would report it)
+    # but the size is unchanged - the pipeline must not re-run.
+    store.upsert(
+        _entry(path=str(img_path), mtime=stat.st_mtime - 1.0, size=stat.st_size,
+               width=1, height=1, format="PNG", date_taken=1.0, indexed_at=1.0),
+        np.zeros(4, dtype=np.float32),
+    )
+    assert store.needs_reindex(img_path) is False
+
+    # A drift beyond the tolerance still counts as a change.
+    monkeypatch.setattr(config, "MTIME_TOLERANCE_SECONDS", 0.5)
+    assert store.needs_reindex(img_path) is True
+
+
 def test_upsert_replaces_existing_entry_for_same_path(tmp_path):
     store = IndexStore(tmp_path, embedding_dim=4)
     store.load()
