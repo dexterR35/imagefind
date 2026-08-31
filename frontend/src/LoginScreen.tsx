@@ -1,5 +1,6 @@
 import { useState } from "react";
 import type { FormEvent } from "react";
+import { BrandMark } from "./BrandMark";
 
 interface LoginScreenProps {
   configured: boolean;
@@ -28,7 +29,7 @@ export function LoginScreen({ configured, onLogin }: LoginScreenProps) {
   return (
     <main className="auth-page">
       <section className="auth-card" aria-labelledby="auth-title">
-        <div className="auth-mark" aria-hidden="true">IF</div>
+        <BrandMark size={22} />
         <h1 id="auth-title">ImageFind</h1>
         <p className="auth-subtitle">Private image library</p>
         {configured ? (
@@ -46,7 +47,7 @@ export function LoginScreen({ configured, onLogin }: LoginScreenProps) {
               onChange={(event) => setPassword(event.target.value)}
             />
             {error && <p className="auth-error" role="alert">{error}</p>}
-            <button type="submit" disabled={submitting || !password}>
+            <button type="submit" className="btn-primary" disabled={submitting || !password}>
               {submitting ? "Signing in…" : "Sign in"}
             </button>
           </form>

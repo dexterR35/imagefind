@@ -74,7 +74,7 @@ export function ImageModal({ image, onClose, onFindSimilar }: Props) {
           </div>
         </div>
         <div className="modal-actions">
-          <button type="button" onClick={() => onFindSimilar(image.id)}>Find Similar</button>
+          <button type="button" className="btn-ghost" onClick={() => onFindSimilar(image.id)}>Find Similar</button>
           <a className="download-button primary" href={downloadUrl(image.id)} download>Download original</a>
         </div>
       </div>

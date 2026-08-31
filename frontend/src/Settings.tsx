@@ -251,11 +251,11 @@ export function Settings({
           {modelInstalled === false && (
             <div className="model-install">
               <span>RAM++ object-tagging model isn't installed yet.</span>
-              <button type="button" onClick={handleInstallModel} disabled={modelDownloading}>
+              <button type="button" className="btn-primary" onClick={handleInstallModel} disabled={modelDownloading}>
                 {modelDownloading ? "Installing..." : "Install RAM++ Model"}
               </button>
               {modelDownloading && modelStatus && !modelStatus.done && (
-                <button type="button" onClick={handleCancelInstallModel}>
+                <button type="button" className="btn-ghost" onClick={handleCancelInstallModel}>
                   Cancel
                 </button>
               )}
@@ -297,11 +297,12 @@ export function Settings({
               onChange={(e) => setCustomTagsText(e.target.value)}
             />
           </label>
-          <button type="button" onClick={handleSave} disabled={saving || reindexing}>
+          <button type="button" className="btn-primary" onClick={handleSave} disabled={saving || reindexing}>
             {saving ? "Saving..." : "Save"}
           </button>
           <button
             type="button"
+            className="btn-ghost"
             onClick={handleReindex}
             disabled={saving || reindexing || isTunnelAccess}
             title={isTunnelAccess ? "Reindexing is available only from the local app." : undefined}
@@ -313,7 +314,7 @@ export function Settings({
           )}
           {saveMessage && <span>{saveMessage}</span>}
           {reindexing && (
-            <button type="button" onClick={handleStopReindex} disabled={stopping}>
+            <button type="button" className="btn-ghost" onClick={handleStopReindex} disabled={stopping}>
               {stopping ? "Stopping..." : "Stop"}
             </button>
           )}

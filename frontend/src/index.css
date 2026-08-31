@@ -1,17 +1,34 @@
 :root {
-  --text: #6b6375;
-  --text-h: #08060d;
-  --bg: #fff;
-  --border: #e5e4e7;
-  --code-bg: #f4f3ec;
-  --accent: #aa3bff;
+  --bg: #0c0c0d;
+  --bg-raised: #141416;
+  --bg-panel: #1a1a1d;
+  --bg-input: #111113;
+  --bg-hover: #222226;
+  --border: #2a2a2e;
+  --border-strong: #3d3d44;
+  --text: #9a9aa3;
+  --text-h: #f5f5f6;
+  --text-muted: #6c6c75;
+  --accent: #c8ff00;
+  --accent-hover: #d6ff3d;
+  --accent-dim: rgba(200, 255, 0, 0.14);
+  --accent-ink: #111111;
+  --danger: #ff5c7a;
+  --danger-dim: rgba(255, 92, 122, 0.12);
+  --shadow: 0 18px 48px rgba(0, 0, 0, 0.45);
+  --radius: 8px;
+  --radius-sm: 6px;
+  --radius-lg: 14px;
+  --radius-pill: 999px;
+  --check-a: #1c1c1f;
+  --check-b: #151517;
 
-  --sans: system-ui, 'Segoe UI', Roboto, sans-serif;
-  --heading: system-ui, 'Segoe UI', Roboto, sans-serif;
+  --sans: Inter, system-ui, "Segoe UI", Roboto, sans-serif;
+  --heading: Inter, system-ui, "Segoe UI", Roboto, sans-serif;
 
-  font: 18px/145% var(--sans);
-  letter-spacing: 0.18px;
-  color-scheme: light dark;
+  font: 15px/145% var(--sans);
+  letter-spacing: 0.1px;
+  color-scheme: dark;
   color: var(--text);
   background: var(--bg);
   font-synthesis: none;
@@ -20,19 +37,14 @@
   -moz-osx-font-smoothing: grayscale;
 
   @media (max-width: 1024px) {
-    font-size: 16px;
+    font-size: 14px;
   }
 }
 
-@media (prefers-color-scheme: dark) {
-  :root {
-    --text: #9ca3af;
-    --text-h: #f3f4f6;
-    --bg: #16171d;
-    --border: #2e303a;
-    --code-bg: #1f2028;
-    --accent: #c084fc;
-  }
+*,
+*::before,
+*::after {
+  box-sizing: border-box;
 }
 
 #root {
@@ -40,29 +52,49 @@
   max-width: 100%;
   margin: 0 auto;
   text-align: center;
-  border-inline: 1px solid var(--border);
   min-height: 100svh;
   display: flex;
   flex-direction: column;
-  box-sizing: border-box;
+  background: var(--bg);
 }
 
 body {
   margin: 0;
+  background: var(--bg);
+  color: var(--text);
 }
 
 h1 {
   font-family: var(--heading);
-  font-weight: 500;
+  font-weight: 600;
   color: var(--text-h);
-  font-size: 56px;
-  letter-spacing: -1.68px;
-  margin: 32px 0;
-  @media (max-width: 1024px) {
-    font-size: 36px;
-    margin: 20px 0;
-  }
+  font-size: 20px;
+  letter-spacing: -0.4px;
+  margin: 0;
 }
+
 p {
   margin: 0;
+}
+
+button,
+input,
+select,
+textarea {
+  font: inherit;
+  color: inherit;
+}
+
+button {
+  cursor: pointer;
+}
+
+:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+
+::selection {
+  background: var(--accent);
+  color: var(--accent-ink);
 }

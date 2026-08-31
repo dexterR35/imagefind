@@ -11,6 +11,7 @@ import {
   type SearchFilters as Filters,
   type SortOption,
 } from "./api";
+import { BrandMark } from "./BrandMark";
 import { ImageGrid } from "./ImageGrid";
 import { LoginScreen } from "./LoginScreen";
 import { ImageModal } from "./ImageModal";
@@ -113,7 +114,11 @@ function Gallery({ onLogout }: { onLogout: () => void }) {
   return (
     <div className="app">
       <header className="app-header">
-        <h1>ImageFind</h1>
+        <div className="brand">
+          <BrandMark />
+          <h1>ImageFind</h1>
+          <span className="env-badge">{isTunnelAccess ? "TUNNEL" : "LOCAL"}</span>
+        </div>
         <div className="header-actions">
           {!isTunnelAccess && (
             <Settings onReindexComplete={() => runSearch(filters, sort, 1)} />
@@ -201,9 +206,10 @@ export default function App() {
     return (
       <main className="auth-page">
         <section className="auth-card" role="alert">
+          <BrandMark size={22} />
           <h1>ImageFind</h1>
           <p className="auth-error">{sessionError}</p>
-          <button type="button" onClick={() => setAttempt((value) => value + 1)}>Retry</button>
+          <button type="button" className="btn-primary" onClick={() => setAttempt((value) => value + 1)}>Retry</button>
         </section>
       </main>
     );

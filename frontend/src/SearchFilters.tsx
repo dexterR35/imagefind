@@ -53,7 +53,7 @@ export function SearchFilters({ onChange }: Props) {
       <input
         type="text"
         aria-label="Search images"
-        placeholder="Search filenames, text, objects, or colors..."
+        placeholder="chair, person, dog..."
         maxLength={200}
         value={text}
         onChange={(e) => setText(e.target.value)}

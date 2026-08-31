@@ -29,7 +29,7 @@ export function Pagination({ page, pageCount, onChange }: Props) {
 
   return (
     <nav className="pagination" aria-label="Search result pages">
-      <button type="button" onClick={() => onChange(page - 1)} disabled={page === 1}>
+      <button type="button" className="btn-ghost" onClick={() => onChange(page - 1)} disabled={page === 1}>
         Previous
       </button>
       <div className="page-numbers">
@@ -50,7 +50,7 @@ export function Pagination({ page, pageCount, onChange }: Props) {
           ),
         )}
       </div>
-      <button type="button" onClick={() => onChange(page + 1)} disabled={page === pageCount}>
+      <button type="button" className="btn-ghost" onClick={() => onChange(page + 1)} disabled={page === pageCount}>
         Next
       </button>
     </nav>
