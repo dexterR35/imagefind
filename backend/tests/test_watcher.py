@@ -1,3 +1,4 @@
+import os
 import threading
 import time
 from types import SimpleNamespace
@@ -131,6 +132,49 @@ def test_handler_on_modified_skips_reprocessing_an_already_indexed_unchanged_fil
 
     assert len(calls) == 1
     assert store.get_by_path(str(img_path)).id == "new1"
+
+
+def test_handler_on_modified_forces_same_name_replacement_once(tmp_path, monkeypatch):
+    images_dir = tmp_path / "images"
+    images_dir.mkdir()
+    index_dir = tmp_path / "index"
+    img_path = images_dir / "same-name.png"
+    Image.new("RGB", (32, 32), "red").save(img_path)
+
+    store = IndexStore(index_dir, embedding_dim=512)
+    store.load()
+    from app.storage import ImageEntry
+    stat = img_path.stat()
+    store.upsert(
+        ImageEntry(
+            id="same1", path=str(img_path), thumbnail_path=str(index_dir / "same.jpg"),
+            ocr_text="", colors=[], objects=[], mtime=stat.st_mtime, size=stat.st_size,
+            width=32, height=32, format="PNG", date_taken=stat.st_mtime, indexed_at=1.0,
+        ),
+        np.zeros(512, dtype=np.float32),
+    )
+    indexer = Indexer(images_dir, index_dir, store)
+    calls = []
+
+    def fake_index(path, settings=None, force=False, persist=True):
+        calls.append(force)
+        return True
+
+    monkeypatch.setattr(indexer, "index_path_if_needed", fake_index)
+    monkeypatch.setattr("app.watcher._STABLE_CHECK_INTERVAL", 0.01)
+    handler = _Handler(indexer)
+
+    handler.on_modified(_fake_event(img_path))
+    handler.on_modified(_fake_event(img_path))
+    assert calls == [True]
+
+    replacement = images_dir / "replacement.png"
+    Image.new("RGB", (32, 32), "blue").save(replacement)
+    os.replace(replacement, img_path)
+    handler.on_modified(_fake_event(img_path))
+    handler.on_modified(_fake_event(img_path))
+
+    assert calls == [True, True]
 
 
 def test_handler_ignores_non_image_and_directory_events(tmp_path, monkeypatch):

@@ -44,6 +44,12 @@ class _Handler(FileSystemEventHandler):
         submit: Callable[[_WorkKind, Path], None] | None = None,
     ):
         self._indexer = indexer
+        # Duplicate watchdog notifications for one write must not repeat the
+        # expensive model pipeline. A same-name replacement has a new stable
+        # inode/ctime signature even when SMB preserves its size and mtime.
+        self._last_processed_signatures: dict[
+            str, tuple[int, int, int, int]
+        ] = {}
         # Tests and direct callers remain synchronous; production passes the
         # queue's submit method so watchdog's OS event thread is never blocked
         # by OCR/RAM++ inference.
@@ -104,7 +110,22 @@ class _Handler(FileSystemEventHandler):
         if not _wait_until_stable(path, interval=_STABLE_CHECK_INTERVAL):
             return
         try:
-            self._indexer.index_path_if_needed(path)
+            stat = path.stat()
+            signature = (
+                stat.st_size,
+                getattr(stat, "st_mtime_ns", 0),
+                getattr(stat, "st_ctime_ns", 0),
+                getattr(stat, "st_ino", 0),
+            )
+            key = str(path)
+            if self._last_processed_signatures.get(key) == signature:
+                return
+            # A real filesystem notification is stronger evidence than the
+            # reconciliation scan's deliberately tolerant SMB mtime check.
+            # Force an existing path once for each new stable signature.
+            force = self._indexer.store.get_by_path(key) is not None
+            self._indexer.index_path_if_needed(path, force=force)
+            self._last_processed_signatures[key] = signature
         except (FileNotFoundError, OSError):
             # A newer rename/delete event will handle a file that disappeared
             # while this older create/modify event was waiting in the queue.
@@ -118,6 +139,7 @@ class _Handler(FileSystemEventHandler):
         # A stale delete event is also ignored if the path exists again.
         if not self._indexer.images_dir.is_dir() or path.exists():
             return
+        self._last_processed_signatures.pop(str(path), None)
         self._indexer.delete_path(path)
 
     def _process_directory(self, path: Path) -> None:

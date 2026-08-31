@@ -151,7 +151,12 @@ if config.ENABLE_WATCHER:
 
 def _entry_to_dict(e) -> dict:
     return {
-        "id": e.id, "path": e.path, "thumbnail_url": f"/thumbnail/{e.id}",
+        # Replacements retain their image id and overwrite the same thumbnail
+        # file. A versioned URL makes browsers fetch the new bytes immediately
+        # instead of serving the old cached /thumbnail/{id} response.
+        "id": e.id,
+        "path": e.path,
+        "thumbnail_url": f"/thumbnail/{e.id}?v={int(e.indexed_at * 1000)}",
         "ocr_text": e.ocr_text, "colors": e.colors, "objects": e.objects,
         "width": e.width, "height": e.height, "format": e.format,
         "size": e.size, "mtime": e.mtime, "date_taken": e.date_taken,
