@@ -157,7 +157,7 @@ def _entry_to_dict(e) -> dict:
         "id": e.id,
         "path": e.path,
         "thumbnail_url": f"/thumbnail/{e.id}?v={int(e.indexed_at * 1000)}",
-        "ocr_text": e.ocr_text, "colors": e.colors, "objects": e.objects,
+        "ocr_text": e.ocr_text, "objects": e.objects,
         "width": e.width, "height": e.height, "format": e.format,
         "size": e.size, "mtime": e.mtime, "date_taken": e.date_taken,
         "indexed_at": e.indexed_at,
@@ -435,7 +435,6 @@ def health():
 def search_endpoint(
     request: Request,
     text: str | None = Query(None, max_length=200),
-    color: str | None = Query(None, max_length=64),
     object: str | None = Query(None, max_length=128),
     sort: SortOption = "date_desc",
     offset: int = Query(0, ge=0, le=10_000_000),
@@ -443,10 +442,9 @@ def search_endpoint(
 ):
     _enforce_search_rate_limit(request)
     text = _sanitize_search_value(text, "text")
-    color = _sanitize_search_value(color, "color")
     object = _sanitize_search_value(object, "object")
     results, total = run_search(
-        store, text=text, color=color, obj=object, sort=sort, offset=offset, limit=limit
+        store, text=text, obj=object, sort=sort, offset=offset, limit=limit
     )
     return {"results": [_entry_to_dict(e) for e in results], "total": total}
 
@@ -545,11 +543,6 @@ def download_endpoint(request: Request, image_id: str):
         filename=original.name,
         headers={"Cache-Control": "private, max-age=3600"},
     )
-
-
-@app.get("/colors")
-def colors_endpoint():
-    return store.distinct_colors()
 
 
 @app.get("/objects")

@@ -12,7 +12,7 @@ from app.storage import ImageEntry, IndexStore
 def _entry(path="/imgs/a.png", mtime=0.0, size=0, id="a1", **kwargs):
     return ImageEntry(
         id=id, path=path, thumbnail_path=f"/thumbs/{id}.jpg",
-        ocr_text="NETBET", colors=["green"], objects=["clover"],
+        ocr_text="NETBET", objects=["clover"],
         mtime=mtime, size=size, **kwargs,
     )
 
@@ -28,7 +28,7 @@ def test_upsert_save_load_roundtrip(tmp_path):
     assert reloaded.get("a1").ocr_text == "NETBET"
     assert reloaded.get_embedding("a1").tolist() == [1.0, 0.0, 0.0, 0.0]
     assert reloaded.get_by_path("/imgs/a.png").id == "a1"
-    assert reloaded._conn.execute("PRAGMA user_version").fetchone()[0] == 3
+    assert reloaded._conn.execute("PRAGMA user_version").fetchone()[0] == 4
 
 
 def test_upsert_save_load_roundtrip_preserves_new_metadata_fields(tmp_path):
@@ -76,6 +76,8 @@ def test_opening_a_pre_metadata_schema_db_migrates_columns_without_losing_data(t
     assert entry.ocr_text == "NETBET"
     assert (entry.width, entry.height, entry.format) == (0, 0, "")
     assert (entry.date_taken, entry.indexed_at) == (0.0, 0.0)
+    assert "colors" not in {row[1] for row in store._conn.execute("PRAGMA table_info(images)")}
+    assert store._conn.execute("SELECT 1 FROM sqlite_master WHERE name='image_colors'").fetchone() is None
 
     # And the migrated schema must accept new writes with the new columns.
     store.upsert(_entry(id="b1", path="/imgs/b.png", width=10, height=20), np.zeros(4, dtype=np.float32))
@@ -243,7 +245,7 @@ def test_database_locked_error_is_not_misclassified_as_corruption(tmp_path, monk
 def test_migrates_legacy_json_and_npy_on_first_load(tmp_path):
     legacy_entry = {
         "id": "a1", "path": "/imgs/a.png", "thumbnail_path": "/thumbs/a1.jpg",
-        "ocr_text": "NETBET", "colors": ["green"], "objects": ["clover"],
+        "ocr_text": "NETBET", "objects": ["clover"],
         "mtime": 123.0, "size": 456,
     }
     (tmp_path / "index.json").write_text(json.dumps([legacy_entry]))
@@ -271,7 +273,7 @@ def test_migration_skips_on_unreadable_json(tmp_path):
 def test_migration_skips_on_corrupted_embeddings_npy(tmp_path):
     legacy_entry = {
         "id": "a1", "path": "/imgs/a.png", "thumbnail_path": "/thumbs/a1.jpg",
-        "ocr_text": "NETBET", "colors": ["green"], "objects": ["clover"],
+        "ocr_text": "NETBET", "objects": ["clover"],
         "mtime": 123.0, "size": 456,
     }
     (tmp_path / "index.json").write_text(json.dumps([legacy_entry]))
@@ -287,7 +289,7 @@ def test_migration_skips_on_corrupted_embeddings_npy(tmp_path):
 def test_migration_skips_on_truncated_embeddings_npy(tmp_path):
     legacy_entry = {
         "id": "a1", "path": "/imgs/a.png", "thumbnail_path": "/thumbs/a1.jpg",
-        "ocr_text": "NETBET", "colors": ["green"], "objects": ["clover"],
+        "ocr_text": "NETBET", "objects": ["clover"],
         "mtime": 123.0, "size": 456,
     }
     (tmp_path / "index.json").write_text(json.dumps([legacy_entry]))
@@ -304,7 +306,7 @@ def test_migration_skips_on_truncated_embeddings_npy(tmp_path):
 def test_migration_skips_on_length_mismatch(tmp_path):
     legacy_entry = {
         "id": "a1", "path": "/imgs/a.png", "thumbnail_path": "/thumbs/a1.jpg",
-        "ocr_text": "NETBET", "colors": ["green"], "objects": ["clover"],
+        "ocr_text": "NETBET", "objects": ["clover"],
         "mtime": 123.0, "size": 456,
     }
     (tmp_path / "index.json").write_text(json.dumps([legacy_entry]))
@@ -322,7 +324,7 @@ def test_migration_skips_on_missing_required_field(tmp_path):
     # Entry missing 'size' field which is required
     legacy_entry = {
         "id": "a1", "path": "/imgs/a.png", "thumbnail_path": "/thumbs/a1.jpg",
-        "ocr_text": "NETBET", "colors": ["green"], "objects": ["clover"],
+        "ocr_text": "NETBET", "objects": ["clover"],
         "mtime": 123.0,
         # 'size' is missing!
     }
@@ -363,7 +365,7 @@ def test_migration_marker_prevents_resurrecting_legitimately_pruned_entries(tmp_
     # in-memory table is legitimately empty again.
     legacy_entry = {
         "id": "a1", "path": "/imgs/a.png", "thumbnail_path": "/thumbs/a1.jpg",
-        "ocr_text": "NETBET", "colors": ["green"], "objects": ["clover"],
+        "ocr_text": "NETBET", "objects": ["clover"],
         "mtime": 123.0, "size": 456,
     }
     (tmp_path / "index.json").write_text(json.dumps([legacy_entry]))
@@ -412,11 +414,11 @@ def test_migration_logs_warning_on_duplicate_ids_but_keeps_last(tmp_path, caplog
     legacy_entries = [
         {
             "id": "a1", "path": "/imgs/a.png", "thumbnail_path": "/thumbs/a1.jpg",
-            "ocr_text": "first", "colors": [], "objects": [], "mtime": 1.0, "size": 1,
+            "ocr_text": "first", "objects": [], "mtime": 1.0, "size": 1,
         },
         {
             "id": "a1", "path": "/imgs/a2.png", "thumbnail_path": "/thumbs/a1b.jpg",
-            "ocr_text": "second", "colors": [], "objects": [], "mtime": 2.0, "size": 2,
+            "ocr_text": "second", "objects": [], "mtime": 2.0, "size": 2,
         },
     ]
     (tmp_path / "index.json").write_text(json.dumps(legacy_entries))
@@ -449,9 +451,9 @@ def test_load_recovers_from_malformed_embedding_blob(tmp_path):
     # itemsize, so np.frombuffer raises ValueError on it.
     store._conn.execute(
         "INSERT INTO images "
-        "(id, path, thumbnail_path, ocr_text, colors, objects, mtime, size, embedding) "
-        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
-        ("bad1", "/imgs/bad.png", "/thumbs/bad.jpg", "", "[]", "[]", 0.0, 0, b"short"),
+        "(id, path, thumbnail_path, ocr_text, objects, mtime, size, embedding) "
+        "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+        ("bad1", "/imgs/bad.png", "/thumbs/bad.jpg", "", "[]", 0.0, 0, b"short"),
     )
     store._conn.commit()
 

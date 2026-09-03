@@ -44,7 +44,6 @@ function registerLiveImage(filePath) {
       path: resolved,
       thumbnail_url: "/thumbnail/" + encodeURIComponent(id),
       ocr_text: "",
-      colors: [],
       objects: [],
       mtime: stat.mtimeMs / 1000,
       size: stat.size,
@@ -62,9 +61,8 @@ function registerLiveImage(filePath) {
 
 function matchingLiveImages(url) {
   const text = String(url.searchParams.get("text") || "").trim().toLowerCase();
-  const color = url.searchParams.get("color");
   const object = url.searchParams.get("object");
-  if (color || object) return [];
+  if (object) return [];
   const terms = text.split(/\s+/).filter(Boolean);
   const entries = Array.from(LIVE_IMAGES.values()).filter((entry) => {
     const haystack = (entry.path + " " + path.basename(entry.path)).toLowerCase();

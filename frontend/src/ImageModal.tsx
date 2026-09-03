@@ -64,12 +64,6 @@ export function ImageModal({ image, onClose, onFindSimilar }: Props) {
             <div className="tag-list">
               {image.objects.length > 0 ? image.objects.map((object) => <span key={object}>{object}</span>) : <p>None detected</p>}
             </div>
-            <h3>Dominant colors</h3>
-            <div className="tag-list color-tags">
-              {image.colors.length > 0 ? image.colors.map((color) => (
-                <span key={color}><i style={{ backgroundColor: color }} />{color}</span>
-              )) : <p>None detected</p>}
-            </div>
             {image.ocr_text && <><h3>Detected text</h3><p className="ocr-text">{image.ocr_text}</p></>}
           </div>
         </div>

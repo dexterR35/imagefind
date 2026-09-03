@@ -10,7 +10,6 @@ function image(id: string): ImageResult {
     path: `/imgs/${id}.png`,
     thumbnail_url: `http://localhost:8000/thumbnail/${id}`,
     ocr_text: "",
-    colors: [],
     objects: [],
     width: 100,
     height: 80,
@@ -34,9 +33,8 @@ describe("App", () => {
   });
 
   it("runs a search on filter change and opens Find Similar results", async () => {
-    vi.spyOn(api, "fetchColors").mockResolvedValue(["green"]);
-    vi.spyOn(api, "fetchObjects").mockResolvedValue(["clover"]);
-    const result = { ...image("a1"), path: "/imgs/clover.png", colors: ["green"], objects: ["clover"] };
+    vi.spyOn(api, "fetchObjects").mockResolvedValue([]);
+    const result = { ...image("a1"), path: "/imgs/clover.png", objects: ["clover"] };
     vi.spyOn(api, "search").mockResolvedValue({ results: [result], total: 1 });
     vi.spyOn(api, "findSimilar").mockResolvedValue([result]);
 
@@ -54,7 +52,6 @@ describe("App", () => {
   });
 
   it("shows an inline error state when search fails, and clears it once a search succeeds", async () => {
-    vi.spyOn(api, "fetchColors").mockResolvedValue([]);
     vi.spyOn(api, "fetchObjects").mockResolvedValue([]);
     const searchSpy = vi.spyOn(api, "search").mockRejectedValue(new Error("boom"));
 
@@ -72,7 +69,6 @@ describe("App", () => {
   });
 
   it("guards against an out-of-order search response overwriting a newer one", async () => {
-    vi.spyOn(api, "fetchColors").mockResolvedValue(["green"]);
     vi.spyOn(api, "fetchObjects").mockResolvedValue([]);
 
     const imageA = image("a");
@@ -85,14 +81,15 @@ describe("App", () => {
 
     vi.spyOn(api, "search")
       .mockResolvedValueOnce({ results: [], total: 0 }) // initial mount search
-      .mockImplementationOnce(() => staleResponse) // color -> "green": stale, resolves late
-      .mockResolvedValueOnce({ results: [imageB], total: 1 }); // color -> undefined: fresher, resolves first
+      .mockImplementationOnce(() => staleResponse) // first sort: stale, resolves late
+      .mockResolvedValueOnce({ results: [imageB], total: 1 }); // second sort: fresher, resolves first
 
     render(<App />);
-    const swatch = await screen.findByLabelText("green");
+    const sortControl = await screen.findByLabelText("Sort by");
 
-    fireEvent.click(swatch); // fires the stale (slow) request
-    fireEvent.click(swatch); // fires the fresh (fast) request
+    fireEvent.change(sortControl, { target: { value: "name_asc" } }); // stale request
+    await waitFor(() => expect(api.search).toHaveBeenCalledTimes(2));
+    fireEvent.change(sortControl, { target: { value: "name_desc" } }); // fresh request
 
     await waitFor(() => expect(screen.getByAltText("b.png")).toBeInTheDocument());
 
@@ -104,7 +101,6 @@ describe("App", () => {
   });
 
   it("requests another page and applies the selected sort", async () => {
-    vi.spyOn(api, "fetchColors").mockResolvedValue([]);
     vi.spyOn(api, "fetchObjects").mockResolvedValue([]);
     const searchSpy = vi.spyOn(api, "search")
       .mockResolvedValueOnce({ results: [image("first")], total: 61 })
@@ -146,7 +142,6 @@ describe("App", () => {
       csrf_token: "csrf-after-login",
     });
     vi.spyOn(api, "logout").mockResolvedValue();
-    vi.spyOn(api, "fetchColors").mockResolvedValue([]);
     vi.spyOn(api, "fetchObjects").mockResolvedValue([]);
     vi.spyOn(api, "search").mockResolvedValue({ results: [], total: 0 });
 

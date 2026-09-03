@@ -18,7 +18,7 @@ def make_thumbnail(
     flatten_to_rgb) that the indexer decoded once and shares across the whole
     pipeline - it saves re-reading the original file from disk here. It is
     copied before .thumbnail() because that call resizes in place and the
-    caller keeps using the same object for colours/embedding/tagging.
+    caller keeps using the same object for embedding and tagging.
     """
     dest_path = Path(dest_path)
     dest_path.parent.mkdir(parents=True, exist_ok=True)

@@ -90,14 +90,6 @@ RAM_CUSTOM_TAG_THRESHOLD = float(os.environ.get("RAM_CUSTOM_TAG_THRESHOLD", "0.2
 # text embedding to build a more accurate match target for that tag.
 RAM_CUSTOM_TAG_REFERENCE_DIR = Path(os.environ.get("RAM_CUSTOM_TAG_REFERENCE_DIR", "reference_tags"))
 
-# How many dominant-color clusters to look for per image, and how big a
-# share of the image a color must cover to be reported. Busy images (many
-# small UI elements/icons of different colors) benefit from a higher
-# COLOR_CLUSTERS and/or a lower COLOR_MIN_SHARE so smaller color regions
-# (e.g. a green accent) don't get merged away or filtered out.
-COLOR_CLUSTERS = int(os.environ.get("COLOR_CLUSTERS", "4"))
-COLOR_MIN_SHARE = float(os.environ.get("COLOR_MIN_SHARE", "0.08"))
-
 # DAM-style real-time indexing: a watchdog observer processes new/changed
 # files as they land instead of waiting for a manual reindex. Enabled for the
 # application by default; automated tests explicitly disable background

@@ -3,7 +3,6 @@ export interface ImageResult {
   path: string;
   thumbnail_url: string;
   ocr_text: string;
-  colors: string[];
   objects: string[];
   width: number;
   height: number;
@@ -16,7 +15,6 @@ export interface ImageResult {
 
 export interface SearchFilters {
   text?: string;
-  color?: string;
   object?: string;
 }
 
@@ -116,12 +114,6 @@ async function errorDetail(res: Response): Promise<string> {
   return res.statusText || `status ${res.status}`;
 }
 
-export async function fetchColors(): Promise<string[]> {
-  const res = await apiFetch(`${BASE_URL}/colors`);
-  if (!res.ok) throw new Error(`fetch colors failed: ${res.status}`);
-  return res.json();
-}
-
 export async function fetchObjects(): Promise<string[]> {
   const res = await apiFetch(`${BASE_URL}/objects`);
   if (!res.ok) throw new Error(`fetch objects failed: ${res.status}`);
@@ -142,7 +134,6 @@ export async function search(
 ): Promise<SearchResponse> {
   const params = new URLSearchParams();
   if (filters.text) params.set("text", filters.text);
-  if (filters.color) params.set("color", filters.color);
   if (filters.object) params.set("object", filters.object);
   if (options.sort) params.set("sort", options.sort);
   if (options.offset !== undefined) params.set("offset", String(options.offset));

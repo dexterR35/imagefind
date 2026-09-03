@@ -31,7 +31,7 @@ def _fake_process_image(index_dir):
         entry = ImageEntry(
             id=path.name, path=str(path),
             thumbnail_path=str(index_dir / "thumbnails" / f"{path.name}.jpg"),
-            ocr_text="", colors=[], objects=[], mtime=stat.st_mtime, size=stat.st_size,
+            ocr_text="", objects=[], mtime=stat.st_mtime, size=stat.st_size,
             width=64, height=64, format="PNG", date_taken=stat.st_mtime, indexed_at=1.0,
         )
         return entry, np.zeros(512, dtype=np.float32)
@@ -100,7 +100,7 @@ def test_cleanup_orphan_thumbnails_preserves_referenced_cache(tmp_path):
     store.upsert(
         ImageEntry(
             id="keep", path=str(images_dir / "keep.png"), thumbnail_path=str(referenced),
-            ocr_text="", colors=[], objects=[], mtime=0.0, size=0,
+            ocr_text="", objects=[], mtime=0.0, size=0,
         ),
         np.zeros(512, dtype=np.float32),
     )
@@ -440,7 +440,7 @@ def test_run_reindex_snapshots_settings_once_at_start(tmp_path, monkeypatch):
     store.load()
     indexer = Indexer(images_dir, index_dir, store)
 
-    original_clusters = config.COLOR_CLUSTERS
+    original_confidence = config.RAM_CONFIDENCE
     fake_process = _fake_process_image(index_dir)
     captured = []
 
@@ -448,7 +448,7 @@ def test_run_reindex_snapshots_settings_once_at_start(tmp_path, monkeypatch):
         captured.append(settings)
         # A settings change "arriving" mid-run must not affect a snapshot
         # already taken at the start of run_reindex.
-        monkeypatch.setattr(config, "COLOR_CLUSTERS", 999)
+        monkeypatch.setattr(config, "RAM_CONFIDENCE", 0.999)
         return fake_process(path, settings)
 
     monkeypatch.setattr(indexer, "process_image", process_and_mutate_config)
@@ -457,7 +457,7 @@ def test_run_reindex_snapshots_settings_once_at_start(tmp_path, monkeypatch):
     indexer.run_reindex(job)
 
     assert len(captured) == 1
-    assert captured[0].color_clusters == original_clusters
+    assert captured[0].ram_confidence == original_confidence
 
 
 def test_run_reindex_snapshots_custom_tags_once_at_start(tmp_path, monkeypatch):

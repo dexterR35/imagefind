@@ -12,7 +12,6 @@ ImageFind turns a folder of images (a local disk or a mapped NAS share) into a
 
 - what **objects and scenes** are in it (a model, no manual tagging)
 - any **text printed inside** the image (OCR)
-- its **dominant colors**
 - a **visual fingerprint** (embedding) used for "find images that look like this"
 - file facts: name, full path, size, dimensions, format, capture date
 
@@ -33,7 +32,7 @@ filenames don't help. Typical situations:
 
 | Situation | How ImageFind helps |
 |---|---|
-| Marketing / creative team with years of campaign exports on a NAS | Find the storyboard by a word on it, or every "green + clover" asset |
+| Marketing / creative team with years of campaign exports on a NAS | Find the storyboard by a word on it, or every asset tagged `clover` |
 | A photo archive with generic names (`IMG_4821.jpg`) | Search by what's *in* the photo — "beach", "dog", "car" |
 | Screenshots and design mockups | OCR makes the on-screen text searchable |
 | "We made a banner with a coin and a pot of gold last year" | Object tags (`coin`, `pot of gold`) find it without the path |
@@ -52,16 +51,15 @@ running one image at a time:
 1. Reads the file **once** and applies EXIF rotation so a sideways phone photo is
    catalogued the way it displays.
 2. Writes a ≤320px **thumbnail** (JPEG) into `backend/.index/thumbnails/`.
-3. Extracts **dominant colors** with K-means (transparent pixels ignored).
-4. Computes the **CLIP embedding** (512 numbers) for similarity search.
-5. Runs **OCR** to pull out any printed text.
-6. Runs **RAM++** to get object/scene tags; generic tags like `photo` /
+3. Computes the **CLIP embedding** (512 numbers) for similarity search.
+4. Runs **OCR** to pull out any printed text.
+5. Runs **RAM++** to get object/scene tags; generic tags like `photo` /
    `illustration` / `white background` are dropped
    (`RAM_TAG_DENYLIST`).
-7. If you configured **custom tags**, matches each against the image
+6. If you configured **custom tags**, matches each against the image
    (see [Section 8](#8-custom-tags)).
-8. Stores one row: metadata + `ocr_text` + `colors` + `objects` (RAM++ tags and
-   custom tags combined) + the embedding, plus derived full-text and vector
+7. Stores one row: metadata + `ocr_text` + `objects` (RAM++ tags and custom
+   tags combined) + the embedding, plus derived full-text and vector
    indexes.
 
 A re-index skips a file whose size and modification time are unchanged (with a
@@ -82,13 +80,12 @@ scan never triggers deletion of existing entries.
 | **RAM++** (Recognize Anything Plus, Swin-L backbone) | Open-vocabulary **object & scene tags** — `cat`, `coin`, `clover`, `beach`, `person`, `pot of gold` … no vocabulary to configure | Main search box (tag text) and the **Object** filter | During indexing only. The ~3 GB checkpoint is installed from Settings and unloaded when indexing is idle. |
 | **OpenCLIP ViT-B/32** (`openai` weights) | A **512-d image embedding** per image; also text embeddings on demand | **Find Similar** (image↔image cosine nearest-neighbor) and **custom-tag** matching (image↔text) | Embedding: during indexing. Text side: when a custom tag is evaluated. Model stays loaded. |
 | **EasyOCR** (English) | **Text read from the pixels** of the image | Main search box (OCR text) | During indexing only. Model stays loaded. |
-| **K-means** (scikit-learn, not a neural net) | Up to `COLOR_CLUSTERS` **dominant colors**, mapped to 12 names: red, orange, yellow, gold, green, blue, purple, pink, brown, black, white, gray | Main search box (color words) and the **Color** filter | During indexing only. |
 
 Supporting infrastructure (not models):
 
 | Component | Role |
 |---|---|
-| **SQLite FTS5** (trigram tokenizer) | Fast substring/partial text search over filename, path, OCR text, tags, colors; bm25 relevance ranking |
+| **SQLite FTS5** (trigram tokenizer) | Fast substring/partial text search over filename, path, OCR text, and tags; bm25 relevance ranking |
 | **sqlite-vec** (`vec0` virtual table) | Cosine nearest-neighbor over the CLIP embeddings, for Find Similar |
 | **Watchdog** | Real-time filesystem events (add / change / move / delete) |
 
@@ -111,14 +108,13 @@ One box searches these fields together:
 - **Full folder path**
 - **OCR text** (words printed in the image)
 - **Object tags** — RAM++ tags *and* your custom tags
-- **Dominant colors**
 
 Rules:
 
 | Query shape | Behavior |
 |---|---|
 | One word, 3+ chars (`clover`) | Trigram match across all fields. Results ranked by **relevance** (bm25) when the sort is left on the default; whole-word hits are floated above matches that only occur *inside* a longer word. |
-| Multiple words (`red cat`) | Each word 3+ chars becomes its own term, **AND-ed**: the image must match `red` somewhere **and** `cat` somewhere. Words shorter than 3 chars are ignored (`a red cat` → `red` AND `cat`). |
+| Multiple words (`bonus cat`) | Each word 3+ chars becomes its own term, **AND-ed**: the image must match `bonus` somewhere **and** `cat` somewhere. Words shorter than 3 chars are ignored (`a big cat` keeps `big` AND `cat`). |
 | 1–2 chars only (`AI`, `3`) | Falls back to a plain case-insensitive substring scan over the same fields (no ranking). |
 | FTS punctuation (`"`, `*`, `OR`, `NEAR(`) | Treated as literal text, never as query syntax. |
 
@@ -127,14 +123,13 @@ query is parameterized — nothing you type can become SQL or FTS syntax. Typing
 is debounced in the browser and stale requests are cancelled; the server also
 limits each client to 30 searches per 10 seconds.
 
-### The Object and Color filters
+### The Object filter
 
 - **Object** dropdown = an **exact tag match** (`label = 'cat'`), not a substring.
   Use it when a loose text match for `cat` would also hit `catalog.png` or a
   `.../vacation/` folder.
-- **Color** dropdown = an exact match on one of the 12 dominant-color names.
-- Text, Object, and Color **combine with AND**. `bonus` + object `person` +
-  color `red` returns only images matching all three.
+- Text and Object **combine with AND**. `bonus` + object `person` returns only
+  images matching both conditions.
 
 ### Sorting
 
@@ -183,23 +178,13 @@ and `.../vacation/`.)
 → One box: `cat 500` (AND of both terms), **or** Object filter `cat` + search
 box `500`. The second is sharper because `cat` is then an exact tag.
 
-### E. Object *and* color together
+### E. Multiple conditions
 
-> A **red** **cat** picture.
+> A **bonus** creative with a **person** in it.
 
-→ One box: `red cat`, **or** search box `cat` + Color filter `red`.
-Note: this finds *an image that contains a cat and whose palette includes red* —
-it does not verify the cat itself is red (a black cat on a red sofa still
-matches). There is no per-object color anywhere in the app.
+→ Search box: `bonus`, Object filter: `person`. Both conditions are AND-ed.
 
-### F. Multiple conditions
-
-> A **bonus** creative with a **person** in it that uses **green**.
-
-→ Search box: `bonus`, Object filter: `person`, Color filter: `green`. All
-AND-ed.
-
-### G. Find by folder / campaign
+### F. Find by folder / campaign
 
 > Everything under the **Welcome Pack** campaign folder.
 
@@ -207,29 +192,21 @@ AND-ed.
 appear (path separators count as spaces, so `Welcome Pack` matches
 `.../Welcome Pack/...` but also `.../Welcome/.../Pack/...`).
 
-### H. Color only
-
-> All the **gold** assets.
-
-→ **Color** filter: `gold`. (`gold` is distinguished from `yellow` by
-saturation/brightness.) Or type `gold` in the box to also catch "gold" in
-filenames and OCR.
-
-### I. Short term
+### G. Short term
 
 > Anything mentioning **AI**.
 
 → Search box: `AI` — 2 chars, so it's a substring scan over all fields
-(filename, path, OCR, tags, colors). No relevance ranking, but it works.
+(filename, path, OCR, and tags). No relevance ranking, but it works.
 
-### J. More like this one
+### H. More like this one
 
 > You found the perfect hero image and want alternates.
 
 → Open it → **Find Similar**. Returns the 20 closest by visual embedding.
 Unlike text search this *is* semantic — lighting, composition, subject.
 
-### K. A named character or brand not in RAM++'s vocabulary
+### I. A named character or brand not in RAM++'s vocabulary
 
 > Images of **Zeus** (a specific mascot).
 
@@ -238,12 +215,11 @@ images in `backend/reference_tags/zeus/`, then Save & Reindex. Afterwards
 `zeus` works in the search box and the Object filter like any other tag.
 See [Section 8](#8-custom-tags).
 
-### L. Narrow a big result set
+### J. Narrow a big result set
 
 > `logo` returns 4,000 images.
 
-→ Add a color (`logo` + `blue`), an object (`logo` + object `text`), or switch
-sort to Largest first to get print-resolution files on top. With the default
+→ Add an object (`logo` + object `text`) or switch sort to Largest first to get print-resolution files on top. With the default
 sort, the most on-topic `logo` matches are already ranked first.
 
 ---
@@ -291,13 +267,11 @@ separators or `..`.
   is no LLM. If you ever want "ask a question, get a sentence about your
   library," that would be a new layer built *on top of* this search — the
   indexing pipeline is already the retrieval half.
-- **No per-object color.** Colors are whole-image. "red cat" = cat present +
-  red present, not "a cat that is red."
 - **No semantic text search.** `clover` matches the literal tag/word, not
   "things that evoke clovers." Semantic matching is Find Similar only.
 - **Trigram substring matching.** A 3+ char term can match inside a longer word
   (`cat` inside `communication`, `500` inside `1500`). Relevance ranking and the
-  whole-word boost push true matches up, and the Object/Color filters are exact,
+  whole-word boost push true matches up, and the Object filter is exact,
   but the text box itself is substring-based by design (so partial words work).
 - **English OCR only.**
 - **Formats:** PNG, JPG/JPEG, WebP, BMP. No HEIC/HEIF, TIFF, GIF, AVIF.

@@ -5,8 +5,7 @@ import type { ImageResult } from "./api";
 
 const sample: ImageResult[] = [
   {
-    id: "a1", path: "/imgs/clover.png", thumbnail_url: "/thumbnail/a1", ocr_text: "",
-    colors: ["green"], objects: ["clover"],
+    id: "a1", path: "/imgs/clover.png", thumbnail_url: "/thumbnail/a1", ocr_text: "", objects: ["clover"],
     width: 1920, height: 1080, format: "PNG", size: 2048,
     mtime: 1, date_taken: 1, indexed_at: 2,
   },

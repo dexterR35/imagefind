@@ -5,7 +5,7 @@ import { ImageModal } from "./ImageModal";
 
 const image: ImageResult = {
   id: "a1", path: "/imgs/clover.png", thumbnail_url: "http://localhost:8000/thumbnail/a1",
-  ocr_text: "NETBET", colors: ["green"], objects: ["clover"],
+  ocr_text: "NETBET", objects: ["clover"],
   width: 1920, height: 1080, format: "PNG", size: 2048,
   mtime: 1_700_000_000, date_taken: 1_699_000_000, indexed_at: 1_700_000_100,
 };

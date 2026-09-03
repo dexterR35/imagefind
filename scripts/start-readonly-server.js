@@ -13,7 +13,7 @@ const PORT = Number(process.env.IMAGEFIND_PORT || 8787);
 const SESSION_TTL_SECONDS = 7 * 24 * 60 * 60;
 const SESSION_COOKIE = "imagefind_session";
 const SELECT_COLUMNS = [
-  "id", "path", "thumbnail_path", "ocr_text", "colors", "objects", "mtime", "size",
+  "id", "path", "thumbnail_path", "ocr_text", "objects", "mtime", "size",
   "width", "height", "format", "date_taken", "indexed_at",
 ].map((column) => `images.${column}`).join(", ");
 const SORTS = {
@@ -164,7 +164,7 @@ function cleanSearchValue(value, maxLength) {
 function rowToResult(row) {
   return {
     id: row.id, path: row.path, thumbnail_url: `/thumbnail/${encodeURIComponent(row.id)}`,
-    ocr_text: row.ocr_text, colors: JSON.parse(row.colors), objects: JSON.parse(row.objects),
+    ocr_text: row.ocr_text, objects: JSON.parse(row.objects),
     mtime: row.mtime, size: row.size, width: row.width, height: row.height, format: row.format,
     date_taken: row.date_taken, indexed_at: row.indexed_at,
   };
@@ -172,7 +172,6 @@ function rowToResult(row) {
 
 function searchImages(url) {
   const text = cleanSearchValue(url.searchParams.get("text"), 200);
-  const color = cleanSearchValue(url.searchParams.get("color"), 64);
   const object = cleanSearchValue(url.searchParams.get("object"), 128);
   const sort = SORTS[url.searchParams.get("sort")] ? url.searchParams.get("sort") : "date_desc";
   const offset = Math.min(10000000, Math.max(0, Number(url.searchParams.get("offset")) || 0));
@@ -186,12 +185,8 @@ function searchImages(url) {
     clauses.push("image_fts MATCH ?");
     params.push(terms.map((term) => `"${term.replaceAll('"', '""')}"`).join(" AND "));
   } else if (text) {
-    clauses.push("(instr(lower(images.filename),lower(?))>0 OR instr(lower(images.path),lower(?))>0 OR instr(lower(images.ocr_text),lower(?))>0 OR EXISTS (SELECT 1 FROM image_objects o WHERE o.image_id=images.id AND instr(lower(o.label),lower(?))>0) OR EXISTS (SELECT 1 FROM image_colors c WHERE c.image_id=images.id AND instr(lower(c.color),lower(?))>0))");
-    params.push(text, text, text, text, text);
-  }
-  if (color) {
-    clauses.push("EXISTS (SELECT 1 FROM image_colors c WHERE c.image_id=images.id AND c.color=?)");
-    params.push(color);
+    clauses.push("(instr(lower(images.filename),lower(?))>0 OR instr(lower(images.path),lower(?))>0 OR instr(lower(images.ocr_text),lower(?))>0 OR EXISTS (SELECT 1 FROM image_objects o WHERE o.image_id=images.id AND instr(lower(o.label),lower(?))>0))");
+    params.push(text, text, text, text);
   }
   if (object) {
     clauses.push("EXISTS (SELECT 1 FROM image_objects o WHERE o.image_id=images.id AND o.label=?)");
@@ -329,10 +324,6 @@ async function handle(req, res) {
   if (req.method === "GET" && pathname.startsWith("/search/similar/")) {
     const results = similarImages(pathname.slice("/search/similar/".length));
     sendJson(req, res, results ? 200 : 404, results || { detail: "image not found" });
-    return;
-  }
-  if (req.method === "GET" && pathname === "/colors") {
-    sendJson(req, res, 200, indexDb.prepare("SELECT DISTINCT color FROM image_colors ORDER BY color").all().map((row) => row.color));
     return;
   }
   if (req.method === "GET" && pathname === "/objects") {

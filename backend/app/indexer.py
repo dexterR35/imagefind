@@ -9,7 +9,6 @@ from pathlib import Path
 import numpy as np
 from PIL import Image, ImageOps
 
-from . import colors as colors_mod
 from . import config
 from . import embeddings
 from . import image_utils
@@ -53,8 +52,6 @@ class ReindexSettings:
     ram_confidence: float | None
     custom_tags: list[str]
     custom_tag_threshold: float
-    color_clusters: int
-    color_min_share: float
 
 
 class Indexer:
@@ -74,8 +71,6 @@ class Indexer:
             ram_confidence=config.RAM_CONFIDENCE,
             custom_tags=self.custom_tags,
             custom_tag_threshold=config.RAM_CUSTOM_TAG_THRESHOLD,
-            color_clusters=config.COLOR_CLUSTERS,
-            color_min_share=config.COLOR_MIN_SHARE,
         )
 
     def process_image(self, path: Path, settings: ReindexSettings) -> tuple[ImageEntry, np.ndarray]:
@@ -86,15 +81,8 @@ class Indexer:
         thumb_path = self.index_dir / "thumbnails" / f"{image_id}.jpg"
         temporary_thumb = thumb_path.with_suffix(".jpg.tmp")
         try:
-            # Decode the original exactly once. The thumbnail, colour, CLIP,
-            # OCR and RAM++ stages used to each re-open and re-decode the file
-            # from disk (four reads per image); they now share these in-memory
-            # renditions instead:
-            #   rgba     - EXIF-corrected, alpha preserved, for dominant-colour
-            #              extraction (which ignores transparent pixels)
-            #   base_rgb - the same but composited onto white and flattened to
-            #              RGB, i.e. exactly what the UI shows and what every
-            #              model input expects
+            # Decode the original exactly once. Thumbnailing, CLIP, OCR and
+            # RAM++ share the same display-ready in-memory rendition.
             with Image.open(path) as raw:
                 # .format and EXIF must be read before any convert()/transpose,
                 # which return a new Image with .format unset and the EXIF
@@ -102,14 +90,10 @@ class Indexer:
                 img_format = raw.format or path.suffix.lstrip(".").upper()
                 date_taken = image_utils.extract_date_taken(raw, fallback=stat.st_mtime)
                 oriented = ImageOps.exif_transpose(raw) or raw
-                rgba = oriented.convert("RGBA")
                 base_rgb = image_utils.flatten_to_rgb(oriented)
             width, height = base_rgb.size
 
             thumbnails.make_thumbnail(path, temporary_thumb, image=base_rgb)
-            color_names = colors_mod.extract_dominant_colors(
-                rgba, k=settings.color_clusters, min_share=settings.color_min_share
-            )
             embedding = embeddings.embed_image(base_rgb)
             text = ocr.extract_text(path, image=base_rgb)
             object_labels = set(
@@ -127,7 +111,7 @@ class Indexer:
 
             entry = ImageEntry(
                 id=image_id, path=str(path), thumbnail_path=str(thumb_path),
-                ocr_text=text, colors=color_names, objects=object_labels,
+                ocr_text=text, objects=object_labels,
                 mtime=stat.st_mtime, size=stat.st_size,
                 width=width, height=height, format=img_format,
                 date_taken=date_taken, indexed_at=time.time(),

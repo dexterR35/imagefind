@@ -1,9 +1,9 @@
 # ImageFind
 
 ImageFind creates a searchable catalog for a local folder or NAS containing
-large collections of images. It recognizes objects, reads text, extracts
-dominant colors, and creates visual embeddings so images can be found without
-remembering their exact location.
+large collections of images. It recognizes objects, reads text, and creates
+visual embeddings so images can be found without remembering their exact
+location.
 
 The original files stay where they are. ImageFind stores only metadata,
 embeddings, and generated thumbnails in a local SQLite index.
@@ -15,8 +15,8 @@ For how `npm start` is wired and every command, see
 
 ## Features
 
-- Search filenames, folder paths, OCR text, object tags, custom tags, and colors.
-- Filter by an exact object or dominant color.
+- Search filenames, folder paths, OCR text, object tags, and custom tags.
+- Filter by an exact object tag.
 - Find visually similar images with one click.
 - Sort by date, filename, or file size.
 - Watch the selected folder for added, changed, moved, and deleted images.
@@ -30,10 +30,9 @@ Supported image formats: PNG, JPG/JPEG, WebP, BMP.
 
 ### Search by recognized object
 
-<img src="example/1.png" width="480" alt="ImageFind showing a fruit and coin illustration with automatically recognized colors and objects">
+<img src="example/1.png" width="480" alt="ImageFind showing a fruit and coin illustration with automatically recognized objects">
 
-ImageFind automatically detected colors such as `red`, `white`, and `gold`,
-plus objects including `bag`, `cherry`, `clover`, `coin`, `fruit`, and
+ImageFind automatically detected objects including `bag`, `cherry`, `clover`, `coin`, `fruit`, and
 `pot of gold`. Searching for **clover** finds this image.
 
 ### Search text read from an image
@@ -49,7 +48,6 @@ Other useful searches include:
 - `Christmas Banner` — filename match
 - `Welcome Pack` — folder-path match
 - `clover` — RAM++ object match
-- `green` — dominant-color match
 - `NETBET BONUS` — OCR text match
 
 ## Requirements
@@ -186,8 +184,7 @@ before deleting it, protecting the index during a temporary NAS interruption.
 ## Searching
 
 See [`docs/GUIDE.md`](docs/GUIDE.md) for worked examples of every scenario
-(object only, object + text, object + color, folder, "more like this", and so
-on). In short:
+(object only, object + text, folder, "more like this", and so on). In short:
 
 The main search box searches all of these fields together:
 
@@ -196,18 +193,16 @@ The main search box searches all of these fields together:
 - OCR text
 - RAM++ objects
 - Custom tags
-- Dominant colors
 
-A multi-word query is split into terms and **AND-ed** (`red cat` matches an
-image tagged `cat` that also has a dominant color `red`, not only the literal
-string). Terms shorter than three characters fall back to a plain substring
+A multi-word query is split into terms and **AND-ed** (`bonus cat` matches an
+image tagged `cat` whose OCR/path/filename also contains `bonus`). Terms shorter than three characters fall back to a plain substring
 scan. When the sort is left on its default, text results are ordered by
 relevance (bm25), with whole-word matches floated above matches that only occur
 inside a longer word.
 
-The object and color controls are exact filters. Text, object, and color filters
-combine with **AND**, so searching `bonus` with object `person` and color `red`
-returns images matching all three conditions.
+The object control is an exact filter. Text and object filters combine with
+**AND**, so searching `bonus` with object `person` returns only images matching
+both conditions.
 
 **Find Similar** is different: it uses the selected image's CLIP embedding to
 find visually related images. Normal text search deliberately does not use
@@ -225,8 +220,7 @@ search requests per 10 seconds.
 | RAM++ with Swin-L | Automatic object and scene tags (near-universal tags such as `photo` and `white background` are dropped; see `RAM_TAG_DENYLIST`) |
 | OpenCLIP ViT-B/32 (`openai`) | 512-dimensional image embeddings, Find Similar, and custom-tag matching |
 | EasyOCR | Text extraction from image pixels |
-| K-means | Dominant-color extraction |
-| SQLite FTS5 (trigram) | Filename, path, OCR, tag, and color text search, with bm25 relevance ranking |
+| SQLite FTS5 (trigram) | Filename, path, OCR, and tag text search, with bm25 relevance ranking |
 | sqlite-vec | Cosine nearest-neighbor search over CLIP embeddings |
 | Watchdog | Realtime local/NAS filesystem events |
 

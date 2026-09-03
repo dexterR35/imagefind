@@ -3,7 +3,6 @@ starlette==1.6.0
 uvicorn[standard]==0.52.4
 numpy==1.26.4
 pillow==12.3.0
-scikit-learn==1.5.2
 open-clip-torch==2.26.1
 # Pulls in opencv-python-headless as its own transitive dependency — no need
 # to pin that separately, and app/ never imports cv2 directly.

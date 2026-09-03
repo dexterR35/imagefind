@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { fetchColors, fetchObjects, type SearchFilters as Filters } from "./api";
+import { fetchObjects, type SearchFilters as Filters } from "./api";
 
 interface Props {
   onChange: (filters: Filters) => void;
@@ -8,19 +8,16 @@ interface Props {
 const DEBOUNCE_MS = 300;
 
 export function SearchFilters({ onChange }: Props) {
-  const [colors, setColors] = useState<string[]>([]);
   const [objects, setObjects] = useState<string[]>([]);
   const [text, setText] = useState("");
   const [debouncedText, setDebouncedText] = useState("");
-  const [color, setColor] = useState<string | undefined>(undefined);
   const [object, setObject] = useState<string | undefined>(undefined);
 
   useEffect(() => {
     let active = true;
-    Promise.all([fetchColors(), fetchObjects()])
-      .then(([nextColors, nextObjects]) => {
+    fetchObjects()
+      .then((nextObjects) => {
         if (!active) return;
-        setColors(nextColors);
         setObjects(nextObjects);
       })
       .catch(() => {
@@ -28,7 +25,6 @@ export function SearchFilters({ onChange }: Props) {
         // the backend is temporarily unavailable and avoid an unhandled
         // promise rejection in the browser.
         if (!active) return;
-        setColors([]);
         setObjects([]);
       });
     return () => {
@@ -45,8 +41,8 @@ export function SearchFilters({ onChange }: Props) {
   }, [text]);
 
   useEffect(() => {
-    onChange({ text: debouncedText || undefined, color, object });
-  }, [debouncedText, color, object, onChange]);
+    onChange({ text: debouncedText || undefined, object });
+  }, [debouncedText, object, onChange]);
 
   return (
     <div className="search-filters">
@@ -58,19 +54,7 @@ export function SearchFilters({ onChange }: Props) {
         value={text}
         onChange={(e) => setText(e.target.value)}
       />
-      <div className="color-swatches">
-        {colors.map((c) => (
-          <button
-            key={c}
-            type="button"
-            aria-label={c}
-            className={c === color ? "swatch selected" : "swatch"}
-            style={{ backgroundColor: c }}
-            onClick={() => setColor(color === c ? undefined : c)}
-          />
-        ))}
-      </div>
-      <select value={object ?? ""} onChange={(e) => setObject(e.target.value || undefined)}>
+      <select aria-label="Filter by object" value={object ?? ""} onChange={(e) => setObject(e.target.value || undefined)}>
         <option value="">All objects</option>
         {objects.map((o) => (
           <option key={o} value={o}>

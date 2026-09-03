@@ -316,32 +316,6 @@
   box-shadow: 0 0 0 3px var(--accent-dim);
 }
 
-.color-swatches {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 8px;
-}
-
-.swatch {
-  width: 22px;
-  height: 22px;
-  flex: 0 0 auto;
-  border-radius: 50%;
-  border: 2px solid var(--border-strong);
-  cursor: pointer;
-  padding: 0;
-  transition: transform 120ms ease, box-shadow 120ms ease, border-color 120ms ease;
-}
-
-.swatch:hover {
-  transform: scale(1.08);
-}
-
-.swatch.selected {
-  border-color: var(--accent);
-  box-shadow: 0 0 0 2px var(--accent-ink), 0 0 0 4px var(--accent);
-}
-
 .results-toolbar {
   display: flex;
   align-items: center;
@@ -790,6 +764,5 @@
   .loading-grid span { animation: none; }
   .image-card,
   .btn-primary,
-  .btn-ghost,
-  .swatch { transition: none; }
+  .btn-ghost { transition: none; }
 }

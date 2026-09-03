@@ -20,7 +20,6 @@ CREATE TABLE IF NOT EXISTS images (
     filename TEXT NOT NULL DEFAULT '',
     thumbnail_path TEXT NOT NULL,
     ocr_text TEXT NOT NULL,
-    colors TEXT NOT NULL CHECK (json_valid(colors)),
     objects TEXT NOT NULL CHECK (json_valid(objects)),
     mtime REAL NOT NULL,
     size INTEGER NOT NULL,
@@ -30,12 +29,6 @@ CREATE TABLE IF NOT EXISTS images (
     date_taken REAL NOT NULL DEFAULT 0,
     indexed_at REAL NOT NULL DEFAULT 0,
     embedding BLOB NOT NULL
-);
-
-CREATE TABLE IF NOT EXISTS image_colors (
-    image_id TEXT NOT NULL REFERENCES images(id) ON UPDATE CASCADE ON DELETE CASCADE,
-    color TEXT NOT NULL,
-    PRIMARY KEY (image_id, color)
 );
 
 CREATE TABLE IF NOT EXISTS image_objects (
@@ -49,7 +42,6 @@ CREATE VIRTUAL TABLE IF NOT EXISTS image_fts USING fts5(
     path,
     ocr_text,
     objects,
-    colors,
     tokenize='trigram'
 );
 
@@ -61,7 +53,6 @@ CREATE TABLE IF NOT EXISTS index_store_meta (
 CREATE INDEX IF NOT EXISTS images_date_taken_idx ON images(date_taken, id);
 CREATE INDEX IF NOT EXISTS images_filename_idx ON images(filename COLLATE NOCASE, id);
 CREATE INDEX IF NOT EXISTS images_size_idx ON images(size, id);
-CREATE INDEX IF NOT EXISTS image_colors_color_idx ON image_colors(color, image_id);
 CREATE INDEX IF NOT EXISTS image_objects_label_idx ON image_objects(label, image_id);
 """
 
@@ -75,16 +66,16 @@ _METADATA_COLUMNS = [
 ]
 
 _SELECT_COLUMNS = (
-    "id, path, thumbnail_path, ocr_text, colors, objects, mtime, size, "
+    "id, path, thumbnail_path, ocr_text, objects, mtime, size, "
     "width, height, format, date_taken, indexed_at"
 )
 _INSERT_COLUMNS = (
-    "id, path, filename, thumbnail_path, ocr_text, colors, objects, mtime, size, "
+    "id, path, filename, thumbnail_path, ocr_text, objects, mtime, size, "
     "width, height, format, date_taken, indexed_at, embedding"
 )
-_PLACEHOLDERS = ", ".join("?" * 15)
-_DATABASE_SCHEMA_VERSION = 3
-_DERIVED_SCHEMA_VERSION = "3"
+_PLACEHOLDERS = ", ".join("?" * 14)
+_DATABASE_SCHEMA_VERSION = 4
+_DERIVED_SCHEMA_VERSION = "4"
 
 
 @dataclass
@@ -93,7 +84,6 @@ class ImageEntry:
     path: str
     thumbnail_path: str
     ocr_text: str
-    colors: list[str]
     objects: list[str]
     mtime: float
     size: int
@@ -107,9 +97,9 @@ class ImageEntry:
 def _row_to_entry(row: tuple) -> ImageEntry:
     return ImageEntry(
         id=row[0], path=row[1], thumbnail_path=row[2], ocr_text=row[3],
-        colors=json.loads(row[4]), objects=json.loads(row[5]),
-        mtime=row[6], size=row[7], width=row[8], height=row[9],
-        format=row[10], date_taken=row[11], indexed_at=row[12],
+        objects=json.loads(row[4]), mtime=row[5], size=row[6],
+        width=row[7], height=row[8], format=row[9], date_taken=row[10],
+        indexed_at=row[11],
     )
 
 
@@ -171,21 +161,24 @@ class IndexStore:
         conn.execute(
             "CREATE TABLE IF NOT EXISTS images ("
             "id TEXT PRIMARY KEY, path TEXT UNIQUE NOT NULL, filename TEXT NOT NULL DEFAULT '', "
-            "thumbnail_path TEXT NOT NULL, ocr_text TEXT NOT NULL, colors TEXT NOT NULL, "
+            "thumbnail_path TEXT NOT NULL, ocr_text TEXT NOT NULL, "
             "objects TEXT NOT NULL, mtime REAL NOT NULL, size INTEGER NOT NULL, "
             "width INTEGER NOT NULL DEFAULT 0, height INTEGER NOT NULL DEFAULT 0, "
             "format TEXT NOT NULL DEFAULT '', date_taken REAL NOT NULL DEFAULT 0, "
             "indexed_at REAL NOT NULL DEFAULT 0, embedding BLOB NOT NULL)"
         )
         self._migrate_add_metadata_columns(conn)
+        self._migrate_remove_colors(conn)
         fts_columns = [
             row[1] for row in conn.execute("PRAGMA table_info(image_fts)").fetchall()
         ]
-        expected_fts_columns = ["filename", "path", "ocr_text", "objects", "colors"]
+        expected_fts_columns = ["filename", "path", "ocr_text", "objects"]
         if fts_columns and fts_columns != expected_fts_columns:
             # FTS5 virtual tables cannot be ALTERed to add searchable fields.
             # Drop only this derived table; load() rebuilds it from images.
             conn.execute("DROP TABLE image_fts")
+        conn.execute("DROP TRIGGER IF EXISTS images_delete_derived")
+        conn.execute("DROP TABLE IF EXISTS image_colors")
         conn.executescript(_SCHEMA)
         vector_schema = conn.execute(
             "SELECT sql FROM sqlite_master WHERE type='table' AND name='image_vectors'"
@@ -201,7 +194,6 @@ class IndexStore:
         )
         conn.execute(
             "CREATE TRIGGER IF NOT EXISTS images_delete_derived AFTER DELETE ON images BEGIN "
-            "DELETE FROM image_colors WHERE image_id=OLD.id; "
             "DELETE FROM image_objects WHERE image_id=OLD.id; "
             "DELETE FROM image_fts WHERE rowid=OLD.rowid; "
             "DELETE FROM image_vectors WHERE rowid=OLD.rowid; END"
@@ -236,6 +228,35 @@ class IndexStore:
             if name not in existing:
                 conn.execute(f"ALTER TABLE images ADD COLUMN {name} {decl}")
 
+    @staticmethod
+    def _migrate_remove_colors(conn: sqlite3.Connection) -> None:
+        """Discard legacy color metadata while preserving indexed images."""
+        existing = {row[1] for row in conn.execute("PRAGMA table_info(images)").fetchall()}
+        if "colors" not in existing:
+            return
+        conn.execute("DROP TRIGGER IF EXISTS images_delete_derived")
+        conn.execute("DROP TABLE IF EXISTS image_colors")
+        conn.execute("DROP TABLE IF EXISTS image_objects")
+        conn.execute("DROP TABLE IF EXISTS image_fts")
+        conn.execute("DROP TABLE IF EXISTS image_vectors")
+        conn.execute("ALTER TABLE images RENAME TO images_with_colors")
+        conn.execute(
+            "CREATE TABLE images ("
+            "id TEXT PRIMARY KEY, path TEXT UNIQUE NOT NULL, filename TEXT NOT NULL DEFAULT '', "
+            "thumbnail_path TEXT NOT NULL, ocr_text TEXT NOT NULL, objects TEXT NOT NULL, "
+            "mtime REAL NOT NULL, size INTEGER NOT NULL, width INTEGER NOT NULL DEFAULT 0, "
+            "height INTEGER NOT NULL DEFAULT 0, format TEXT NOT NULL DEFAULT '', "
+            "date_taken REAL NOT NULL DEFAULT 0, indexed_at REAL NOT NULL DEFAULT 0, "
+            "embedding BLOB NOT NULL)"
+        )
+        conn.execute(
+            "INSERT INTO images (rowid, id, path, filename, thumbnail_path, ocr_text, objects, "
+            "mtime, size, width, height, format, date_taken, indexed_at, embedding) "
+            "SELECT rowid, id, path, filename, thumbnail_path, ocr_text, objects, mtime, size, "
+            "width, height, format, date_taken, indexed_at, embedding FROM images_with_colors"
+        )
+        conn.execute("DROP TABLE images_with_colors")
+
     def _entry_values(self, entry: ImageEntry, embedding: np.ndarray) -> tuple:
         vector = np.asarray(embedding, dtype=np.float32)
         if vector.shape != (self.embedding_dim,):
@@ -245,34 +266,28 @@ class IndexStore:
             )
         return (
             entry.id, entry.path, Path(entry.path).name, entry.thumbnail_path,
-            entry.ocr_text, json.dumps(entry.colors), json.dumps(entry.objects),
-            entry.mtime, entry.size, entry.width, entry.height, entry.format,
-            entry.date_taken, entry.indexed_at, vector.tobytes(),
+            entry.ocr_text, json.dumps(entry.objects), entry.mtime, entry.size,
+            entry.width, entry.height, entry.format, entry.date_taken,
+            entry.indexed_at, vector.tobytes(),
         )
 
     def _sync_derived(self, rowid: int, entry: ImageEntry, embedding: np.ndarray) -> None:
-        self._conn.execute("DELETE FROM image_colors WHERE image_id=?", (entry.id,))
         self._conn.execute("DELETE FROM image_objects WHERE image_id=?", (entry.id,))
         self._conn.execute("DELETE FROM image_fts WHERE rowid=?", (rowid,))
         self._conn.execute("DELETE FROM image_vectors WHERE rowid=?", (rowid,))
-        self._conn.executemany(
-            "INSERT INTO image_colors(image_id, color) VALUES (?, ?)",
-            [(entry.id, color) for color in sorted(set(entry.colors))],
-        )
         self._conn.executemany(
             "INSERT INTO image_objects(image_id, label) VALUES (?, ?)",
             [(entry.id, label) for label in sorted(set(entry.objects))],
         )
         self._conn.execute(
-            "INSERT INTO image_fts(rowid, filename, path, ocr_text, objects, colors) "
-            "VALUES (?, ?, ?, ?, ?, ?)",
+            "INSERT INTO image_fts(rowid, filename, path, ocr_text, objects) "
+            "VALUES (?, ?, ?, ?, ?)",
             (
                 rowid,
                 Path(entry.path).name,
                 entry.path,
                 entry.ocr_text,
                 " ".join(entry.objects),
-                " ".join(entry.colors),
             ),
         )
         self._conn.execute(
@@ -338,7 +353,6 @@ class IndexStore:
     def _rebuild_derived_indexes(self) -> None:
         self._conn.execute("SAVEPOINT rebuild_derived_indexes")
         try:
-            self._conn.execute("DELETE FROM image_colors")
             self._conn.execute("DELETE FROM image_objects")
             self._conn.execute("DELETE FROM image_fts")
             self._conn.execute("DELETE FROM image_vectors")
@@ -348,8 +362,8 @@ class IndexStore:
             for row in rows:
                 rowid = row[0]
                 try:
-                    entry = _row_to_entry(row[1:14])
-                    vector = np.frombuffer(row[14], dtype=np.float32)
+                    entry = _row_to_entry(row[1:13])
+                    vector = np.frombuffer(row[13], dtype=np.float32)
                     if vector.shape != (self.embedding_dim,):
                         raise ValueError(
                             f"embedding shape {vector.shape}; expected ({self.embedding_dim},)"
@@ -418,7 +432,7 @@ class IndexStore:
                     f"INSERT INTO images ({_INSERT_COLUMNS}) VALUES ({_PLACEHOLDERS}) "
                     "ON CONFLICT(path) DO UPDATE SET "
                     "id=excluded.id, filename=excluded.filename, thumbnail_path=excluded.thumbnail_path, "
-                    "ocr_text=excluded.ocr_text, colors=excluded.colors, objects=excluded.objects, "
+                    "ocr_text=excluded.ocr_text, objects=excluded.objects, "
                     "mtime=excluded.mtime, size=excluded.size, width=excluded.width, height=excluded.height, "
                     "format=excluded.format, date_taken=excluded.date_taken, indexed_at=excluded.indexed_at, "
                     "embedding=excluded.embedding RETURNING rowid",
@@ -524,10 +538,6 @@ class IndexStore:
         with self.lock:
             self._conn.close()
 
-    def distinct_colors(self) -> list[str]:
-        with self.lock:
-            return [row[0] for row in self._conn.execute("SELECT DISTINCT color FROM image_colors ORDER BY color")]
-
     def distinct_objects(self) -> list[str]:
         with self.lock:
             return [row[0] for row in self._conn.execute("SELECT DISTINCT label FROM image_objects ORDER BY label")]
@@ -535,7 +545,6 @@ class IndexStore:
     def search(
         self,
         text: str | None = None,
-        color: str | None = None,
         obj: str | None = None,
         sort: str = "date_desc",
         offset: int = 0,
@@ -544,9 +553,8 @@ class IndexStore:
         clauses: list[str] = []
         params: list[object] = []
         # Each word of the query (3+ chars) becomes its own quote-escaped FTS5
-        # phrase, AND-ed together: "red cat" matches an image tagged `cat` that
-        # also has a dominant colour `red`, not only the literal string
-        # "red cat". Joining the FTS index also exposes bm25 `rank` to ORDER BY
+        # phrase, AND-ed together. Joining the FTS index also exposes bm25
+        # `rank` to ORDER BY
         # so the strongest matches, not just the newest, come first.
         fts_terms = [term for term in text.split() if len(term) >= 3] if text else []
         rank_by_relevance = bool(fts_terms)
@@ -560,9 +568,6 @@ class IndexStore:
         if rank_by_relevance:
             clauses.append("image_fts MATCH ?")
             params.append(" AND ".join('"' + term.replace('"', '""') + '"' for term in fts_terms))
-        if color:
-            clauses.append("EXISTS (SELECT 1 FROM image_colors c WHERE c.image_id=images.id AND c.color=?)")
-            params.append(color)
         if obj:
             clauses.append("EXISTS (SELECT 1 FROM image_objects o WHERE o.image_id=images.id AND o.label=?)")
             params.append(obj)
@@ -572,11 +577,9 @@ class IndexStore:
                 "OR instr(lower(images.path), lower(?)) > 0 "
                 "OR instr(lower(images.ocr_text), lower(?)) > 0 OR EXISTS ("
                 "SELECT 1 FROM image_objects o WHERE o.image_id=images.id "
-                "AND instr(lower(o.label), lower(?)) > 0) OR EXISTS ("
-                "SELECT 1 FROM image_colors c WHERE c.image_id=images.id "
-                "AND instr(lower(c.color), lower(?)) > 0))"
+                "AND instr(lower(o.label), lower(?)) > 0))"
             )
-            params.extend((text, text, text, text, text))
+            params.extend((text, text, text, text))
 
         where = " WHERE " + " AND ".join(clauses) if clauses else ""
         # Columns must be qualified: the FTS join brings its own path/filename/
@@ -609,11 +612,9 @@ class IndexStore:
                     "|| ' ', ' ' || ? || ' ') > 0 "
                     "OR EXISTS (SELECT 1 FROM image_objects o WHERE o.image_id = images.id "
                     "AND instr(' ' || lower(o.label) || ' ', ' ' || ? || ' ') > 0) "
-                    "OR EXISTS (SELECT 1 FROM image_colors c WHERE c.image_id = images.id "
-                    "AND lower(c.color) = ?) "
                     "THEN 0 ELSE 1 END), image_fts.rank"
                 )
-                order_params = [needle, needle, needle, needle]
+                order_params = [needle, needle, needle]
             order_by = f"{relevance}, {base_order}, images.id ASC"
         elif rank_by_relevance:
             order_by = f"{base_order}, image_fts.rank, images.id ASC"

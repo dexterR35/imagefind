@@ -14,14 +14,14 @@ describe("search", () => {
     const mockFetch = vi.fn().mockResolvedValue({
       ok: true,
       json: async () => ({ results: [
-        { id: "a1", path: "/x.png", thumbnail_url: "/thumbnail/a1", ocr_text: "", colors: [], objects: [] },
+        { id: "a1", path: "/x.png", thumbnail_url: "/thumbnail/a1", ocr_text: "", objects: [] },
       ], total: 1 }),
     });
     vi.stubGlobal("fetch", mockFetch);
 
-    const results = await search({ color: "green" });
+    const results = await search({ object: "clover" });
 
-    expect(mockFetch).toHaveBeenCalledWith("/api/search?color=green");
+    expect(mockFetch).toHaveBeenCalledWith("/api/search?object=clover");
     expect(results.results[0].id).toBe("a1");
     expect(results.total).toBe(1);
   });
@@ -30,7 +30,7 @@ describe("search", () => {
     const mockFetch = vi.fn().mockResolvedValue({
       ok: true,
       json: async () => ({ results: [
-        { id: "a1", path: "/x.png", thumbnail_url: "/thumbnail/a1", ocr_text: "", colors: [], objects: [] },
+        { id: "a1", path: "/x.png", thumbnail_url: "/thumbnail/a1", ocr_text: "", objects: [] },
       ], total: 1 }),
     });
     vi.stubGlobal("fetch", mockFetch);
@@ -83,7 +83,7 @@ describe("findSimilar", () => {
     const mockFetch = vi.fn().mockResolvedValue({
       ok: true,
       json: async () => [
-        { id: "b1", path: "/y.png", thumbnail_url: "/thumbnail/b1", ocr_text: "", colors: [], objects: [] },
+        { id: "b1", path: "/y.png", thumbnail_url: "/thumbnail/b1", ocr_text: "", objects: [] },
       ],
     });
     vi.stubGlobal("fetch", mockFetch);

@@ -5,10 +5,10 @@ from app.search import find_similar, search
 from app.storage import ImageEntry, IndexStore
 
 
-def _entry(id, colors=None, objects=None, ocr_text="", date_taken=0.0, size=0, path=None):
+def _entry(id, objects=None, ocr_text="", date_taken=0.0, size=0, path=None):
     return ImageEntry(
         id=id, path=path or f"/imgs/{id}.png", thumbnail_path=f"/t/{id}.jpg",
-        ocr_text=ocr_text, colors=colors or [], objects=objects or [],
+        ocr_text=ocr_text, objects=objects or [],
         mtime=0.0, size=size, date_taken=date_taken,
     )
 
@@ -21,13 +21,12 @@ def _store_with(tmp_path, entries_and_vecs):
     return store
 
 
-def test_search_filters_by_color_and_object_with_and_logic(tmp_path):
+def test_search_filters_by_exact_object(tmp_path):
     store = _store_with(tmp_path, [
-        (_entry("a", colors=["green"], objects=["clover"]), [1, 0]),
-        (_entry("b", colors=["green"], objects=["person"]), [1, 0]),
-        (_entry("c", colors=["blue"], objects=["clover"]), [1, 0]),
+        (_entry("a", objects=["clover"]), [1, 0]),
+        (_entry("b", objects=["person"]), [1, 0]),
     ])
-    result, total = search(store, color="green", obj="clover")
+    result, total = search(store, obj="clover")
     assert [e.id for e in result] == ["a"]
     assert total == 1
 
@@ -50,17 +49,15 @@ def test_search_text_matches_object_tags_too(tmp_path):
     assert [e.id for e in result] == ["a"]
 
 
-def test_search_text_matches_filename_folder_and_color(tmp_path):
+def test_search_text_matches_filename_and_folder(tmp_path):
     store = _store_with(tmp_path, [
         (_entry("filename", path="/campaigns/summer/Christmas Banner.png"), [1.0, 0.0]),
         (_entry("folder", path="/campaigns/roulette/photo.png"), [1.0, 0.0]),
-        (_entry("color", colors=["magenta"]), [1.0, 0.0]),
-        (_entry("other", path="/unrelated/photo.png", colors=["blue"]), [1.0, 0.0]),
+        (_entry("other", path="/unrelated/photo.png"), [1.0, 0.0]),
     ])
 
     assert [e.id for e in search(store, text="Christmas")[0]] == ["filename"]
     assert [e.id for e in search(store, text="roulette")[0]] == ["folder"]
-    assert [e.id for e in search(store, text="magenta")[0]] == ["color"]
 
 
 def test_short_search_matches_all_metadata_without_fts(tmp_path):
@@ -68,12 +65,11 @@ def test_short_search_matches_all_metadata_without_fts(tmp_path):
         (_entry("filename", path="/images/AI.png"), [1.0, 0.0]),
         (_entry("ocr", ocr_text="AI"), [1.0, 0.0]),
         (_entry("object", objects=["AI"]), [1.0, 0.0]),
-        (_entry("color", colors=["AI"]), [1.0, 0.0]),
     ])
 
     results, total = search(store, text="AI")
-    assert total == 4
-    assert {entry.id for entry in results} == {"filename", "ocr", "object", "color"}
+    assert total == 3
+    assert {entry.id for entry in results} == {"filename", "ocr", "object"}
 
 
 def test_search_quotes_fts_input_instead_of_treating_it_as_query_syntax(tmp_path):
@@ -129,20 +125,19 @@ def test_search_explicit_sort_overrides_relevance(tmp_path):
 
 
 def test_multi_word_search_ands_terms_across_different_fields(tmp_path):
-    # "red cat" should find the image whose RAM++ tag is `cat` and whose
-    # dominant colour is `red`, even though the literal string "red cat"
-    # appears nowhere - each word is matched independently and AND-ed.
+    # Each query word is matched independently and AND-ed, even when one is
+    # in OCR text and the other is an object tag.
     store = _store_with(tmp_path, [
-        (_entry("redcat", objects=["cat"], colors=["red"]), [1.0, 0.0]),
-        (_entry("bluecat", objects=["cat"], colors=["blue"]), [1.0, 0.0]),
-        (_entry("reddog", objects=["dog"], colors=["red"]), [1.0, 0.0]),
-        (_entry("redcat_ocr", ocr_text="my red cat", objects=[], colors=[]), [1.0, 0.0]),
+        (_entry("mixed", objects=["cat"], ocr_text="red"), [1.0, 0.0]),
+        (_entry("wrong_ocr", objects=["cat"], ocr_text="blue"), [1.0, 0.0]),
+        (_entry("wrong_object", objects=["dog"], ocr_text="red"), [1.0, 0.0]),
+        (_entry("literal", ocr_text="my red cat", objects=[]), [1.0, 0.0]),
     ])
 
     result, total = search(store, text="red cat")
 
     assert total == 2
-    assert {e.id for e in result} == {"redcat", "redcat_ocr"}
+    assert {e.id for e in result} == {"mixed", "literal"}
 
 
 def test_object_filter_and_text_number_pinpoint_one_image(tmp_path):
@@ -165,8 +160,8 @@ def test_object_filter_and_text_number_pinpoint_one_image(tmp_path):
 
 def test_multi_word_search_ignores_terms_shorter_than_three_chars(tmp_path):
     store = _store_with(tmp_path, [
-        (_entry("hit", objects=["cat"], colors=["red"]), [1.0, 0.0]),
-        (_entry("miss", objects=["dog"], colors=["red"]), [1.0, 0.0]),
+        (_entry("hit", objects=["cat"], ocr_text="red"), [1.0, 0.0]),
+        (_entry("miss", objects=["dog"], ocr_text="red"), [1.0, 0.0]),
     ])
     # "a red cat" -> "a" is dropped, "red" AND "cat" remain.
     result, _ = search(store, text="a red cat")

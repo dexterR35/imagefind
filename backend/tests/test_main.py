@@ -121,27 +121,23 @@ def test_watcher_can_be_disabled_for_maintenance(tmp_path, monkeypatch):
     assert main._reconciliation_thread is None
 
 
-def test_search_and_filters_use_prepopulated_store(tmp_path, monkeypatch):
+def test_search_and_object_filter_use_prepopulated_store(tmp_path, monkeypatch):
     main, _ = _fresh_app(tmp_path, monkeypatch)
     from app.storage import ImageEntry
 
     entry = ImageEntry(
         id="a1", path="/imgs/a.png", thumbnail_path=str(tmp_path / "a1.jpg"),
-        ocr_text="NETBET", colors=["green"], objects=["clover", "person"], mtime=0.0, size=0,
+        ocr_text="NETBET", objects=["clover", "person"], mtime=0.0, size=0,
     )
     (tmp_path / "a1.jpg").write_bytes(b"fake-jpg-bytes")
     main.store.upsert(entry, np.ones(512, dtype=np.float32))
 
     client = TestClient(main.app)
-    assert client.get("/colors").json() == ["green"]
     assert client.get("/objects").json() == ["clover", "person"]
-
-    result = client.get("/search", params={"color": "green"}).json()
-    assert [r["id"] for r in result["results"]] == ["a1"]
-    assert result["total"] == 1
 
     result = client.get("/search", params={"object": "clover"}).json()
     assert [r["id"] for r in result["results"]] == ["a1"]
+    assert "colors" not in result["results"][0]
     assert client.get("/search", params={"object": "missing"}).json() == {"results": [], "total": 0}
 
     assert client.get("/search/similar/a1").json() == []
@@ -155,7 +151,7 @@ def test_search_paginates_and_reports_metadata(tmp_path, monkeypatch):
     for i in range(3):
         entry = ImageEntry(
             id=f"e{i}", path=f"/imgs/e{i}.png", thumbnail_path=str(tmp_path / f"e{i}.jpg"),
-            ocr_text="", colors=[], objects=[], mtime=0.0, size=100 * i,
+            ocr_text="", objects=[], mtime=0.0, size=100 * i,
             width=10, height=20, format="PNG", date_taken=float(i),
             indexed_at=100.0 + i,
         )
@@ -181,7 +177,6 @@ def test_search_validates_lengths_and_rejects_control_characters(tmp_path, monke
     client = TestClient(main.app)
 
     assert client.get("/search", params={"text": "x" * 201}).status_code == 422
-    assert client.get("/search", params={"color": "x" * 65}).status_code == 422
     assert client.get("/search", params={"object": "x" * 129}).status_code == 422
     response = client.get("/search", params={"text": "hello\x01world"})
     assert response.status_code == 422
@@ -448,7 +443,7 @@ def test_thumbnail_serves_cached_file(tmp_path, monkeypatch):
     thumb_path.write_bytes(b"fake-jpg-bytes")
     entry = ImageEntry(
         id="a1", path="/imgs/a.png", thumbnail_path=str(thumb_path),
-        ocr_text="", colors=[], objects=[], mtime=0.0, size=0,
+        ocr_text="", objects=[], mtime=0.0, size=0,
     )
     main.store.upsert(entry, np.ones(512, dtype=np.float32))
 
@@ -466,7 +461,7 @@ def test_thumbnail_returns_404_when_database_file_reference_is_stale(tmp_path, m
     main.store.upsert(
         ImageEntry(
             id="stale", path="/imgs/a.png", thumbnail_path=str(tmp_path / "missing.jpg"),
-            ocr_text="", colors=[], objects=[], mtime=0.0, size=0,
+            ocr_text="", objects=[], mtime=0.0, size=0,
         ),
         np.ones(512, dtype=np.float32),
     )
@@ -504,7 +499,7 @@ def test_download_endpoint_returns_original_file_as_attachment(tmp_path, monkeyp
     original.write_bytes(b"fake-png-bytes")
     entry = ImageEntry(
         id="d1", path=str(original), thumbnail_path=str(tmp_path / "d1.jpg"),
-        ocr_text="", colors=[], objects=[], mtime=0.0, size=0,
+        ocr_text="", objects=[], mtime=0.0, size=0,
     )
     main.store.upsert(entry, np.ones(512, dtype=np.float32))
 
@@ -535,7 +530,7 @@ def test_download_endpoint_404_when_original_was_deleted(tmp_path, monkeypatch):
         ImageEntry(
             id="stale", path=str(tmp_path / "gone.png"),
             thumbnail_path=str(tmp_path / "stale.jpg"), ocr_text="",
-            colors=[], objects=[], mtime=0.0, size=0,
+            objects=[], mtime=0.0, size=0,
         ),
         np.ones(512, dtype=np.float32),
     )

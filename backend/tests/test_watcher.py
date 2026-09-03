@@ -80,7 +80,7 @@ def test_handler_on_modified_processes_and_upserts_image(tmp_path, monkeypatch):
         from app.storage import ImageEntry
         entry = ImageEntry(
             id="new1", path=str(path), thumbnail_path=str(index_dir / "t.jpg"),
-            ocr_text="", colors=[], objects=[], mtime=stat.st_mtime, size=stat.st_size,
+            ocr_text="", objects=[], mtime=stat.st_mtime, size=stat.st_size,
             width=32, height=32, format="PNG", date_taken=stat.st_mtime, indexed_at=1.0,
         )
         return entry, np.zeros(512, dtype=np.float32)
@@ -118,7 +118,7 @@ def test_handler_on_modified_skips_reprocessing_an_already_indexed_unchanged_fil
         from app.storage import ImageEntry
         entry = ImageEntry(
             id="new1", path=str(path), thumbnail_path=str(index_dir / "t.jpg"),
-            ocr_text="", colors=[], objects=[], mtime=stat.st_mtime, size=stat.st_size,
+            ocr_text="", objects=[], mtime=stat.st_mtime, size=stat.st_size,
             width=32, height=32, format="PNG", date_taken=stat.st_mtime, indexed_at=1.0,
         )
         return entry, np.zeros(512, dtype=np.float32)
@@ -148,7 +148,7 @@ def test_handler_on_modified_forces_same_name_replacement_once(tmp_path, monkeyp
     store.upsert(
         ImageEntry(
             id="same1", path=str(img_path), thumbnail_path=str(index_dir / "same.jpg"),
-            ocr_text="", colors=[], objects=[], mtime=stat.st_mtime, size=stat.st_size,
+            ocr_text="", objects=[], mtime=stat.st_mtime, size=stat.st_size,
             width=32, height=32, format="PNG", date_taken=stat.st_mtime, indexed_at=1.0,
         ),
         np.zeros(512, dtype=np.float32),
@@ -207,7 +207,7 @@ def test_handler_on_deleted_removes_entry(tmp_path):
     store.upsert(
         ImageEntry(
             id="gone1", path=str(img_path), thumbnail_path=str(index_dir / "t.jpg"),
-            ocr_text="", colors=[], objects=[], mtime=0.0, size=0,
+            ocr_text="", objects=[], mtime=0.0, size=0,
         ),
         np.zeros(512, dtype=np.float32),
     )
@@ -233,7 +233,7 @@ def test_handler_on_moved_removes_old_path_and_indexes_destination(tmp_path, mon
     store.upsert(
         ImageEntry(
             id="old1", path=str(old_path), thumbnail_path=str(index_dir / "old.jpg"),
-            ocr_text="", colors=[], objects=[], mtime=0.0, size=0,
+            ocr_text="", objects=[], mtime=0.0, size=0,
         ),
         np.zeros(512, dtype=np.float32),
     )
@@ -244,7 +244,7 @@ def test_handler_on_moved_removes_old_path_and_indexes_destination(tmp_path, mon
         store.upsert(
             ImageEntry(
                 id="new1", path=str(path), thumbnail_path=str(index_dir / "new.jpg"),
-                ocr_text="", colors=[], objects=[], mtime=stat.st_mtime, size=stat.st_size,
+                ocr_text="", objects=[], mtime=stat.st_mtime, size=stat.st_size,
             ),
             np.zeros(512, dtype=np.float32),
         )
@@ -278,7 +278,7 @@ def test_handler_on_deleted_directory_removes_children_and_thumbnails(tmp_path):
         store.upsert(
             ImageEntry(
                 id=f"gone{number}", path=str(deleted_dir / f"image{number}.png"),
-                thumbnail_path=str(thumbnail), ocr_text="", colors=[], objects=[],
+                thumbnail_path=str(thumbnail), ocr_text="", objects=[],
                 mtime=0.0, size=0,
             ),
             np.zeros(512, dtype=np.float32),
@@ -302,7 +302,7 @@ def test_handler_does_not_delete_index_when_nas_root_is_unreachable(tmp_path):
     store.upsert(
         ImageEntry(
             id="keep1", path=str(image_path), thumbnail_path=str(index_dir / "keep.jpg"),
-            ocr_text="", colors=[], objects=[], mtime=0.0, size=0,
+            ocr_text="", objects=[], mtime=0.0, size=0,
         ),
         np.zeros(512, dtype=np.float32),
     )
