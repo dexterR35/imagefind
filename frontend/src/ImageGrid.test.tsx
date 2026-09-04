@@ -25,6 +25,33 @@ describe("ImageGrid", () => {
     expect(screen.getByText("No images match these filters.")).toBeInTheDocument();
   });
 
+  it("renders a favorite toggle per card that reports without opening the modal", () => {
+    const onSelect = vi.fn();
+    const onToggleFavorite = vi.fn();
+    render(<ImageGrid images={sample} onSelect={onSelect} onToggleFavorite={onToggleFavorite} />);
+
+    fireEvent.click(screen.getByRole("button", { name: "Add to favorites" }));
+    expect(onToggleFavorite).toHaveBeenCalledWith("a1", true);
+    expect(onSelect).not.toHaveBeenCalled();
+  });
+
+  it("renders a selection checkbox per card that toggles without opening the modal", () => {
+    const onSelect = vi.fn();
+    const onToggleSelect = vi.fn();
+    render(
+      <ImageGrid
+        images={sample}
+        onSelect={onSelect}
+        selectedIds={new Set()}
+        onToggleSelect={onToggleSelect}
+      />,
+    );
+
+    fireEvent.click(screen.getByRole("checkbox", { name: "Select clover.png" }));
+    expect(onToggleSelect).toHaveBeenCalledWith("a1");
+    expect(onSelect).not.toHaveBeenCalled();
+  });
+
   it("renders a table with a row per image in table view and reports clicks", () => {
     const onSelect = vi.fn();
     render(<ImageGrid images={sample} view="table" onSelect={onSelect} />);

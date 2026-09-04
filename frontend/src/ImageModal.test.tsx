@@ -42,6 +42,86 @@ describe("ImageModal", () => {
     expect(onClose).toHaveBeenCalled();
   });
 
+  it("loads the full-resolution original for the preview", () => {
+    render(<ImageModal image={image} onClose={() => {}} onFindSimilar={() => {}} />);
+    expect(screen.getByAltText("clover.png")).toHaveAttribute("src", "/api/image/a1");
+  });
+
+  it("pages between results with the arrow keys and the nav buttons", () => {
+    const onPrev = vi.fn();
+    const onNext = vi.fn();
+    render(
+      <ImageModal image={image} onClose={() => {}} onFindSimilar={() => {}} onPrev={onPrev} onNext={onNext} />,
+    );
+
+    fireEvent.keyDown(window, { key: "ArrowRight" });
+    expect(onNext).toHaveBeenCalledTimes(1);
+    fireEvent.keyDown(window, { key: "ArrowLeft" });
+    expect(onPrev).toHaveBeenCalledTimes(1);
+
+    fireEvent.click(screen.getByLabelText("Next image"));
+    expect(onNext).toHaveBeenCalledTimes(2);
+    fireEvent.click(screen.getByLabelText("Previous image"));
+    expect(onPrev).toHaveBeenCalledTimes(2);
+  });
+
+  it("wires the favorite toggle, tag editor and note field to their callbacks", () => {
+    const onToggleFavorite = vi.fn();
+    const onTagsChange = vi.fn();
+    const onNoteChange = vi.fn();
+    render(
+      <ImageModal
+        image={{ ...image, favorite: false, user_tags: ["draft"], note: "" }}
+        onClose={() => {}}
+        onFindSimilar={() => {}}
+        onToggleFavorite={onToggleFavorite}
+        onTagsChange={onTagsChange}
+        onNoteChange={onNoteChange}
+      />,
+    );
+
+    fireEvent.click(screen.getByRole("button", { name: "Add to favorites" }));
+    expect(onToggleFavorite).toHaveBeenCalledWith("a1", true);
+
+    const tagInput = screen.getByRole("textbox", { name: "Add a tag" });
+    fireEvent.change(tagInput, { target: { value: "hero" } });
+    fireEvent.keyDown(tagInput, { key: "Enter" });
+    expect(onTagsChange).toHaveBeenCalledWith("a1", ["draft", "hero"]);
+
+    const note = screen.getByRole("textbox", { name: "Note" });
+    fireEvent.change(note, { target: { value: "crop this" } });
+    fireEvent.blur(note);
+    expect(onNoteChange).toHaveBeenCalledWith("a1", "crop this");
+  });
+
+  it("does not treat typing in the tag field as a zoom/nav shortcut", () => {
+    const onNext = vi.fn();
+    render(
+      <ImageModal
+        image={{ ...image, user_tags: [] }}
+        onClose={() => {}}
+        onFindSimilar={() => {}}
+        onNext={onNext}
+        onTagsChange={() => {}}
+      />,
+    );
+    const tagInput = screen.getByRole("textbox", { name: "Add a tag" });
+    tagInput.focus();
+    fireEvent.keyDown(tagInput, { key: "ArrowRight" });
+    expect(onNext).not.toHaveBeenCalled();
+  });
+
+  it("closes on Escape and does not render nav buttons at the list edges", () => {
+    const onClose = vi.fn();
+    render(<ImageModal image={image} onClose={onClose} onFindSimilar={() => {}} />);
+
+    expect(screen.queryByLabelText("Next image")).not.toBeInTheDocument();
+    expect(screen.queryByLabelText("Previous image")).not.toBeInTheDocument();
+
+    fireEvent.keyDown(window, { key: "Escape" });
+    expect(onClose).toHaveBeenCalled();
+  });
+
   it("shows metadata saved for the image", () => {
     render(<ImageModal image={image} onClose={() => {}} onFindSimilar={() => {}} />);
 

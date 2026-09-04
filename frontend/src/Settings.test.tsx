@@ -16,6 +16,7 @@ describe("Settings", () => {
     // Most tests aren't exercising the model-install feature, so default to
     // "already installed" (no install button) unless a test overrides this.
     vi.spyOn(api, "fetchModelStatus").mockResolvedValue({ installed: true });
+    vi.spyOn(api, "fetchBackups").mockResolvedValue([]);
   });
   afterEach(() => {
     vi.useRealTimers();
@@ -188,6 +189,26 @@ describe("Settings", () => {
     // Once the download completes, the button disappears since the model is
     // now considered installed.
     await waitFor(() => expect(screen.queryByText("Install RAM++ Model")).not.toBeInTheDocument());
+  });
+
+  it("creates an index backup and lists it", async () => {
+    vi.spyOn(api, "fetchSettings").mockResolvedValue(sampleSettings);
+    vi.mocked(api.fetchBackups).mockResolvedValue([
+      { name: "index-20240101-000000.db", size: 2 * 1024 * 1024, created_at: 1 },
+    ]);
+    const create = vi.spyOn(api, "createBackup").mockResolvedValue({
+      name: "index-20240102-120000.db", size: 3 * 1024 * 1024, created_at: 2,
+    });
+
+    render(<Settings onReindexComplete={vi.fn()} />);
+    fireEvent.click(screen.getByRole("button", { name: "Open settings" }));
+
+    await screen.findByText("index-20240101-000000.db");
+    fireEvent.click(screen.getByRole("button", { name: "Back up now" }));
+
+    await waitFor(() => expect(create).toHaveBeenCalled());
+    expect(await screen.findByText("index-20240102-120000.db")).toBeInTheDocument();
+    expect(screen.getByText("3.0 MB")).toBeInTheDocument();
   });
 
   it("shows an error if the model download fails", async () => {

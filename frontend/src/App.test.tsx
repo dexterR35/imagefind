@@ -24,12 +24,17 @@ function image(id: string): ImageResult {
 describe("App", () => {
   beforeEach(() => {
     vi.restoreAllMocks();
+    // App now mirrors search state into the URL; jsdom keeps window.location
+    // across tests in a file, so reset it or one test's query leaks into the next.
+    window.history.replaceState(null, "", "/");
     vi.spyOn(api, "fetchAuthSession").mockResolvedValue({
       authenticated: true,
       configured: true,
       expires_at: 2_000_000_000,
       csrf_token: "test-csrf",
     });
+    vi.spyOn(api, "fetchCollections").mockResolvedValue([]);
+    vi.spyOn(api, "fetchUserTags").mockResolvedValue([]);
   });
 
   it("runs a search on filter change and opens Find Similar results", async () => {
@@ -49,6 +54,89 @@ describe("App", () => {
     fireEvent.click(screen.getByText("Find Similar"));
 
     await waitFor(() => expect(api.findSimilar).toHaveBeenCalledWith("a1", expect.anything()));
+  });
+
+  it("mirrors the active search into the URL and restores it on reload", async () => {
+    vi.spyOn(api, "fetchObjects").mockResolvedValue([]);
+    const searchSpy = vi.spyOn(api, "search").mockResolvedValue({ results: [], total: 0 });
+
+    const { unmount } = render(<App />);
+    fireEvent.change(await screen.findByRole("textbox", { name: "Search images" }), {
+      target: { value: "clover" },
+    });
+
+    await waitFor(() => expect(window.location.search).toContain("text=clover"));
+
+    unmount();
+    searchSpy.mockClear();
+    render(<App />);
+
+    await waitFor(() =>
+      expect(searchSpy).toHaveBeenCalledWith(
+        expect.objectContaining({ text: "clover" }),
+        expect.anything(),
+      ),
+    );
+    expect(await screen.findByRole("textbox", { name: "Search images" })).toHaveValue("clover");
+  });
+
+  it("offers CSV / JSON export links built from the active search", async () => {
+    vi.spyOn(api, "fetchObjects").mockResolvedValue([]);
+    vi.spyOn(api, "search").mockResolvedValue({ results: [image("a")], total: 1 });
+
+    render(<App />);
+    fireEvent.change(await screen.findByRole("textbox", { name: "Search images" }), {
+      target: { value: "clover" },
+    });
+    await screen.findByAltText("a.png");
+    fireEvent.click(screen.getByText("Export"));
+
+    await waitFor(() =>
+      expect(screen.getByRole("link", { name: "CSV" }).getAttribute("href")).toBe(
+        "/api/search/export?text=clover&output=csv",
+      ),
+    );
+    expect(screen.getByRole("link", { name: "JSON" }).getAttribute("href")).toBe(
+      "/api/search/export?text=clover&output=json",
+    );
+  });
+
+  it("shows the bulk action bar when cards are selected and runs a bulk favorite", async () => {
+    vi.spyOn(api, "fetchObjects").mockResolvedValue([]);
+    vi.spyOn(api, "search").mockResolvedValue({
+      results: [image("a"), image("b")],
+      total: 2,
+    });
+    const bulkFav = vi.spyOn(api, "bulkSetFavorite").mockResolvedValue(2);
+
+    render(<App />);
+    await screen.findByAltText("a.png");
+
+    fireEvent.click(screen.getByRole("checkbox", { name: "Select a.png" }));
+    fireEvent.click(screen.getByRole("checkbox", { name: "Select b.png" }));
+
+    expect(await screen.findByText("2 selected")).toBeInTheDocument();
+    expect(screen.getByRole("link", { name: "Download .zip" }).getAttribute("href")).toBe(
+      "/api/download/zip?ids=a,b",
+    );
+
+    fireEvent.click(screen.getByRole("button", { name: "★ Favorite" }));
+    await waitFor(() => expect(bulkFav).toHaveBeenCalledWith(["a", "b"], true));
+  });
+
+  it("pages between results in the modal with the arrow keys", async () => {
+    vi.spyOn(api, "fetchObjects").mockResolvedValue([]);
+    vi.spyOn(api, "search").mockResolvedValue({ results: [image("a"), image("b")], total: 2 });
+
+    render(<App />);
+    fireEvent.click(await screen.findByAltText("a.png"));
+    expect(screen.getByRole("heading", { name: "a.png" })).toBeInTheDocument();
+
+    fireEvent.keyDown(window, { key: "ArrowRight" });
+    expect(screen.getByRole("heading", { name: "b.png" })).toBeInTheDocument();
+
+    fireEvent.keyDown(window, { key: "ArrowLeft" });
+    expect(screen.getByRole("heading", { name: "a.png" })).toBeInTheDocument();
   });
 
   it("shows an inline error state when search fails, and clears it once a search succeeds", async () => {

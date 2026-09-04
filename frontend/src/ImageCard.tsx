@@ -1,8 +1,12 @@
 import type { ImageResult } from "./api";
+import { FavoriteButton } from "./FavoriteButton";
 
 interface Props {
   image: ImageResult;
   onClick: (image: ImageResult) => void;
+  onToggleFavorite?: (id: string, next: boolean) => void;
+  selected?: boolean;
+  onToggleSelect?: (id: string) => void;
 }
 
 function formatBytes(bytes: number): string {
@@ -26,7 +30,7 @@ function formatDate(timestamp: number): string {
     : date.toLocaleDateString(undefined, { year: "numeric", month: "short", day: "numeric" });
 }
 
-export function ImageCard({ image, onClick }: Props) {
+export function ImageCard({ image, onClick, onToggleFavorite, selected, onToggleSelect }: Props) {
   const filename = image.path.split(/[\\/]/).pop() ?? image.path;
   const extension = filename.includes(".") ? filename.split(".").pop() : image.format;
   const details = [
@@ -36,10 +40,29 @@ export function ImageCard({ image, onClick }: Props) {
     "Added " + formatDate(image.indexed_at),
   ].filter(Boolean).join(" · ");
   return (
-    <button type="button" className="image-card" onClick={() => onClick(image)}>
-      <img src={image.thumbnail_url} alt={filename} />
-      <span className="filename" title={filename}>{filename}</span>
-      <span className="card-metadata">{details}</span>
-    </button>
+    <div className={`image-card-wrap${selected ? " is-selected" : ""}`}>
+      <button type="button" className="image-card" onClick={() => onClick(image)}>
+        <img src={image.thumbnail_url} alt={filename} />
+        <span className="filename" title={filename}>{filename}</span>
+        <span className="card-metadata">{details}</span>
+      </button>
+      {onToggleSelect && (
+        <label className="card-select" title="Select">
+          <input
+            type="checkbox"
+            checked={!!selected}
+            aria-label={`Select ${filename}`}
+            onChange={() => onToggleSelect(image.id)}
+          />
+        </label>
+      )}
+      {onToggleFavorite && (
+        <FavoriteButton
+          className="card-favorite"
+          favorite={!!image.favorite}
+          onToggle={(next) => onToggleFavorite(image.id, next)}
+        />
+      )}
+    </div>
   );
 }

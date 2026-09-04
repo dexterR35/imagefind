@@ -45,8 +45,8 @@ temporary tunnel, not a public service.
 
 ## 3. How indexing works
 
-For each supported image (`.png`, `.jpg`, `.jpeg`, `.webp`, `.bmp`) the indexer,
-running one image at a time:
+For each supported image (`.png`, `.jpg`, `.jpeg`, `.webp`, `.bmp`, `.gif`,
+`.tif`/`.tiff`, `.avif`) the indexer, running one image at a time:
 
 1. Reads the file **once** and applies EXIF rotation so a sideways phone photo is
    catalogued the way it displays.
@@ -123,21 +123,32 @@ query is parameterized — nothing you type can become SQL or FTS syntax. Typing
 is debounced in the browser and stale requests are cancelled; the server also
 limits each client to 30 searches per 10 seconds.
 
-### The "More filters" panel
+### Filters
 
-Below the search box, **More filters** expands to three optional facets. Every
-one is optional and they all **combine with AND** — with each other and with the
-search box.
+A **★ Favorites** toggle sits next to the search box. **More filters** expands
+to six more optional facets. Every one is optional and they all **combine with
+AND** — with each other, the Favorites toggle, and the search box.
 
 | Filter | Matches | Notes |
 |---|---|---|
+| **★ Favorites** | only images you have starred | Star an image on its card, its table row, or in the detail view. |
+| **Collection** | images in one collection you created | See [collections](#favorites-tags-notes--collections) below. |
+| **Your tag** | images carrying one of your manual tags | Distinct from RAM++ object tags; picked from a list of tags you've used. |
 | **Object** | an **exact tag match** (`label = 'cat'`), not a substring | Use it when a loose text match for `cat` would also hit `catalog.png` or a `.../vacation/` folder. |
 | **Format** | `png`, `jpg`, `webp`, `bmp` | Exact match on the recorded format. `jpg` and `jpeg` are treated as the same thing. |
+| **Orientation** | **Landscape** (wider than tall), **Portrait** (taller than wide), or **Square** | Compares stored pixel width/height. Images with unknown dimensions match none of the three. |
 | **Date range** | a **from** / **to** day range against one of three fields you pick: **Date taken** (EXIF capture date), **Modified** (file mtime), or **Indexed** (when ImageFind catalogued it) | Days are interpreted in **UTC**; the *to* day is inclusive. Images missing the chosen date (e.g. no EXIF capture date) are excluded once a bound is set. |
 
 The dates are debounced in the browser like the text box, so typing a range
 doesn't fire a request per keystroke. (The API also accepts file-size and pixel
 -dimension bounds; the UI just doesn't surface them.)
+
+### Shareable searches
+
+The full query — search text, every filter, the sort, the view, and the page —
+lives in the browser URL. Copy the address bar to share the exact result set, or
+reload / press Back and it is restored. **Find Similar** is the one exception: it
+is a transient view and does not change the URL.
 
 ### Card and table views
 
@@ -147,12 +158,83 @@ dimensions, size, added date, objects). Both views use the same search, filters,
 sort, and pagination; clicking a card or a table row opens the same detail
 modal. The choice resets to Cards on reload.
 
+### Export
+
+**Export → CSV / JSON** (next to the view toggle) downloads the **entire**
+current result set — not just the visible page — with every filter and sort
+applied. Columns: id, path, filename, format, dimensions, size, dates
+(ISO-8601 UTC), objects, your tags, favorite flag, note, and OCR text. Capped at
+50,000 rows.
+
 ### Sorting
 
 Newest / oldest (capture date), name A–Z / Z–A, largest / smallest file.
 Default is newest first — and with a text query on that default, relevance wins
 and date is the tie-breaker. Pick any other sort and it takes over, with
 relevance as the tie-breaker.
+
+### Favorites, tags, notes & collections
+
+These are **your** curation on top of what the models detected. They are stored
+in the index next to each image, **survive a reindex** (an image keeps its id),
+and are shared by everyone who opens ImageFind (it is a single-account app).
+
+- **Favorite** — the ★ on a card, a table row, or the detail view. Filter with
+  the **★ Favorites** toggle.
+- **Your tags** — free-text tags you add in the detail view (type, then Enter or
+  comma; Backspace on an empty box removes the last one). Separate from RAM++
+  object tags, so they are never overwritten. Filter with **Your tag**.
+- **Note** — a private free-text note per image, in the detail view. Saved when
+  the field loses focus.
+- **Collections** — named sets of images. The **folder button** in the header
+  creates, renames, and deletes them; "Add to collection…" in the detail view
+  puts the open image into one. Filter with **Collection**. Deleting a
+  collection never touches the images.
+
+### Bulk actions
+
+Tick the checkbox on any card or table row to select it. A **bulk action bar**
+appears while one or more are selected:
+
+- **★ Favorite / ☆ Unfavorite** the whole selection
+- **Add tags** — type comma-separated tags; they are *added* to every selected
+  image (existing tags are kept)
+- **Add to collection…**
+- **Download .zip** — bundles the selected originals into one archive (max 500;
+  files with a vanished original are skipped)
+- **Clear** the selection
+
+The selection resets on a new search or Find Similar.
+
+### The detail view
+
+Click a card or table row to open the detail modal: full metadata, recognized
+objects, any OCR text, your ★ / tags / note / "add to collection", **Find
+Similar**, and **Download original**.
+
+The preview loads the **full-resolution original** (over a brief blurred
+thumbnail) so zooming in stays sharp. Zoom and pan it with:
+
+- **scroll** to zoom toward the pointer, **drag** to pan when zoomed
+- **double-click** to toggle 250% / fit
+- the **−  %  +  ⤢** toolbar under the image
+- keyboard: **`+` / `-`** zoom, **`0`** reset, **`←` / `→`** previous / next
+  image, **`Esc`** to close
+
+The **‹ ›** buttons and the arrow keys page through the images currently on
+screen (one page of results at a time).
+
+### Fuzzy (semantic) match
+
+The **Exact / Fuzzy** toggle by the search box switches the query engine. **Exact**
+is the default literal trigram/tag search described above. **Fuzzy** embeds your
+typed words with CLIP and returns the images whose *visual meaning* is closest —
+so "sunset over water" can surface an untitled, untagged photo. Fuzzy match:
+
+- needs query text; it ignores the other filters and pagination (like Find
+  Similar), returning the ~120 closest matches ranked by similarity;
+- can be confidently wrong ("clover" may pull a green baseball field). Use it to
+  cast a wide net, then narrow with Exact.
 
 ### Find Similar
 
@@ -256,6 +338,31 @@ scan** runs every 4 hours and processes only new/changed files. A path missing
 from the share is only deleted after **two consecutive** reconciliation scans
 agree it's gone, so a brief NAS outage won't wipe the index.
 
+### Library stats
+
+The **bar-chart button** in the header opens a stats panel: total images and
+disk size, indexed-date range, counts by **format** and by **year taken**, how
+many images have OCR text / objects / neither, and the ten largest files. It is
+read straight from the index — no reindex needed.
+
+### Duplicate finder
+
+The **overlapping-squares button** in the header scans the first ~5,000 images
+and clusters ones that are visually near-identical (CLIP cosine distance ≤ ~0.08
+— resizes, re-exports, near-crops). It shows each cluster as a strip of
+thumbnails with filename and size; click one to open it. ImageFind never deletes
+files, so use it to spot what to clean up on disk (or to favorite/collection the
+keeper).
+
+### Index backups
+
+**Settings → Index backups → Back up now** writes a consistent, standalone copy
+of the database to `backend/.index/backups/index-<timestamp>.db` (the ten most
+recent are kept). It never blocks searches. **To restore:** stop the server,
+replace `backend/.index/index.db` with a backup copy, delete any
+`index.db-wal` / `index.db-shm` alongside it, and start again. Backups are a
+local-only action (not available through the tunnel).
+
 ---
 
 ## 8. Custom tags
@@ -283,11 +390,16 @@ separators or `..`.
   is no LLM. If you ever want "ask a question, get a sentence about your
   library," that would be a new layer built *on top of* this search — the
   indexing pipeline is already the retrieval half.
-- **No semantic text search.** `clover` matches the literal tag/word, not
-  "things that evoke clovers." Semantic matching is Find Similar only.
+- **Semantic text search is opt-in.** The default **Exact** mode matches the
+  literal tag/word; `clover` does not mean "things that evoke clovers." The
+  **Fuzzy** toggle turns on CLIP text→image ranking for people who want it, with
+  its false positives — it is not the default and does not affect Exact search.
 - **Trigram substring matching.** A 3+ char term can match inside a longer word
   (`cat` inside `communication`, `500` inside `1500`). Relevance ranking and the
   whole-word boost push true matches up, and the Object filter is exact,
   but the text box itself is substring-based by design (so partial words work).
 - **English OCR only.**
-- **Formats:** PNG, JPG/JPEG, WebP, BMP. No HEIC/HEIF, TIFF, GIF, AVIF.
+- **Formats:** PNG, JPG/JPEG, WebP, BMP, GIF, TIFF, AVIF (first frame / first
+  page for multi-frame files). **HEIC/HEIF** work only if the optional
+  `pillow-heif` package is installed on the server; without it they are skipped.
+  For animated GIF/AVIF only the first frame is indexed. No RAW, PSD, SVG.

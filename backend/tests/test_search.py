@@ -1,7 +1,7 @@
 import numpy as np
 import pytest
 
-from app.search import find_similar, search
+from app.search import find_duplicate_groups, find_similar, search, search_semantic
 from app.storage import ImageEntry, IndexStore
 
 
@@ -50,6 +50,17 @@ def test_search_filters_by_format_with_jpg_jpeg_aliased(tmp_path):
     assert {e.id for e in search(store, fmt="jpeg")[0]} == {"jpg1", "jpeg1"}
 
 
+def test_search_format_aliases_cover_tiff_and_heic(tmp_path):
+    store = _store_with(tmp_path, [
+        (_entry("t1", fmt="TIFF"), [1, 0]),
+        (_entry("t2", fmt="TIF"), [1, 0]),
+        (_entry("h1", fmt="HEIF"), [1, 0]),
+    ])
+    assert {e.id for e in search(store, fmt="tif")[0]} == {"t1", "t2"}
+    assert {e.id for e in search(store, fmt="tiff")[0]} == {"t1", "t2"}
+    assert {e.id for e in search(store, fmt="heic")[0]} == {"h1"}
+
+
 def test_search_filters_by_size_range(tmp_path):
     store = _store_with(tmp_path, [
         (_entry("small", size=10_000), [1, 0]),
@@ -86,6 +97,19 @@ def test_search_filters_by_pixel_dimensions(tmp_path):
     assert {e.id for e in search(store, width_min=1000)[0]} == {"hd"}
     assert {e.id for e in search(store, height_min=2000)[0]} == {"tall"}
     assert {e.id for e in search(store, width_min=500, width_max=1000, height_max=5000)[0]} == {"tall"}
+
+
+def test_search_filters_by_orientation(tmp_path):
+    store = _store_with(tmp_path, [
+        (_entry("wide", width=1920, height=1080), [1, 0]),
+        (_entry("tall", width=1080, height=1920), [1, 0]),
+        (_entry("box", width=1000, height=1000), [1, 0]),
+        (_entry("unknown", width=0, height=0), [1, 0]),
+    ])
+
+    assert {e.id for e in search(store, orientation="landscape")[0]} == {"wide"}
+    assert {e.id for e in search(store, orientation="portrait")[0]} == {"tall"}
+    assert {e.id for e in search(store, orientation="square")[0]} == {"box"}
 
 
 def test_search_combines_facets_with_text_and_object(tmp_path):
@@ -312,6 +336,39 @@ def test_search_sorts_by_size_desc(tmp_path):
     ])
     result, _ = search(store, sort="size_desc")
     assert [e.id for e in result] == ["big", "mid", "small"]
+
+
+def test_search_semantic_ranks_by_cosine_distance_to_a_query_vector(tmp_path):
+    store = _store_with(tmp_path, [
+        (_entry("near"), [1.0, 0.02]),
+        (_entry("mid"), [0.7, 0.7]),
+        (_entry("far"), [0.0, 1.0]),
+    ])
+
+    result = search_semantic(store, np.array([1.0, 0.0], dtype=np.float32), limit=2)
+
+    assert [e.id for e in result] == ["near", "mid"]
+    assert search_semantic(store, np.array([1.0, 0.0], dtype=np.float32), limit=0) == []
+
+
+def test_find_duplicate_groups_clusters_near_identical_images(tmp_path):
+    store = _store_with(tmp_path, [
+        (_entry("a1", size=30), [1.0, 0.0]),
+        (_entry("a2", size=10), [0.999, 0.001]),   # ~identical to a1
+        (_entry("a3", size=20), [0.9995, 0.0]),    # ~identical to a1
+        (_entry("b1", size=5), [0.0, 1.0]),
+        (_entry("b2", size=7), [0.001, 0.999]),    # ~identical to b1
+        (_entry("lonely"), [0.6, 0.8]),            # no near twin
+    ])
+
+    groups = find_duplicate_groups(store, threshold=0.05)
+
+    ids = [sorted(e.id for e in group) for group in groups]
+    assert ["a1", "a2", "a3"] in ids
+    assert ["b1", "b2"] in ids
+    assert all("lonely" not in group for group in ids)
+    # Largest cluster first, and members ordered by size desc.
+    assert [e.id for e in groups[0]] == ["a1", "a3", "a2"]
 
 
 def test_find_similar_excludes_self_and_orders_by_similarity(tmp_path):

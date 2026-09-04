@@ -1,3 +1,5 @@
+import numpy as np
+
 from .storage import ImageEntry, IndexStore
 
 
@@ -15,6 +17,10 @@ def search(
     width_max: int | None = None,
     height_min: int | None = None,
     height_max: int | None = None,
+    orientation: str | None = None,
+    favorite: bool | None = None,
+    collection: str | None = None,
+    user_tag: str | None = None,
     sort: str = "date_desc",
     offset: int = 0,
     limit: int = 60,
@@ -33,10 +39,27 @@ def search(
         width_max=width_max,
         height_min=height_min,
         height_max=height_max,
+        orientation=orientation,
+        favorite=favorite,
+        collection=collection,
+        user_tag=user_tag,
         sort=sort,
         offset=offset,
         limit=limit,
     )
+
+
+def search_semantic(
+    store: IndexStore, query_embedding: np.ndarray, limit: int = 60
+) -> list[ImageEntry]:
+    """CLIP text→image ranking. The caller supplies the query-text embedding."""
+    return store.search_semantic(query_embedding, limit=limit)
+
+
+def find_duplicate_groups(
+    store: IndexStore, threshold: float = 0.08, max_images: int = 5000
+) -> list[list[ImageEntry]]:
+    return store.find_duplicate_groups(threshold=threshold, max_images=max_images)
 
 
 def find_similar(

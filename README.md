@@ -24,7 +24,8 @@ For how `npm start` is wired and every command, see
 - Keep completed indexing work when a long reindex is stopped.
 - Store the catalog in SQLite with FTS5 full-text and sqlite-vec vector search.
 
-Supported image formats: PNG, JPG/JPEG, WebP, BMP.
+Supported image formats: PNG, JPG/JPEG, WebP, BMP, GIF, TIFF, AVIF (HEIC/HEIF
+too if the optional `pillow-heif` package is installed).
 
 ## Examples
 

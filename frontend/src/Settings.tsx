@@ -2,13 +2,17 @@ import { useEffect, useRef, useState } from "react";
 import {
   cancelModelDownload,
   cancelReindex,
+  createBackup,
+  fetchBackups,
   fetchModelDownloadStatus,
   fetchModelStatus,
   fetchReindexStatus,
   fetchSettings,
   startModelDownload,
   startReindex,
+  streamReindexStatus,
   updateSettings,
+  type IndexBackup,
   type ModelDownloadStatus,
   type ReindexStatus,
   type Settings as SettingsType,
@@ -21,6 +25,11 @@ interface Props {
 
 function formatMB(bytes: number): string {
   return (bytes / (1024 * 1024)).toFixed(0);
+}
+
+function formatSize(bytes: number): string {
+  if (bytes >= 1024 * 1024) return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
+  return `${Math.max(1, Math.round(bytes / 1024))} KB`;
 }
 
 export function Settings({
@@ -36,7 +45,7 @@ export function Settings({
   const [reindexing, setReindexing] = useState(false);
   const [stopping, setStopping] = useState(false);
   const [status, setStatus] = useState<ReindexStatus | null>(null);
-  const pollRef = useRef<number | null>(null);
+  const stopReindexSubRef = useRef<(() => void) | null>(null);
   const jobIdRef = useRef<string | null>(null);
   const savedImagesDirRef = useRef<string | null>(null);
 
@@ -45,6 +54,10 @@ export function Settings({
   const [modelStatus, setModelStatus] = useState<ModelDownloadStatus | null>(null);
   const modelPollRef = useRef<number | null>(null);
   const modelJobIdRef = useRef<string | null>(null);
+
+  const [backups, setBackups] = useState<IndexBackup[] | null>(null);
+  const [backingUp, setBackingUp] = useState(false);
+  const [backupError, setBackupError] = useState<string | null>(null);
 
   useEffect(() => {
     if (open && settings === null) {
@@ -62,7 +75,25 @@ export function Settings({
         .then((s) => setModelInstalled(s.installed))
         .catch(() => setModelInstalled(null));
     }
-  }, [open, settings, modelInstalled]);
+    if (open && backups === null) {
+      fetchBackups()
+        .then(setBackups)
+        .catch(() => setBackups([]));
+    }
+  }, [open, settings, modelInstalled, backups]);
+
+  async function handleBackup() {
+    setBackingUp(true);
+    setBackupError(null);
+    try {
+      const created = await createBackup();
+      setBackups((current) => [created, ...(current ?? [])]);
+    } catch (err) {
+      setBackupError(err instanceof Error ? err.message : String(err));
+    } finally {
+      setBackingUp(false);
+    }
+  }
 
   useEffect(() => {
     return () => {
@@ -72,9 +103,9 @@ export function Settings({
   }, []);
 
   function stopPolling() {
-    if (pollRef.current !== null) {
-      window.clearInterval(pollRef.current);
-      pollRef.current = null;
+    if (stopReindexSubRef.current !== null) {
+      stopReindexSubRef.current();
+      stopReindexSubRef.current = null;
     }
   }
 
@@ -195,28 +226,40 @@ export function Settings({
     }
     jobIdRef.current = jobId;
 
-    pollRef.current = window.setInterval(async () => {
-      try {
-        const s = await fetchReindexStatus(jobId);
-        setStatus(s);
-        if (s.done) {
-          stopPolling();
-          setReindexing(false);
-          setStopping(false);
-          jobIdRef.current = null;
-          onReindexComplete();
-        }
-      } catch {
+    const onProgress = (s: ReindexStatus) => {
+      setStatus(s);
+      if (s.done) {
         stopPolling();
         setReindexing(false);
         setStopping(false);
         jobIdRef.current = null;
-        setStatus({
-          processed: 0, total: 0, failed: 0, done: true, cancelled: false,
-          error: "Lost connection while checking reindex status.",
-        });
+        onReindexComplete();
       }
-    }, 500);
+    };
+    const onLost = () => {
+      stopPolling();
+      setReindexing(false);
+      setStopping(false);
+      jobIdRef.current = null;
+      setStatus({
+        processed: 0, total: 0, failed: 0, done: true, cancelled: false,
+        error: "Lost connection while checking reindex status.",
+      });
+    };
+
+    const stopStream = streamReindexStatus(jobId, onProgress, onLost);
+    if (stopStream) {
+      stopReindexSubRef.current = stopStream;
+    } else {
+      const timer = window.setInterval(async () => {
+        try {
+          onProgress(await fetchReindexStatus(jobId));
+        } catch {
+          onLost();
+        }
+      }, 500);
+      stopReindexSubRef.current = () => window.clearInterval(timer);
+    }
   }
 
   async function handleStopReindex() {
@@ -330,6 +373,31 @@ export function Settings({
             <span className="reindex-error">{status.failed} image(s) failed to index — check server logs.</span>
           )}
           {status?.error && <span className="reindex-error">{status.error}</span>}
+
+          <div className="settings-backups">
+            <div className="settings-backups-head">
+              <span>Index backups</span>
+              <button type="button" className="btn-ghost" onClick={handleBackup} disabled={backingUp}>
+                {backingUp ? "Backing up…" : "Back up now"}
+              </button>
+            </div>
+            {backupError && <span className="reindex-error">{backupError}</span>}
+            {backups && backups.length > 0 ? (
+              <ul className="settings-backups-list">
+                {backups.map((backup) => (
+                  <li key={backup.name}>
+                    <span title={backup.name}>{backup.name}</span>
+                    <span>{formatSize(backup.size)}</span>
+                  </li>
+                ))}
+              </ul>
+            ) : (
+              <span className="settings-backups-hint">
+                No backups yet. Restore by stopping the server and replacing
+                <code>.index/index.db</code> with a copy from <code>.index/backups/</code>.
+              </span>
+            )}
+          </div>
         </div>
       )}
     </div>

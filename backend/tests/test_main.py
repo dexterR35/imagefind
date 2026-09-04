@@ -1,6 +1,9 @@
 import importlib
+import io
+import json
 import threading
 import time
+import zipfile
 
 import numpy as np
 from fastapi.testclient import TestClient
@@ -219,8 +222,9 @@ def test_search_endpoint_applies_metadata_facets(tmp_path, monkeypatch):
     assert [r["id"] for r in by_dims["results"]] == ["png_big"]
 
     assert client.get("/search", params={"format": "jpeg"}).status_code == 200
+    assert client.get("/search", params={"format": "tiff"}).status_code == 200
     assert client.get("/search", params={"format": "svg"}).status_code == 422
-    assert client.get("/search", params={"format": "tiff"}).status_code == 422
+    assert client.get("/search", params={"format": "psd"}).status_code == 422
     assert client.get("/search", params={"date_field": "nonsense"}).status_code == 422
     assert client.get("/search", params={"width_min": -1}).status_code == 422
 
@@ -562,6 +566,341 @@ def test_download_endpoint_404_for_unknown_id(tmp_path, monkeypatch):
     main, _ = _fresh_app(tmp_path, monkeypatch)
     client = TestClient(main.app)
     assert client.get("/download/missing").status_code == 404
+
+
+def test_image_endpoint_serves_original_inline(tmp_path, monkeypatch):
+    main, _ = _fresh_app(tmp_path, monkeypatch)
+    from app.storage import ImageEntry
+
+    original = tmp_path / "hero.png"
+    original.write_bytes(b"fake-png-bytes")
+    main.store.upsert(
+        ImageEntry(
+            id="i1", path=str(original), thumbnail_path=str(tmp_path / "i1.jpg"),
+            ocr_text="", objects=[], mtime=0.0, size=0,
+        ),
+        np.ones(512, dtype=np.float32),
+    )
+
+    client = TestClient(main.app)
+    response = client.get("/image/i1")
+
+    assert response.status_code == 200
+    assert response.content == b"fake-png-bytes"
+    assert response.headers["content-disposition"] == "inline"
+    assert client.get("/image/missing").status_code == 404
+
+
+def _seed_images(main, tmp_path, ids):
+    from app.storage import ImageEntry
+    for image_id in ids:
+        main.store.upsert(
+            ImageEntry(
+                id=image_id, path=f"/imgs/{image_id}.png",
+                thumbnail_path=str(tmp_path / f"{image_id}.jpg"),
+                ocr_text="", objects=[], mtime=0.0, size=0,
+            ),
+            np.ones(512, dtype=np.float32),
+        )
+
+
+def test_favorite_tag_and_note_endpoints_round_trip_into_search(tmp_path, monkeypatch):
+    main, _ = _fresh_app(tmp_path, monkeypatch)
+    _seed_images(main, tmp_path, ["a", "b"])
+    client = TestClient(main.app)
+
+    assert client.put("/images/a/favorite", json={"favorite": True}).json() == {"favorite": True}
+    assert client.put("/images/a/tags", json={"tags": ["hero", " hero ", "Q4"]}).json() == {
+        "user_tags": ["hero", "Q4"]
+    }
+    assert client.put("/images/a/note", json={"note": "  crop me  "}).json() == {"note": "crop me"}
+
+    body = client.get("/search", params={"favorite": "true"}).json()
+    assert [r["id"] for r in body["results"]] == ["a"]
+    row = body["results"][0]
+    assert row["favorite"] is True
+    assert row["user_tags"] == ["hero", "Q4"]
+    assert row["note"] == "crop me"
+
+    assert [r["id"] for r in client.get("/search", params={"user_tag": "hero"}).json()["results"]] == ["a"]
+    assert client.get("/user-tags").json() == ["hero", "Q4"]
+
+    # Unfavoriting drops it from the filtered view again.
+    client.put("/images/a/favorite", json={"favorite": False})
+    assert client.get("/search", params={"favorite": "true"}).json() == {"results": [], "total": 0}
+
+    assert client.put("/images/missing/favorite", json={"favorite": True}).status_code == 404
+    assert client.put("/images/a/tags", json={"tags": ["x" * 61]}).status_code == 422
+
+
+def test_bulk_favorite_and_tag_endpoints(tmp_path, monkeypatch):
+    main, _ = _fresh_app(tmp_path, monkeypatch)
+    _seed_images(main, tmp_path, ["a", "b", "c"])
+    client = TestClient(main.app)
+
+    assert client.post("/images/favorite", json={"image_ids": ["a", "b"], "favorite": True}).json() == {
+        "changed": 2
+    }
+    assert {r["id"] for r in client.get("/search", params={"favorite": "true"}).json()["results"]} == {"a", "b"}
+
+    assert client.post("/images/tags/add", json={"image_ids": ["a", "b"], "tags": ["q4", "hero"]}).json() == {
+        "added": 4
+    }
+    hero = client.get("/search", params={"user_tag": "hero"}).json()["results"]
+    assert sorted(r["id"] for r in hero) == ["a", "b"]
+
+    # Adding is idempotent and does not clear existing tags.
+    client.post("/images/tags/add", json={"image_ids": ["a"], "tags": ["hero"]})
+    assert client.get("/search", params={"user_tag": "hero"}).json()["total"] == 2
+
+    client.post("/images/favorite", json={"image_ids": ["a"], "favorite": False})
+    assert {r["id"] for r in client.get("/search", params={"favorite": "true"}).json()["results"]} == {"b"}
+
+    assert client.post("/images/tags/add", json={"image_ids": ["a"], "tags": ["x" * 61]}).status_code == 422
+
+    # A stale id in the batch is ignored, not a 500; the valid id still applies.
+    assert client.post(
+        "/images/favorite", json={"image_ids": ["c", "ghost"], "favorite": True}
+    ).json() == {"changed": 1}
+
+
+def test_bulk_zip_download(tmp_path, monkeypatch):
+    main, _ = _fresh_app(tmp_path, monkeypatch)
+    from app.storage import ImageEntry
+
+    files = {}
+    for name in ("a", "b"):
+        original = tmp_path / f"{name}.png"
+        original.write_bytes(f"bytes-{name}".encode())
+        files[name] = original
+        main.store.upsert(
+            ImageEntry(id=name, path=str(original), thumbnail_path=str(tmp_path / f"{name}.jpg"),
+                       ocr_text="", objects=[], mtime=0.0, size=0),
+            np.ones(512, dtype=np.float32),
+        )
+    # A row whose original file is gone is silently skipped, not fatal.
+    main.store.upsert(
+        ImageEntry(id="gone", path=str(tmp_path / "missing.png"),
+                   thumbnail_path=str(tmp_path / "g.jpg"), ocr_text="", objects=[], mtime=0.0, size=0),
+        np.ones(512, dtype=np.float32),
+    )
+
+    client = TestClient(main.app)
+    response = client.get("/download/zip", params={"ids": "a,gone,b"})
+
+    assert response.status_code == 200
+    assert response.headers["content-type"] == "application/zip"
+    assert 'filename="imagefind-' in response.headers["content-disposition"]
+    with zipfile.ZipFile(io.BytesIO(response.content)) as bundle:
+        assert sorted(bundle.namelist()) == ["a.png", "b.png"]
+        assert bundle.read("a.png") == b"bytes-a"
+
+    assert client.get("/download/zip", params={"ids": "nope,also-nope"}).status_code == 404
+    assert client.get("/download/zip", params={"ids": ""}).status_code == 422
+
+
+def test_collection_endpoints(tmp_path, monkeypatch):
+    main, _ = _fresh_app(tmp_path, monkeypatch)
+    _seed_images(main, tmp_path, ["a", "b", "c"])
+    client = TestClient(main.app)
+
+    created = client.post("/collections", json={"name": "Campaign"}).json()
+    assert created["count"] == 0
+    assert client.post("/collections", json={"name": "campaign"}).status_code == 409
+
+    assert client.post(f"/collections/{created['id']}/images", json={"image_ids": ["a", "b"]}).json() == {
+        "added": 2
+    }
+    listing = client.get("/collections").json()
+    assert listing == [{"id": created["id"], "name": "Campaign",
+                        "created_at": created["created_at"], "count": 2}]
+
+    body = client.get("/search", params={"collection": created["id"]}).json()
+    assert {r["id"] for r in body["results"]} == {"a", "b"}
+
+    assert client.request(
+        "DELETE", f"/collections/{created['id']}/images", json={"image_ids": ["a"]}
+    ).json() == {"removed": 1}
+    assert [r["id"] for r in client.get("/search", params={"collection": created["id"]}).json()["results"]] == ["b"]
+
+    assert client.patch(f"/collections/{created['id']}", json={"name": "Renamed"}).status_code == 200
+    assert client.get("/collections").json()[0]["name"] == "Renamed"
+
+    assert client.delete(f"/collections/{created['id']}").status_code == 200
+    assert client.get("/collections").json() == []
+    assert client.delete("/collections/gone").status_code == 404
+    assert client.post("/collections/gone/images", json={"image_ids": ["a"]}).status_code == 404
+
+
+def test_semantic_search_mode_uses_the_text_embedding_ranking(tmp_path, monkeypatch):
+    main, _ = _fresh_app(tmp_path, monkeypatch)
+    from app.storage import ImageEntry
+
+    vecs = {"near": [1.0] + [0.0] * 511, "far": [0.0, 1.0] + [0.0] * 510}
+    for image_id, vec in vecs.items():
+        main.store.upsert(
+            ImageEntry(id=image_id, path=f"/imgs/{image_id}.png",
+                       thumbnail_path=str(tmp_path / f"{image_id}.jpg"),
+                       ocr_text="", objects=[], mtime=0.0, size=0),
+            np.array(vec, dtype=np.float32),
+        )
+
+    from app import embeddings
+    monkeypatch.setattr(
+        embeddings, "embed_text", lambda text: np.array([1.0] + [0.0] * 511, dtype=np.float32)
+    )
+
+    client = TestClient(main.app)
+    body = client.get(
+        "/search", params={"text": "a green field", "mode": "semantic", "limit": 1}
+    ).json()
+    # `limit` is a page size and does not apply to semantic mode — all matches.
+    assert [r["id"] for r in body["results"]] == ["near", "far"]
+    assert body["total"] == 2
+
+    # Without text, semantic mode falls back to the normal (empty) text search.
+    assert client.get("/search", params={"mode": "semantic"}).json()["total"] == 2
+
+
+def test_duplicates_endpoint_groups_near_identical_images(tmp_path, monkeypatch):
+    main, _ = _fresh_app(tmp_path, monkeypatch)
+    from app.storage import ImageEntry
+
+    base = np.zeros(512, dtype=np.float32)
+    base[0] = 1.0
+    twin = base.copy()
+    twin[1] = 0.001
+    other = np.zeros(512, dtype=np.float32)
+    other[5] = 1.0
+    for image_id, vec in [("a", base), ("a_twin", twin), ("z", other)]:
+        main.store.upsert(
+            ImageEntry(id=image_id, path=f"/imgs/{image_id}.png",
+                       thumbnail_path=str(tmp_path / f"{image_id}.jpg"),
+                       ocr_text="", objects=[], mtime=0.0, size=0),
+            vec,
+        )
+
+    groups = TestClient(main.app).get("/duplicates", params={"threshold": 0.05}).json()
+    assert len(groups) == 1
+    assert sorted(r["id"] for r in groups[0]) == ["a", "a_twin"]
+
+
+def test_reindex_status_stream_emits_events_until_done(tmp_path, monkeypatch):
+    main, _ = _fresh_app(tmp_path, monkeypatch)
+
+    def instant(job, force=False):
+        job.total = 1
+        job.processed = 1
+        job.done = True
+
+    monkeypatch.setattr(main.indexer, "run_reindex", instant)
+    client = TestClient(main.app)
+    job_id = client.post("/reindex").json()["job_id"]
+
+    with client.stream("GET", f"/reindex/status/{job_id}/stream") as response:
+        assert response.status_code == 200
+        assert response.headers["content-type"].startswith("text/event-stream")
+        frames = [line for line in response.iter_lines() if line.startswith("data:")]
+    payloads = [json.loads(frame[len("data:"):]) for frame in frames]
+    assert payloads[-1]["done"] is True
+    assert payloads[-1]["processed"] == 1
+
+    assert client.get("/reindex/status/nope/stream").status_code == 404
+
+
+def test_search_export_csv_and_json_stream_the_full_filtered_set(tmp_path, monkeypatch):
+    main, _ = _fresh_app(tmp_path, monkeypatch)
+    from app.storage import ImageEntry
+
+    for i in range(3):
+        main.store.upsert(
+            ImageEntry(
+                id=f"e{i}", path=f"/imgs/e{i}.png", thumbnail_path=str(tmp_path / f"e{i}.jpg"),
+                ocr_text="hi", objects=["cat"], mtime=0.0, size=100 + i,
+                width=10, height=10, format="PNG", date_taken=1_700_000_000.0, indexed_at=5.0,
+            ),
+            np.ones(512, dtype=np.float32),
+        )
+    main.store.set_favorite("e0", True)
+    main.store.set_user_tags("e0", ["hero"])
+
+    client = TestClient(main.app)
+
+    csv_response = client.get("/search/export", params={"sort": "name_asc"})
+    assert csv_response.status_code == 200
+    assert csv_response.headers["content-type"].startswith("text/csv")
+    assert "attachment; filename=" in csv_response.headers["content-disposition"]
+    lines = csv_response.text.strip().splitlines()
+    assert lines[0].startswith("id,path,filename,format,")
+    assert len(lines) == 4  # header + 3 rows
+    assert "e0.png" in lines[1] and "hero" in lines[1] and "True" in lines[1]
+
+    json_rows = client.get("/search/export", params={"output": "json"}).json()
+    assert {row["id"] for row in json_rows} == {"e0", "e1", "e2"}
+    assert json_rows[0]["date_taken"].endswith("+00:00")
+
+    # Filters still apply to the export.
+    assert client.get("/search/export", params={"object": "dog", "output": "json"}).json() == []
+
+
+def test_backup_endpoints_create_and_list_snapshots(tmp_path, monkeypatch):
+    main, _ = _fresh_app(tmp_path, monkeypatch)
+    from app.storage import ImageEntry
+
+    main.store.upsert(
+        ImageEntry(id="a", path="/imgs/a.png", thumbnail_path=str(tmp_path / "a.jpg"),
+                   ocr_text="", objects=[], mtime=0.0, size=0),
+        np.ones(512, dtype=np.float32),
+    )
+    main.store.save()
+    client = TestClient(main.app)
+
+    assert client.get("/backup").json() == []
+    created = client.post("/backup").json()
+    assert created["name"].startswith("index-") and created["name"].endswith(".db")
+    assert created["size"] > 0
+
+    backup_file = main.config.INDEX_DIR / "backups" / created["name"]
+    assert backup_file.is_file()
+    # The copy is a real, standalone SQLite database with the image row in it.
+    import sqlite3
+    with sqlite3.connect(backup_file) as conn:
+        assert conn.execute("SELECT count(*) FROM images").fetchone()[0] == 1
+
+    listing = client.get("/backup").json()
+    assert [item["name"] for item in listing] == [created["name"]]
+
+    # Admin-only: blocked through the tunnel.
+    tunnel = {"cf-ray": "r", "cf-connecting-ip": "203.0.113.9"}
+    assert client.post("/backup", headers=tunnel).status_code == 403
+    assert client.get("/backup", headers=tunnel).status_code == 403
+
+
+def test_stats_endpoint_reports_catalog_aggregates(tmp_path, monkeypatch):
+    main, _ = _fresh_app(tmp_path, monkeypatch)
+    from app.storage import ImageEntry
+
+    rows = [
+        ImageEntry(id="a", path="/imgs/a.png", thumbnail_path=str(tmp_path / "a.jpg"),
+                   ocr_text="HELLO", objects=["cat"], mtime=0.0, size=100,
+                   width=1920, height=1080, format="PNG", date_taken=1_700_000_000.0),
+        ImageEntry(id="b", path="/imgs/b.jpg", thumbnail_path=str(tmp_path / "b.jpg"),
+                   ocr_text="", objects=[], mtime=0.0, size=900,
+                   width=800, height=800, format="JPEG", date_taken=0.0),
+    ]
+    for row in rows:
+        main.store.upsert(row, np.ones(512, dtype=np.float32))
+
+    stats = TestClient(main.app).get("/stats").json()
+
+    assert stats["total"] == 2
+    assert stats["total_size"] == 1000
+    assert stats["with_ocr_text"] == 1
+    assert stats["with_objects"] == 1
+    assert stats["without_ocr_or_objects"] == 1
+    assert {row["format"]: row["count"] for row in stats["by_format"]} == {"PNG": 1, "JPEG": 1}
+    assert {row["year"]: row["count"] for row in stats["by_year"]} == {"2023": 1, "Unknown": 1}
+    assert [row["id"] for row in stats["largest"]] == ["b", "a"]
 
 
 def test_download_endpoint_404_when_original_was_deleted(tmp_path, monkeypatch):

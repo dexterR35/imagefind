@@ -1,10 +1,19 @@
 import { useCallback, useEffect, useRef, useState } from "react";
-import { downloadUrl, type ImageResult } from "./api";
+import { downloadUrl, imageUrl, type Collection, type ImageResult } from "./api";
+import { FavoriteButton } from "./FavoriteButton";
+import { TagEditor } from "./TagEditor";
 
 interface Props {
   image: ImageResult;
   onClose: () => void;
   onFindSimilar: (id: string) => void;
+  onPrev?: () => void;
+  onNext?: () => void;
+  onToggleFavorite?: (id: string, next: boolean) => void;
+  onTagsChange?: (id: string, tags: string[]) => void;
+  onNoteChange?: (id: string, note: string) => void;
+  collections?: Collection[];
+  onAddToCollection?: (collectionId: string, imageId: string) => void;
 }
 
 const MIN_SCALE = 1;
@@ -34,12 +43,18 @@ function formatDate(timestamp: number): string {
   return Number.isNaN(date.getTime()) ? "Unknown" : date.toLocaleString();
 }
 
-export function ImageModal({ image, onClose, onFindSimilar }: Props) {
+export function ImageModal({
+  image, onClose, onFindSimilar, onPrev, onNext,
+  onToggleFavorite, onTagsChange, onNoteChange, collections = [], onAddToCollection,
+}: Props) {
   const filename = image.path.split(/[\\/]/).pop() ?? image.path;
+  const [noteDraft, setNoteDraft] = useState(image.note ?? "");
+  useEffect(() => setNoteDraft(image.note ?? ""), [image.id, image.note]);
   const previewRef = useRef<HTMLDivElement>(null);
   const [scale, setScale] = useState(1);
   const [offset, setOffset] = useState({ x: 0, y: 0 });
   const [dragging, setDragging] = useState(false);
+  const [fullLoaded, setFullLoaded] = useState(false);
   const dragRef = useRef<{ pointerId: number; startX: number; startY: number; originX: number; originY: number } | null>(null);
 
   useEffect(() => {
@@ -54,10 +69,11 @@ export function ImageModal({ image, onClose, onFindSimilar }: Props) {
   useEffect(() => {
     setScale(1);
     setOffset({ x: 0, y: 0 });
+    setFullLoaded(false);
   }, [image.id]);
 
   // Zoom toward an anchor point measured from the preview centre. `anchor`
-  // {x,y} of {0,0} zooms toward the centre (used by the buttons).
+  // {x,y} of {0,0} zooms toward the centre (used by the buttons/keys).
   const zoomTo = useCallback((nextScale: number, anchor: { x: number; y: number }) => {
     setScale((current) => {
       const target = clampScale(nextScale);
@@ -103,6 +119,48 @@ export function ImageModal({ image, onClose, onFindSimilar }: Props) {
     node.addEventListener("wheel", onWheel, { passive: false });
     return () => node.removeEventListener("wheel", onWheel);
   }, [scale, zoomTo]);
+
+  // Keyboard: Esc closes, arrows page between results, +/-/0 drive the zoom.
+  useEffect(() => {
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.ctrlKey || event.metaKey || event.altKey) return;
+      const target = event.target as HTMLElement | null;
+      if (target && ["INPUT", "TEXTAREA", "SELECT"].includes(target.tagName)) {
+        // Let the tag/note fields keep their own keys; one Esc just blurs
+        // (which saves the note) instead of closing the modal.
+        if (event.key === "Escape") target.blur();
+        return;
+      }
+      switch (event.key) {
+        case "Escape":
+          onClose();
+          break;
+        case "ArrowLeft":
+          onPrev?.();
+          break;
+        case "ArrowRight":
+          onNext?.();
+          break;
+        case "+":
+        case "=":
+          event.preventDefault();
+          zoomBy(ZOOM_STEP);
+          break;
+        case "-":
+        case "_":
+          event.preventDefault();
+          zoomBy(1 / ZOOM_STEP);
+          break;
+        case "0":
+          resetView();
+          break;
+        default:
+          break;
+      }
+    };
+    window.addEventListener("keydown", onKeyDown);
+    return () => window.removeEventListener("keydown", onKeyDown);
+  }, [onClose, onPrev, onNext, zoomBy, resetView]);
 
   const onPointerDown = (event: React.PointerEvent<HTMLDivElement>) => {
     if (scale === 1) return;
@@ -172,15 +230,47 @@ export function ImageModal({ image, onClose, onFindSimilar }: Props) {
               onPointerCancel={endDrag}
               onDoubleClick={onDoubleClick}
             >
+              {!fullLoaded && (
+                <img
+                  className="preview-placeholder"
+                  src={image.thumbnail_url}
+                  alt=""
+                  aria-hidden="true"
+                  draggable={false}
+                />
+              )}
               <img
-                src={image.thumbnail_url}
+                src={imageUrl(image.id)}
                 alt={filename}
                 draggable={false}
+                onLoad={() => setFullLoaded(true)}
                 style={{
                   transform: `translate(${offset.x}px, ${offset.y}px) scale(${scale})`,
                   transition: dragging ? "none" : "transform 120ms ease",
                 }}
               />
+              {onPrev && (
+                <button
+                  type="button"
+                  className="preview-nav prev"
+                  aria-label="Previous image"
+                  onPointerDown={(e) => e.stopPropagation()}
+                  onClick={onPrev}
+                >
+                  ‹
+                </button>
+              )}
+              {onNext && (
+                <button
+                  type="button"
+                  className="preview-nav next"
+                  aria-label="Next image"
+                  onPointerDown={(e) => e.stopPropagation()}
+                  onClick={onNext}
+                >
+                  ›
+                </button>
+              )}
             </div>
             <div className="preview-toolbar" role="toolbar" aria-label="Image zoom controls">
               <button type="button" className="icon-button" aria-label="Zoom out" onClick={() => zoomBy(1 / ZOOM_STEP)} disabled={scale <= MIN_SCALE}>−</button>
@@ -190,6 +280,31 @@ export function ImageModal({ image, onClose, onFindSimilar }: Props) {
             </div>
           </div>
           <div className="metadata-panel">
+            {(onToggleFavorite || onAddToCollection) && (
+              <div className="curation-bar">
+                {onToggleFavorite && (
+                  <FavoriteButton
+                    favorite={!!image.favorite}
+                    onToggle={(next) => onToggleFavorite(image.id, next)}
+                  />
+                )}
+                {onAddToCollection && collections.length > 0 && (
+                  <select
+                    aria-label="Add to collection"
+                    value=""
+                    onChange={(e) => {
+                      if (e.target.value) onAddToCollection(e.target.value, image.id);
+                      e.target.value = "";
+                    }}
+                  >
+                    <option value="">Add to collection…</option>
+                    {collections.map((c) => (
+                      <option key={c.id} value={c.id}>{c.name}</option>
+                    ))}
+                  </select>
+                )}
+              </div>
+            )}
             <h3>Image details</h3>
             <dl className="metadata-list">
               <div><dt>Dimensions</dt><dd>{image.width && image.height ? `${image.width} × ${image.height} px` : "Unknown"}</dd></div>
@@ -204,6 +319,32 @@ export function ImageModal({ image, onClose, onFindSimilar }: Props) {
               {image.objects.length > 0 ? image.objects.map((object) => <span key={object}>{object}</span>) : <p>None detected</p>}
             </div>
             {image.ocr_text && <><h3>Detected text</h3><p className="ocr-text">{image.ocr_text}</p></>}
+            {onTagsChange && (
+              <>
+                <h3>Your tags</h3>
+                <TagEditor
+                  tags={image.user_tags ?? []}
+                  onChange={(tags) => onTagsChange(image.id, tags)}
+                />
+              </>
+            )}
+            {onNoteChange && (
+              <>
+                <h3>Note</h3>
+                <textarea
+                  className="note-editor"
+                  aria-label="Note"
+                  rows={3}
+                  maxLength={5000}
+                  placeholder="Add a private note…"
+                  value={noteDraft}
+                  onChange={(e) => setNoteDraft(e.target.value)}
+                  onBlur={() => {
+                    if (noteDraft !== (image.note ?? "")) onNoteChange(image.id, noteDraft);
+                  }}
+                />
+              </>
+            )}
           </div>
         </div>
         <div className="modal-actions">

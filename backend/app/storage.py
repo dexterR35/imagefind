@@ -3,6 +3,7 @@ import logging
 import sqlite3
 import threading
 import time
+import uuid
 from dataclasses import dataclass, fields
 from pathlib import Path
 
@@ -50,10 +51,44 @@ CREATE TABLE IF NOT EXISTS index_store_meta (
     value TEXT NOT NULL
 );
 
+-- User curation. These survive a reindex (an image keeps its id) and are wiped
+-- only when the underlying image row is deleted (ON DELETE CASCADE).
+CREATE TABLE IF NOT EXISTS favorites (
+    image_id TEXT PRIMARY KEY REFERENCES images(id) ON UPDATE CASCADE ON DELETE CASCADE,
+    created_at REAL NOT NULL DEFAULT 0
+);
+
+CREATE TABLE IF NOT EXISTS collections (
+    id TEXT PRIMARY KEY,
+    name TEXT NOT NULL UNIQUE COLLATE NOCASE,
+    created_at REAL NOT NULL DEFAULT 0
+);
+
+CREATE TABLE IF NOT EXISTS collection_images (
+    collection_id TEXT NOT NULL REFERENCES collections(id) ON DELETE CASCADE,
+    image_id TEXT NOT NULL REFERENCES images(id) ON UPDATE CASCADE ON DELETE CASCADE,
+    added_at REAL NOT NULL DEFAULT 0,
+    PRIMARY KEY (collection_id, image_id)
+);
+
+CREATE TABLE IF NOT EXISTS image_user_tags (
+    image_id TEXT NOT NULL REFERENCES images(id) ON UPDATE CASCADE ON DELETE CASCADE,
+    tag TEXT NOT NULL,
+    PRIMARY KEY (image_id, tag)
+);
+
+CREATE TABLE IF NOT EXISTS image_notes (
+    image_id TEXT PRIMARY KEY REFERENCES images(id) ON UPDATE CASCADE ON DELETE CASCADE,
+    note TEXT NOT NULL,
+    updated_at REAL NOT NULL DEFAULT 0
+);
+
 CREATE INDEX IF NOT EXISTS images_date_taken_idx ON images(date_taken, id);
 CREATE INDEX IF NOT EXISTS images_filename_idx ON images(filename COLLATE NOCASE, id);
 CREATE INDEX IF NOT EXISTS images_size_idx ON images(size, id);
 CREATE INDEX IF NOT EXISTS image_objects_label_idx ON image_objects(label, image_id);
+CREATE INDEX IF NOT EXISTS collection_images_image_idx ON collection_images(image_id);
+CREATE INDEX IF NOT EXISTS image_user_tags_tag_idx ON image_user_tags(tag, image_id);
 """
 
 _METADATA_COLUMNS = [
@@ -74,14 +109,18 @@ _INSERT_COLUMNS = (
     "width, height, format, date_taken, indexed_at, embedding"
 )
 _PLACEHOLDERS = ", ".join("?" * 14)
-_DATABASE_SCHEMA_VERSION = 4
+_DATABASE_SCHEMA_VERSION = 5
 _DERIVED_SCHEMA_VERSION = "4"
 
 # A user picking "jpg" means either spelling; PIL stores "JPEG" but the suffix
-# fallback in the indexer stores "JPG".
+# fallback in the indexer stores "JPG". Same idea for the tiff/heic variants.
 _FORMAT_ALIASES = {
     "jpg": ("jpg", "jpeg"),
     "jpeg": ("jpg", "jpeg"),
+    "tif": ("tif", "tiff"),
+    "tiff": ("tif", "tiff"),
+    "heic": ("heic", "heif"),
+    "heif": ("heic", "heif"),
 }
 _DATE_FIELDS = ("date_taken", "mtime", "indexed_at")
 
@@ -204,7 +243,11 @@ class IndexStore:
             "CREATE TRIGGER IF NOT EXISTS images_delete_derived AFTER DELETE ON images BEGIN "
             "DELETE FROM image_objects WHERE image_id=OLD.id; "
             "DELETE FROM image_fts WHERE rowid=OLD.rowid; "
-            "DELETE FROM image_vectors WHERE rowid=OLD.rowid; END"
+            "DELETE FROM image_vectors WHERE rowid=OLD.rowid; "
+            "DELETE FROM favorites WHERE image_id=OLD.id; "
+            "DELETE FROM collection_images WHERE image_id=OLD.id; "
+            "DELETE FROM image_user_tags WHERE image_id=OLD.id; "
+            "DELETE FROM image_notes WHERE image_id=OLD.id; END"
         )
         conn.commit()
 
@@ -546,9 +589,301 @@ class IndexStore:
         with self.lock:
             self._conn.close()
 
+    def backup(self, destination: Path) -> None:
+        """Write a fully consistent, defragmented copy of the committed
+        database to ``destination``.
+
+        ``VACUUM INTO`` produces a standalone file (no ``-wal``/``-shm``
+        companions). It runs on a throwaway read connection so it neither
+        disturbs the live connection's batching transaction nor requires a
+        write lock — searches keep serving while the copy is written.
+        """
+        destination = Path(destination)
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        with self.lock:
+            reader = sqlite3.connect(str(self.db_path), timeout=5)
+            try:
+                reader.execute("VACUUM INTO ?", (str(destination),))
+            finally:
+                reader.close()
+
     def distinct_objects(self) -> list[str]:
         with self.lock:
             return [row[0] for row in self._conn.execute("SELECT DISTINCT label FROM image_objects ORDER BY label")]
+
+    def stats(self, largest: int = 10) -> dict:
+        """Catalog-wide aggregates for the stats dashboard, all computed in SQL."""
+        with self.lock:
+            conn = self._conn
+            total, total_size, indexed_min, indexed_max = conn.execute(
+                "SELECT count(*), coalesce(sum(size), 0), "
+                "min(nullif(indexed_at, 0)), max(indexed_at) FROM images"
+            ).fetchone()
+            by_format = [
+                {"format": (row[0] or "").upper() or "UNKNOWN", "count": row[1]}
+                for row in conn.execute(
+                    "SELECT lower(format), count(*) FROM images "
+                    "GROUP BY lower(format) ORDER BY count(*) DESC, lower(format)"
+                )
+            ]
+            by_year = [
+                {"year": row[0], "count": row[1]}
+                for row in conn.execute(
+                    "SELECT CASE WHEN date_taken > 0 "
+                    "THEN strftime('%Y', date_taken, 'unixepoch') ELSE 'Unknown' END AS year, "
+                    "count(*) FROM images GROUP BY year ORDER BY year DESC"
+                )
+            ]
+            with_ocr = conn.execute(
+                "SELECT count(*) FROM images WHERE trim(ocr_text) != ''"
+            ).fetchone()[0]
+            with_objects = conn.execute(
+                "SELECT count(*) FROM images WHERE json_array_length(objects) > 0"
+            ).fetchone()[0]
+            without_any = conn.execute(
+                "SELECT count(*) FROM images "
+                "WHERE trim(ocr_text) = '' AND json_array_length(objects) = 0"
+            ).fetchone()[0]
+            biggest = [
+                {"id": row[0], "path": row[1], "size": row[2]}
+                for row in conn.execute(
+                    "SELECT id, path, size FROM images ORDER BY size DESC, id LIMIT ?",
+                    (max(0, largest),),
+                )
+            ]
+        return {
+            "total": total,
+            "total_size": total_size,
+            "indexed_at_min": indexed_min,
+            "indexed_at_max": indexed_max,
+            "by_format": by_format,
+            "by_year": by_year,
+            "with_ocr_text": with_ocr,
+            "with_objects": with_objects,
+            "without_ocr_or_objects": without_any,
+            "largest": biggest,
+        }
+
+    # ---- User curation: favorites, manual tags, notes ---------------------
+
+    def _existing_ids(self, image_ids: list[str]) -> list[str]:
+        """Keep only ids that still have an images row — a bulk action on a
+        stale selection must not raise a foreign-key error for the whole batch."""
+        ids = list(dict.fromkeys(image_ids))
+        if not ids:
+            return []
+        placeholders = ", ".join("?" * len(ids))
+        present = {
+            row[0]
+            for row in self._conn.execute(
+                f"SELECT id FROM images WHERE id IN ({placeholders})", ids
+            )
+        }
+        return [image_id for image_id in ids if image_id in present]
+
+    def set_favorite(self, image_id: str, favorite: bool) -> bool:
+        self.set_favorites([image_id], favorite)
+        return favorite
+
+    def set_favorites(self, image_ids: list[str], favorite: bool) -> int:
+        with self.lock:
+            ids = self._existing_ids(image_ids)
+            if not ids:
+                return 0
+            if favorite:
+                now = time.time()
+                cursor = self._conn.executemany(
+                    "INSERT OR IGNORE INTO favorites(image_id, created_at) VALUES (?, ?)",
+                    [(image_id, now) for image_id in ids],
+                )
+            else:
+                placeholders = ", ".join("?" * len(ids))
+                cursor = self._conn.execute(
+                    f"DELETE FROM favorites WHERE image_id IN ({placeholders})", ids
+                )
+            self._conn.commit()
+            return cursor.rowcount
+
+    def add_user_tags(self, image_ids: list[str], tags: list[str]) -> int:
+        """Add each tag to each image (idempotent). Unlike set_user_tags this
+        does not clear existing tags — it is the bulk-select 'tag these' action."""
+        cleaned = sorted({tag.strip() for tag in tags if tag.strip()}, key=str.lower)
+        if not cleaned:
+            return 0
+        with self.lock:
+            ids = self._existing_ids(image_ids)
+            if not ids:
+                return 0
+            cursor = self._conn.executemany(
+                "INSERT OR IGNORE INTO image_user_tags(image_id, tag) VALUES (?, ?)",
+                [(image_id, tag) for image_id in ids for tag in cleaned],
+            )
+            self._conn.commit()
+            return cursor.rowcount
+
+    def set_user_tags(self, image_id: str, tags: list[str]) -> list[str]:
+        cleaned = sorted({tag.strip() for tag in tags if tag.strip()}, key=str.lower)
+        with self.lock:
+            self._conn.execute("DELETE FROM image_user_tags WHERE image_id=?", (image_id,))
+            self._conn.executemany(
+                "INSERT INTO image_user_tags(image_id, tag) VALUES (?, ?)",
+                [(image_id, tag) for tag in cleaned],
+            )
+            self._conn.commit()
+        return cleaned
+
+    def set_note(self, image_id: str, note: str) -> str:
+        note = note.strip()
+        with self.lock:
+            if note:
+                self._conn.execute(
+                    "INSERT INTO image_notes(image_id, note, updated_at) VALUES (?, ?, ?) "
+                    "ON CONFLICT(image_id) DO UPDATE SET "
+                    "note=excluded.note, updated_at=excluded.updated_at",
+                    (image_id, note, time.time()),
+                )
+            else:
+                self._conn.execute("DELETE FROM image_notes WHERE image_id=?", (image_id,))
+            self._conn.commit()
+        return note
+
+    def distinct_user_tags(self) -> list[str]:
+        with self.lock:
+            return [
+                row[0]
+                for row in self._conn.execute(
+                    "SELECT DISTINCT tag FROM image_user_tags ORDER BY tag COLLATE NOCASE"
+                )
+            ]
+
+    def get_annotations(self, image_ids: list[str]) -> dict[str, dict]:
+        """Favorite flag, user tags and note for a batch of images — one query
+        per table, so a page of results costs 3 statements, not 3N."""
+        ids = list(dict.fromkeys(image_ids))
+        if not ids:
+            return {}
+        placeholders = ", ".join("?" * len(ids))
+        with self.lock:
+            favorites = {
+                row[0]
+                for row in self._conn.execute(
+                    f"SELECT image_id FROM favorites WHERE image_id IN ({placeholders})", ids
+                )
+            }
+            tags: dict[str, list[str]] = {}
+            for image_id, tag in self._conn.execute(
+                f"SELECT image_id, tag FROM image_user_tags "
+                f"WHERE image_id IN ({placeholders}) ORDER BY tag COLLATE NOCASE",
+                ids,
+            ):
+                tags.setdefault(image_id, []).append(tag)
+            notes = dict(
+                self._conn.execute(
+                    f"SELECT image_id, note FROM image_notes WHERE image_id IN ({placeholders})",
+                    ids,
+                )
+            )
+        return {
+            image_id: {
+                "favorite": image_id in favorites,
+                "user_tags": tags.get(image_id, []),
+                "note": notes.get(image_id, ""),
+            }
+            for image_id in ids
+        }
+
+    # ---- Collections ----------------------------------------------------
+
+    def list_collections(self) -> list[dict]:
+        with self.lock:
+            return [
+                {"id": row[0], "name": row[1], "created_at": row[2], "count": row[3]}
+                for row in self._conn.execute(
+                    "SELECT c.id, c.name, c.created_at, "
+                    "(SELECT count(*) FROM collection_images ci WHERE ci.collection_id=c.id) "
+                    "FROM collections c ORDER BY c.name COLLATE NOCASE"
+                )
+            ]
+
+    def create_collection(self, name: str) -> dict:
+        name = name.strip()
+        if not name:
+            raise ValueError("collection name must not be empty")
+        collection_id = uuid.uuid4().hex
+        now = time.time()
+        with self.lock:
+            try:
+                self._conn.execute(
+                    "INSERT INTO collections(id, name, created_at) VALUES (?, ?, ?)",
+                    (collection_id, name, now),
+                )
+            except sqlite3.IntegrityError as exc:
+                raise ValueError(f"a collection named {name!r} already exists") from exc
+            self._conn.commit()
+        return {"id": collection_id, "name": name, "created_at": now, "count": 0}
+
+    def rename_collection(self, collection_id: str, name: str) -> bool:
+        name = name.strip()
+        if not name:
+            raise ValueError("collection name must not be empty")
+        with self.lock:
+            try:
+                cursor = self._conn.execute(
+                    "UPDATE collections SET name=? WHERE id=?", (name, collection_id)
+                )
+            except sqlite3.IntegrityError as exc:
+                raise ValueError(f"a collection named {name!r} already exists") from exc
+            self._conn.commit()
+            return cursor.rowcount > 0
+
+    def delete_collection(self, collection_id: str) -> bool:
+        with self.lock:
+            cursor = self._conn.execute(
+                "DELETE FROM collections WHERE id=?", (collection_id,)
+            )
+            self._conn.commit()
+            return cursor.rowcount > 0
+
+    def collection_exists(self, collection_id: str) -> bool:
+        with self.lock:
+            return (
+                self._conn.execute(
+                    "SELECT 1 FROM collections WHERE id=?", (collection_id,)
+                ).fetchone()
+                is not None
+            )
+
+    def add_to_collection(self, collection_id: str, image_ids: list[str]) -> int:
+        now = time.time()
+        with self.lock:
+            if not self._conn.execute(
+                "SELECT 1 FROM collections WHERE id=?", (collection_id,)
+            ).fetchone():
+                raise KeyError(collection_id)
+            ids = self._existing_ids(image_ids)
+            if not ids:
+                return 0
+            cursor = self._conn.executemany(
+                "INSERT OR IGNORE INTO collection_images(collection_id, image_id, added_at) "
+                "VALUES (?, ?, ?)",
+                [(collection_id, image_id, now) for image_id in ids],
+            )
+            self._conn.commit()
+            return cursor.rowcount
+
+    def remove_from_collection(self, collection_id: str, image_ids: list[str]) -> int:
+        ids = list(dict.fromkeys(image_ids))
+        if not ids:
+            return 0
+        placeholders = ", ".join("?" * len(ids))
+        with self.lock:
+            cursor = self._conn.execute(
+                f"DELETE FROM collection_images "
+                f"WHERE collection_id=? AND image_id IN ({placeholders})",
+                [collection_id, *ids],
+            )
+            self._conn.commit()
+            return cursor.rowcount
 
     def search(
         self,
@@ -564,6 +899,10 @@ class IndexStore:
         width_max: int | None = None,
         height_min: int | None = None,
         height_max: int | None = None,
+        orientation: str | None = None,
+        favorite: bool | None = None,
+        collection: str | None = None,
+        user_tag: str | None = None,
         sort: str = "date_desc",
         offset: int = 0,
         limit: int = 60,
@@ -628,6 +967,26 @@ class IndexStore:
             if value is not None:
                 clauses.append(f"images.{column} {op} ?")
                 params.append(value)
+        if orientation == "portrait":
+            clauses.append("images.height > images.width")
+        elif orientation == "landscape":
+            clauses.append("images.width > images.height")
+        elif orientation == "square":
+            clauses.append("images.width = images.height AND images.width > 0")
+        if favorite:
+            clauses.append("EXISTS (SELECT 1 FROM favorites f WHERE f.image_id=images.id)")
+        if collection:
+            clauses.append(
+                "EXISTS (SELECT 1 FROM collection_images ci "
+                "WHERE ci.image_id=images.id AND ci.collection_id=?)"
+            )
+            params.append(collection)
+        if user_tag:
+            clauses.append(
+                "EXISTS (SELECT 1 FROM image_user_tags ut "
+                "WHERE ut.image_id=images.id AND ut.tag=?)"
+            )
+            params.append(user_tag)
 
         where = " WHERE " + " AND ".join(clauses) if clauses else ""
         # Columns must be qualified: the FTS join brings its own path/filename/
@@ -679,6 +1038,92 @@ class IndexStore:
                 [*params, *order_params, limit, offset],
             ).fetchall()
         return [_row_to_entry(row) for row in rows], total
+
+    def search_semantic(self, embedding: np.ndarray, limit: int = 60) -> list[ImageEntry]:
+        """CLIP text→image search: nearest images to a query-text embedding,
+        ranked by cosine distance. Metadata facets do not apply (like
+        find_similar, this is a pure vector ranking)."""
+        vector = np.asarray(embedding, dtype=np.float32)
+        if vector.shape != (self.embedding_dim,):
+            raise ValueError(
+                f"query embedding has shape {vector.shape}; expected ({self.embedding_dim},)"
+            )
+        if limit <= 0:
+            return []
+        with self.lock:
+            rows = self._conn.execute(
+                "WITH nearest AS MATERIALIZED ("
+                "SELECT rowid, distance FROM image_vectors "
+                "WHERE embedding MATCH ? AND k=? ORDER BY distance"
+                ") SELECT " + _SELECT_COLUMNS + " FROM nearest "
+                "JOIN images ON images.rowid=nearest.rowid "
+                "ORDER BY nearest.distance, nearest.rowid LIMIT ?",
+                (vector, limit, limit),
+            ).fetchall()
+        return [_row_to_entry(row) for row in rows]
+
+    def find_duplicate_groups(
+        self, threshold: float = 0.08, max_images: int = 5000, max_groups: int = 50
+    ) -> list[list[ImageEntry]]:
+        """Cluster visually near-identical images by CLIP cosine distance.
+
+        Each image is unioned with its <= k nearest neighbours that fall within
+        ``threshold`` cosine distance (0 = identical). Only clusters of two or
+        more are returned, largest first.
+        """
+        with self.lock:
+            rowids = [
+                row[0]
+                for row in self._conn.execute(
+                    "SELECT rowid FROM images ORDER BY rowid LIMIT ?", (max(1, max_images),)
+                )
+            ]
+            if len(rowids) < 2:
+                return []
+            parent = {rowid: rowid for rowid in rowids}
+
+            def find(node: int) -> int:
+                while parent[node] != node:
+                    parent[node] = parent[parent[node]]
+                    node = parent[node]
+                return node
+
+            def union(a: int, b: int) -> None:
+                root_a, root_b = find(a), find(b)
+                if root_a != root_b:
+                    parent[root_a] = root_b
+
+            in_scope = set(rowids)
+            for rowid in rowids:
+                neighbours = self._conn.execute(
+                    "SELECT rowid, distance FROM image_vectors "
+                    "WHERE embedding MATCH (SELECT embedding FROM image_vectors WHERE rowid=?) "
+                    "AND k=? ORDER BY distance",
+                    (rowid, 6),
+                ).fetchall()
+                for neighbour_id, distance in neighbours:
+                    if neighbour_id != rowid and neighbour_id in in_scope and distance <= threshold:
+                        union(rowid, neighbour_id)
+
+            clusters: dict[int, list[int]] = {}
+            for rowid in rowids:
+                clusters.setdefault(find(rowid), []).append(rowid)
+            groups = sorted(
+                (members for members in clusters.values() if len(members) >= 2),
+                key=len,
+                reverse=True,
+            )[: max(0, max_groups)]
+
+            result: list[list[ImageEntry]] = []
+            for members in groups:
+                placeholders = ", ".join("?" * len(members))
+                rows = self._conn.execute(
+                    f"SELECT {_SELECT_COLUMNS} FROM images "
+                    f"WHERE rowid IN ({placeholders}) ORDER BY size DESC, id",
+                    members,
+                ).fetchall()
+                result.append([_row_to_entry(row) for row in rows])
+            return result
 
     def find_similar(self, image_id: str, limit: int = 20) -> list[ImageEntry] | None:
         with self.lock:

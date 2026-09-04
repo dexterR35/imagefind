@@ -17,9 +17,24 @@ from . import ocr
 from . import thumbnails
 from .storage import ImageEntry, IndexStore
 
-IMAGE_EXTENSIONS = {".png", ".jpg", ".jpeg", ".webp", ".bmp"}
-
 logger = logging.getLogger(__name__)
+
+# GIF / TIFF / AVIF decode natively in current Pillow (first frame / first page
+# is used for the thumbnail, embedding, OCR and tags). HEIC/HEIF need the
+# optional `pillow-heif` package; if it is installed we register its opener and
+# accept those extensions too, otherwise they are simply not indexed.
+IMAGE_EXTENSIONS = {".png", ".jpg", ".jpeg", ".webp", ".bmp", ".gif", ".tif", ".tiff", ".avif"}
+try:  # pragma: no cover - depends on an optional dependency being installed
+    import pillow_heif  # type: ignore
+
+    pillow_heif.register_heif_opener()
+    IMAGE_EXTENSIONS |= {".heic", ".heif"}
+    try:
+        pillow_heif.register_avif_opener()
+    except AttributeError:
+        pass
+except Exception:  # noqa: BLE001 - any import/registration failure just skips HEIC
+    pass
 
 
 @dataclass

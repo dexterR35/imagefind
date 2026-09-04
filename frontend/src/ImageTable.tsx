@@ -1,8 +1,12 @@
 import type { ImageResult } from "./api";
+import { FavoriteButton } from "./FavoriteButton";
 
 interface Props {
   images: ImageResult[];
   onSelect: (image: ImageResult) => void;
+  onToggleFavorite?: (id: string, next: boolean) => void;
+  selectedIds?: Set<string>;
+  onToggleSelect?: (id: string) => void;
 }
 
 function formatBytes(bytes: number): string {
@@ -26,12 +30,16 @@ function formatDate(timestamp: number): string {
     : date.toLocaleDateString(undefined, { year: "numeric", month: "short", day: "numeric" });
 }
 
-export function ImageTable({ images, onSelect }: Props) {
+export function ImageTable({
+  images, onSelect, onToggleFavorite, selectedIds, onToggleSelect,
+}: Props) {
   return (
     <div className="image-table-wrap">
       <table className="image-table">
         <thead>
           <tr>
+            {onToggleSelect && <th scope="col" className="col-fav" aria-label="Select" />}
+            {onToggleFavorite && <th scope="col" className="col-fav" aria-label="Favorite" />}
             <th scope="col" className="col-thumb" aria-label="Preview" />
             <th scope="col">Name</th>
             <th scope="col">Type</th>
@@ -47,7 +55,30 @@ export function ImageTable({ images, onSelect }: Props) {
             const type =
               (image.format || filename.split(".").pop() || "").toUpperCase() || "—";
             return (
-              <tr key={image.id} onClick={() => onSelect(image)}>
+              <tr
+                key={image.id}
+                className={selectedIds?.has(image.id) ? "is-selected" : undefined}
+                onClick={() => onSelect(image)}
+              >
+                {onToggleSelect && (
+                  <td className="col-fav">
+                    <input
+                      type="checkbox"
+                      aria-label={`Select ${filename}`}
+                      checked={selectedIds?.has(image.id) ?? false}
+                      onClick={(event) => event.stopPropagation()}
+                      onChange={() => onToggleSelect(image.id)}
+                    />
+                  </td>
+                )}
+                {onToggleFavorite && (
+                  <td className="col-fav">
+                    <FavoriteButton
+                      favorite={!!image.favorite}
+                      onToggle={(next) => onToggleFavorite(image.id, next)}
+                    />
+                  </td>
+                )}
                 <td className="col-thumb">
                   <img src={image.thumbnail_url} alt="" loading="lazy" />
                 </td>

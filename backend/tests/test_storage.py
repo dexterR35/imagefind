@@ -28,7 +28,7 @@ def test_upsert_save_load_roundtrip(tmp_path):
     assert reloaded.get("a1").ocr_text == "NETBET"
     assert reloaded.get_embedding("a1").tolist() == [1.0, 0.0, 0.0, 0.0]
     assert reloaded.get_by_path("/imgs/a.png").id == "a1"
-    assert reloaded._conn.execute("PRAGMA user_version").fetchone()[0] == 4
+    assert reloaded._conn.execute("PRAGMA user_version").fetchone()[0] == 5
 
 
 def test_upsert_save_load_roundtrip_preserves_new_metadata_fields(tmp_path):
@@ -354,6 +354,24 @@ def test_delete_by_path_removes_entry_and_keeps_embeddings_aligned(tmp_path):
     reloaded = IndexStore(tmp_path, embedding_dim=4)
     reloaded.load()
     assert reloaded.get("a1") is None
+
+
+def test_backup_writes_a_standalone_consistent_copy(tmp_path):
+    store = IndexStore(tmp_path, embedding_dim=4)
+    store.load()
+    store.upsert(_entry(), np.array([1.0, 0.0, 0.0, 0.0], dtype=np.float32))
+    store.save()
+
+    destination = tmp_path / "snapshots" / "index-copy.db"
+    store.backup(destination)
+
+    assert destination.is_file()
+    assert not destination.with_name(destination.name + "-wal").exists()
+    copy = sqlite3.connect(destination)
+    try:
+        assert copy.execute("SELECT ocr_text FROM images WHERE id='a1'").fetchone()[0] == "NETBET"
+    finally:
+        copy.close()
 
 
 def test_migration_marker_prevents_resurrecting_legitimately_pruned_entries(tmp_path):

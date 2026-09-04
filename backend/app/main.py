@@ -1,20 +1,27 @@
+import csv
+import io
 import logging
 import math
 import hmac
 import json
+import tempfile
 import threading
 import time
 import unicodedata
 import uuid
+import zipfile
 from contextlib import asynccontextmanager
+from dataclasses import dataclass
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Literal
 
-from fastapi import FastAPI, HTTPException, Query, Request
+from fastapi import Depends, FastAPI, HTTPException, Query, Request
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse, JSONResponse
+from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field, field_validator
+from starlette.background import BackgroundTask
 
 SortOption = Literal["date_desc", "date_asc", "name_asc", "name_desc", "size_desc", "size_asc"]
 
@@ -23,8 +30,10 @@ from .auth import AuthSession, AuthStore, MAX_PASSWORD_BYTES
 from .indexer import Indexer, ReindexJob
 from .model_download import ModelDownloadJob, is_ram_checkpoint_installed, run_download
 from .rate_limit import SlidingWindowRateLimiter
+from .search import find_duplicate_groups as run_find_duplicate_groups
 from .search import find_similar as run_find_similar
 from .search import search as run_search
+from .search import search_semantic as run_search_semantic
 from .storage import IndexStore
 
 logger = logging.getLogger(__name__)
@@ -164,6 +173,19 @@ def _entry_to_dict(e) -> dict:
     }
 
 
+_EMPTY_ANNOTATION = {"favorite": False, "user_tags": [], "note": ""}
+
+
+def _entries_with_annotations(results) -> list[dict]:
+    """Attach each viewer-curated field (favorite / user_tags / note) to the
+    serialized image dicts in one batched lookup."""
+    entries = [_entry_to_dict(e) for e in results]
+    annotations = store.get_annotations([entry["id"] for entry in entries])
+    for entry in entries:
+        entry.update(annotations.get(entry["id"], _EMPTY_ANNOTATION))
+    return entries
+
+
 def _sanitize_search_value(value: str | None, field: str) -> str | None:
     if value is None:
         return None
@@ -173,8 +195,11 @@ def _sanitize_search_value(value: str | None, field: str) -> str | None:
     return value or None
 
 
-# Mirrors the indexer's IMAGE_EXTENSIONS (plus the "jpeg" spelling of "jpg").
-_ALLOWED_FORMATS = {"png", "jpg", "jpeg", "webp", "bmp"}
+# Mirrors the indexer's IMAGE_EXTENSIONS (plus the alternate spellings).
+_ALLOWED_FORMATS = {
+    "png", "jpg", "jpeg", "webp", "bmp",
+    "gif", "tif", "tiff", "avif", "heic", "heif",
+}
 
 
 def _normalize_format(value: str | None) -> str | None:
@@ -447,10 +472,31 @@ def health():
 
 DateField = Literal["date_taken", "mtime", "indexed_at"]
 
+EXPORT_MAX_ROWS = 50_000
 
-@app.get("/search")
-def search_endpoint(
-    request: Request,
+
+@dataclass
+class SearchQuery:
+    text: str | None
+    obj: str | None
+    fmt: str | None
+    size_min: int | None
+    size_max: int | None
+    date_field: str
+    date_from: float | None
+    date_to: float | None
+    width_min: int | None
+    width_max: int | None
+    height_min: int | None
+    height_max: int | None
+    orientation: str | None
+    favorite: bool | None
+    collection: str | None
+    user_tag: str | None
+    sort: str
+
+
+def search_query(
     text: str | None = Query(None, max_length=200),
     object: str | None = Query(None, max_length=128),
     format: str | None = Query(None, max_length=16),
@@ -463,19 +509,16 @@ def search_endpoint(
     width_max: int | None = Query(None, ge=0, le=1_000_000),
     height_min: int | None = Query(None, ge=0, le=1_000_000),
     height_max: int | None = Query(None, ge=0, le=1_000_000),
+    orientation: Literal["portrait", "landscape", "square"] | None = None,
+    favorite: bool | None = None,
+    collection: str | None = Query(None, max_length=64),
+    user_tag: str | None = Query(None, max_length=80),
     sort: SortOption = "date_desc",
-    offset: int = Query(0, ge=0, le=10_000_000),
-    limit: int = Query(60, ge=1, le=200),
-):
-    _enforce_search_rate_limit(request)
-    text = _sanitize_search_value(text, "text")
-    object = _sanitize_search_value(object, "object")
-    fmt = _normalize_format(format)
-    results, total = run_search(
-        store,
-        text=text,
-        obj=object,
-        fmt=fmt,
+) -> SearchQuery:
+    return SearchQuery(
+        text=_sanitize_search_value(text, "text"),
+        obj=_sanitize_search_value(object, "object"),
+        fmt=_normalize_format(format),
         size_min=size_min,
         size_max=size_max,
         date_field=date_field,
@@ -485,11 +528,161 @@ def search_endpoint(
         width_max=width_max,
         height_min=height_min,
         height_max=height_max,
+        orientation=orientation,
+        favorite=favorite or None,
+        collection=collection,
+        user_tag=_sanitize_search_value(user_tag, "user_tag"),
         sort=sort,
+    )
+
+
+def _run_search_query(query: SearchQuery, offset: int, limit: int):
+    return run_search(
+        store,
+        text=query.text,
+        obj=query.obj,
+        fmt=query.fmt,
+        size_min=query.size_min,
+        size_max=query.size_max,
+        date_field=query.date_field,
+        date_from=query.date_from,
+        date_to=query.date_to,
+        width_min=query.width_min,
+        width_max=query.width_max,
+        height_min=query.height_min,
+        height_max=query.height_max,
+        orientation=query.orientation,
+        favorite=query.favorite,
+        collection=query.collection,
+        user_tag=query.user_tag,
+        sort=query.sort,
         offset=offset,
         limit=limit,
     )
-    return {"results": [_entry_to_dict(e) for e in results], "total": total}
+
+
+SEMANTIC_MAX_RESULTS = 120
+
+
+@app.get("/search")
+def search_endpoint(
+    request: Request,
+    query: SearchQuery = Depends(search_query),
+    mode: Literal["text", "semantic"] = "text",
+    offset: int = Query(0, ge=0, le=10_000_000),
+    limit: int = Query(60, ge=1, le=200),
+):
+    _enforce_search_rate_limit(request)
+    if mode == "semantic" and query.text:
+        # CLIP text→image ranking: one fixed nearest-neighbour set, no facets,
+        # no paging (like Find Similar) — so the client's page-size `limit` and
+        # `offset` don't apply.
+        from . import embeddings
+
+        vector = embeddings.embed_text(query.text)
+        results = run_search_semantic(store, vector, limit=SEMANTIC_MAX_RESULTS)
+        entries = _entries_with_annotations(results)
+        return {"results": entries, "total": len(entries)}
+    results, total = _run_search_query(query, offset, limit)
+    return {"results": _entries_with_annotations(results), "total": total}
+
+
+@app.get("/duplicates")
+def duplicates_endpoint(
+    request: Request,
+    threshold: float = Query(0.08, ge=0.0, le=1.0),
+    max_images: int = Query(5000, ge=2, le=20_000),
+):
+    _enforce_search_rate_limit(request)
+    groups = run_find_duplicate_groups(store, threshold=threshold, max_images=max_images)
+    return [_entries_with_annotations(group) for group in groups]
+
+
+def _iso(timestamp: float | None) -> str:
+    if not timestamp:
+        return ""
+    try:
+        return datetime.fromtimestamp(float(timestamp), tz=timezone.utc).isoformat()
+    except (OverflowError, OSError, ValueError):
+        return ""
+
+
+_EXPORT_HEADER = [
+    "id", "path", "filename", "format", "width", "height", "size",
+    "date_taken", "mtime", "indexed_at", "objects", "user_tags", "favorite", "note", "ocr_text",
+]
+
+
+def _export_row(entry: dict) -> dict:
+    return {
+        "id": entry["id"],
+        "path": entry["path"],
+        "filename": Path(entry["path"]).name,
+        "format": entry["format"],
+        "width": entry["width"],
+        "height": entry["height"],
+        "size": entry["size"],
+        "date_taken": _iso(entry["date_taken"]),
+        "mtime": _iso(entry["mtime"]),
+        "indexed_at": _iso(entry["indexed_at"]),
+        "objects": entry["objects"],
+        "user_tags": entry["user_tags"],
+        "favorite": entry["favorite"],
+        "note": entry["note"],
+        "ocr_text": entry["ocr_text"],
+    }
+
+
+@app.get("/search/export")
+def search_export_endpoint(
+    request: Request,
+    query: SearchQuery = Depends(search_query),
+    output: Literal["csv", "json"] = "csv",
+    limit: int = Query(EXPORT_MAX_ROWS, ge=1, le=EXPORT_MAX_ROWS),
+):
+    _enforce_download_rate_limit(request)
+    results, _ = _run_search_query(query, 0, limit)
+    rows = [_export_row(entry) for entry in _entries_with_annotations(results)]
+    stamp = datetime.now(tz=timezone.utc).strftime("%Y%m%d-%H%M%S")
+
+    if output == "json":
+        def stream_json():
+            yield "["
+            for index, row in enumerate(rows):
+                yield ("," if index else "") + json.dumps(row, separators=(",", ":"))
+            yield "]"
+
+        media_type = "application/json"
+        content = stream_json()
+        extension = "json"
+    else:
+        def stream_csv():
+            buffer = io.StringIO()
+            writer = csv.writer(buffer)
+            for record in (_EXPORT_HEADER, *(
+                [
+                    "; ".join(row[key]) if isinstance(row[key], list) else row[key]
+                    for key in _EXPORT_HEADER
+                ]
+                for row in rows
+            )):
+                writer.writerow(record)
+                yield buffer.getvalue()
+                buffer.seek(0)
+                buffer.truncate(0)
+
+        media_type = "text/csv"
+        content = stream_csv()
+        extension = "csv"
+
+    return StreamingResponse(
+        content,
+        media_type=media_type,
+        headers={
+            "Content-Disposition": f'attachment; filename="imagefind-export-{stamp}.{extension}"',
+            "Cache-Control": "no-store",
+        },
+    )
 
 
 @app.get("/search/similar/{image_id}")
@@ -498,7 +691,7 @@ def similar_endpoint(request: Request, image_id: str):
     results = run_find_similar(store, image_id)
     if results is None:
         raise HTTPException(status_code=404, detail="image not found")
-    return [_entry_to_dict(e) for e in results]
+    return _entries_with_annotations(results)
 
 
 @app.post("/reindex")
@@ -526,11 +719,39 @@ def reindex_status(request: Request, job_id: str):
         job = jobs.get(job_id)
     if job is None:
         raise HTTPException(status_code=404, detail="job not found")
+    return _reindex_job_payload(job)
+
+
+def _reindex_job_payload(job: ReindexJob) -> dict:
     return {
         "processed": job.processed, "total": job.total, "failed": job.failed,
         "done": job.done, "error": job.error, "cancelled": job.cancelled,
         "failures": job.failures,
     }
+
+
+@app.get("/reindex/status/{job_id}/stream")
+def reindex_status_stream(request: Request, job_id: str):
+    """Server-sent events version of the status poll: one `data:` frame per
+    tick until the job finishes, then the stream closes."""
+    _require_local_admin(request)
+    with _jobs_lock:
+        job = jobs.get(job_id)
+    if job is None:
+        raise HTTPException(status_code=404, detail="job not found")
+
+    def events():
+        while True:
+            yield f"data: {json.dumps(_reindex_job_payload(job))}\n\n"
+            if job.done:
+                return
+            time.sleep(0.5)
+
+    return StreamingResponse(
+        events(),
+        media_type="text/event-stream",
+        headers={"Cache-Control": "no-store", "X-Accel-Buffering": "no", "Connection": "keep-alive"},
+    )
 
 
 @app.post("/reindex/{job_id}/cancel")
@@ -563,6 +784,83 @@ def thumbnail_endpoint(image_id: str):
     )
 
 
+@app.get("/image/{image_id}")
+def image_endpoint(request: Request, image_id: str):
+    """Serve the full-resolution original inline, for the detail view's
+    zoom/pan preview (the thumbnail is only ~320px and blurs when magnified)."""
+    _enforce_download_rate_limit(request)
+    entry = store.get(image_id)
+    if entry is None:
+        raise HTTPException(status_code=404, detail="image not found")
+    original = Path(entry.path)
+    if not original.is_file():
+        raise HTTPException(status_code=404, detail="original image file not found")
+    return FileResponse(
+        original,
+        headers={
+            "Cache-Control": "private, max-age=3600",
+            "Content-Disposition": "inline",
+        },
+    )
+
+
+@app.get("/stats")
+def stats_endpoint(request: Request):
+    _enforce_search_rate_limit(request)
+    return store.stats()
+
+
+MAX_ZIP_IMAGES = 500
+
+
+@app.get("/download/zip")
+def download_zip_endpoint(request: Request, ids: str = Query(..., max_length=MAX_ZIP_IMAGES * 40)):
+    """Bundle the originals for a bulk selection into a single zip download."""
+    _enforce_download_rate_limit(request)
+    image_ids = [value for value in ids.split(",") if value][:MAX_ZIP_IMAGES]
+    if not image_ids:
+        raise HTTPException(status_code=422, detail="no image ids given")
+
+    archive = tempfile.NamedTemporaryFile(prefix="imagefind-zip-", suffix=".zip", delete=False)
+    used_names: set[str] = set()
+    written = 0
+    try:
+        with zipfile.ZipFile(archive, "w", compression=zipfile.ZIP_STORED) as bundle:
+            for image_id in image_ids:
+                entry = store.get(image_id)
+                if entry is None:
+                    continue
+                source = Path(entry.path)
+                if not source.is_file():
+                    continue
+                name = source.name
+                if name in used_names:
+                    name = f"{source.stem}_{image_id[:8]}{source.suffix}"
+                used_names.add(name)
+                bundle.write(source, arcname=name)
+                written += 1
+        archive.close()
+    except Exception:
+        archive.close()
+        Path(archive.name).unlink(missing_ok=True)
+        raise
+    if written == 0:
+        Path(archive.name).unlink(missing_ok=True)
+        raise HTTPException(status_code=404, detail="none of the selected originals are available")
+
+    stamp = datetime.now(tz=timezone.utc).strftime("%Y%m%d-%H%M%S")
+    activity_logger.info(
+        "Bulk zip download | files=%d | client=%s", written, _client_ip(request),
+    )
+    return FileResponse(
+        archive.name,
+        media_type="application/zip",
+        filename=f"imagefind-{stamp}.zip",
+        headers={"Cache-Control": "no-store"},
+        background=BackgroundTask(lambda: Path(archive.name).unlink(missing_ok=True)),
+    )
+
+
 @app.get("/download/{image_id}")
 def download_endpoint(request: Request, image_id: str):
     _enforce_download_rate_limit(request)
@@ -591,6 +889,152 @@ def download_endpoint(request: Request, image_id: str):
 @app.get("/objects")
 def objects_endpoint():
     return store.distinct_objects()
+
+
+@app.get("/user-tags")
+def user_tags_endpoint(request: Request):
+    return store.distinct_user_tags()
+
+
+MAX_USER_TAG_LENGTH = 60
+MAX_USER_TAGS = 50
+MAX_NOTE_LENGTH = 5000
+MAX_BULK_IMAGE_IDS = 1000
+
+
+def _clean_tag_list(value: list[str]) -> list[str]:
+    cleaned: list[str] = []
+    for tag in value:
+        tag = unicodedata.normalize("NFC", tag).strip()
+        if not tag:
+            continue
+        if len(tag) > MAX_USER_TAG_LENGTH:
+            raise ValueError(f"tag {tag!r} exceeds {MAX_USER_TAG_LENGTH} characters")
+        if any(unicodedata.category(ch) == "Cc" for ch in tag):
+            raise ValueError("tags must not contain control characters")
+        cleaned.append(tag)
+    return cleaned
+
+
+class FavoriteUpdate(BaseModel):
+    favorite: bool
+
+
+class TagsUpdate(BaseModel):
+    tags: list[str] = Field(default_factory=list, max_length=MAX_USER_TAGS)
+
+    @field_validator("tags")
+    @classmethod
+    def _clean_tags(cls, value: list[str]) -> list[str]:
+        return _clean_tag_list(value)
+
+
+class NoteUpdate(BaseModel):
+    note: str = Field(default="", max_length=MAX_NOTE_LENGTH)
+
+
+class CollectionCreate(BaseModel):
+    name: str = Field(min_length=1, max_length=120)
+
+
+class CollectionImages(BaseModel):
+    image_ids: list[str] = Field(min_length=1, max_length=MAX_BULK_IMAGE_IDS)
+
+
+class BulkFavorite(BaseModel):
+    image_ids: list[str] = Field(min_length=1, max_length=MAX_BULK_IMAGE_IDS)
+    favorite: bool
+
+
+class BulkTags(BaseModel):
+    image_ids: list[str] = Field(min_length=1, max_length=MAX_BULK_IMAGE_IDS)
+    tags: list[str] = Field(min_length=1, max_length=MAX_USER_TAGS)
+
+    @field_validator("tags")
+    @classmethod
+    def _clean_tags(cls, value: list[str]) -> list[str]:
+        return _clean_tag_list(value)
+
+
+def _require_image(image_id: str) -> None:
+    if store.get(image_id) is None:
+        raise HTTPException(status_code=404, detail="image not found")
+
+
+@app.put("/images/{image_id}/favorite")
+def set_favorite_endpoint(request: Request, image_id: str, body: FavoriteUpdate):
+    _require_image(image_id)
+    store.set_favorite(image_id, body.favorite)
+    return {"favorite": body.favorite}
+
+
+@app.post("/images/favorite")
+def bulk_favorite_endpoint(request: Request, body: BulkFavorite):
+    return {"changed": store.set_favorites(body.image_ids, body.favorite)}
+
+
+@app.post("/images/tags/add")
+def bulk_add_tags_endpoint(request: Request, body: BulkTags):
+    return {"added": store.add_user_tags(body.image_ids, body.tags)}
+
+
+@app.put("/images/{image_id}/tags")
+def set_tags_endpoint(request: Request, image_id: str, body: TagsUpdate):
+    _require_image(image_id)
+    return {"user_tags": store.set_user_tags(image_id, body.tags)}
+
+
+@app.put("/images/{image_id}/note")
+def set_note_endpoint(request: Request, image_id: str, body: NoteUpdate):
+    _require_image(image_id)
+    return {"note": store.set_note(image_id, body.note)}
+
+
+@app.get("/collections")
+def list_collections_endpoint(request: Request):
+    return store.list_collections()
+
+
+@app.post("/collections")
+def create_collection_endpoint(request: Request, body: CollectionCreate):
+    try:
+        return store.create_collection(body.name)
+    except ValueError as exc:
+        raise HTTPException(status_code=409, detail=str(exc))
+
+
+@app.patch("/collections/{collection_id}")
+def rename_collection_endpoint(request: Request, collection_id: str, body: CollectionCreate):
+    try:
+        renamed = store.rename_collection(collection_id, body.name)
+    except ValueError as exc:
+        raise HTTPException(status_code=409, detail=str(exc))
+    if not renamed:
+        raise HTTPException(status_code=404, detail="collection not found")
+    return {"status": "ok"}
+
+
+@app.delete("/collections/{collection_id}")
+def delete_collection_endpoint(request: Request, collection_id: str):
+    if not store.delete_collection(collection_id):
+        raise HTTPException(status_code=404, detail="collection not found")
+    return {"status": "ok"}
+
+
+@app.post("/collections/{collection_id}/images")
+def add_collection_images_endpoint(request: Request, collection_id: str, body: CollectionImages):
+    try:
+        added = store.add_to_collection(collection_id, body.image_ids)
+    except KeyError:
+        raise HTTPException(status_code=404, detail="collection not found")
+    return {"added": added}
+
+
+@app.delete("/collections/{collection_id}/images")
+def remove_collection_images_endpoint(request: Request, collection_id: str, body: CollectionImages):
+    if not store.collection_exists(collection_id):
+        raise HTTPException(status_code=404, detail="collection not found")
+    return {"removed": store.remove_from_collection(collection_id, body.image_ids)}
 
 
 @app.get("/model/status")
@@ -676,6 +1120,49 @@ def _settings_dict() -> dict:
         "ram_custom_tags": config.RAM_CUSTOM_TAGS,
         "images_dir": str(config.IMAGES_DIR),
     }
+
+
+MAX_BACKUPS = 10
+
+
+def _backup_dir() -> Path:
+    return config.INDEX_DIR / "backups"
+
+
+def _backup_info(path: Path) -> dict:
+    stat = path.stat()
+    return {"name": path.name, "size": stat.st_size, "created_at": stat.st_mtime}
+
+
+@app.get("/backup")
+def list_backups_endpoint(request: Request):
+    _require_local_admin(request)
+    directory = _backup_dir()
+    if not directory.is_dir():
+        return []
+    return sorted(
+        (_backup_info(path) for path in directory.glob("index-*.db")),
+        key=lambda item: item["created_at"],
+        reverse=True,
+    )
+
+
+@app.post("/backup")
+def create_backup_endpoint(request: Request):
+    _require_local_admin(request)
+    directory = _backup_dir()
+    stamp = datetime.now(tz=timezone.utc).strftime("%Y%m%d-%H%M%S")
+    destination = directory / f"index-{stamp}.db"
+    store.backup(destination)
+    # Keep only the most recent MAX_BACKUPS so this cannot fill the disk.
+    existing = sorted(directory.glob("index-*.db"), key=lambda p: p.stat().st_mtime)
+    for stale in existing[:-MAX_BACKUPS]:
+        stale.unlink(missing_ok=True)
+    activity_logger.info(
+        "Index backup written | file=%s | bytes=%d | client=%s",
+        destination.name, destination.stat().st_size, _client_ip(request),
+    )
+    return _backup_info(destination)
 
 
 @app.get("/settings")
