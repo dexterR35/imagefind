@@ -26,6 +26,41 @@ describe("search", () => {
     expect(results.total).toBe(1);
   });
 
+  it("serializes metadata facets, sending date_field only with a date bound", async () => {
+    const mockFetch = vi.fn().mockResolvedValue({
+      ok: true,
+      json: async () => ({ results: [], total: 0 }),
+    });
+    vi.stubGlobal("fetch", mockFetch);
+
+    await search({
+      format: "png",
+      sizeMin: 1_500_000,
+      sizeMax: 5_000_000,
+      dateField: "mtime",
+      dateFrom: 1_704_067_200,
+      widthMin: 800,
+      heightMax: 2000,
+    });
+
+    expect(mockFetch).toHaveBeenCalledWith(
+      "/api/search?format=png&size_min=1500000&size_max=5000000&date_from=1704067200" +
+        "&date_field=mtime&width_min=800&height_max=2000",
+    );
+  });
+
+  it("omits date_field when no date bound is set", async () => {
+    const mockFetch = vi.fn().mockResolvedValue({
+      ok: true,
+      json: async () => ({ results: [], total: 0 }),
+    });
+    vi.stubGlobal("fetch", mockFetch);
+
+    await search({ dateField: "indexed_at", format: "webp" });
+
+    expect(mockFetch).toHaveBeenCalledWith("/api/search?format=webp");
+  });
+
   it("resolves thumbnail_url through the same-origin API proxy", async () => {
     const mockFetch = vi.fn().mockResolvedValue({
       ok: true,

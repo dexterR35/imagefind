@@ -25,6 +25,18 @@ describe("ImageGrid", () => {
     expect(screen.getByText("No images match these filters.")).toBeInTheDocument();
   });
 
+  it("renders a table with a row per image in table view and reports clicks", () => {
+    const onSelect = vi.fn();
+    render(<ImageGrid images={sample} view="table" onSelect={onSelect} />);
+
+    expect(screen.getByRole("table")).toBeInTheDocument();
+    expect(screen.getByRole("columnheader", { name: "Dimensions" })).toBeInTheDocument();
+    expect(screen.getByRole("cell", { name: "1920 × 1080" })).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("button", { name: "clover.png" }));
+    expect(onSelect).toHaveBeenCalledWith(sample[0]);
+  });
+
   it("shows only the filename for Windows NAS paths", () => {
     const windowsImage = { ...sample[0], path: "Z:\\campaign\\Promo ™.png" };
     render(<ImageGrid images={[windowsImage]} onSelect={vi.fn()} />);

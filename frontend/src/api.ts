@@ -13,9 +13,21 @@ export interface ImageResult {
   indexed_at: number;
 }
 
+export type DateField = "date_taken" | "mtime" | "indexed_at";
+
 export interface SearchFilters {
   text?: string;
   object?: string;
+  format?: string;
+  sizeMin?: number; // bytes
+  sizeMax?: number; // bytes
+  dateField?: DateField;
+  dateFrom?: number; // unix seconds
+  dateTo?: number; // unix seconds
+  widthMin?: number;
+  widthMax?: number;
+  heightMin?: number;
+  heightMax?: number;
 }
 
 export type SortOption =
@@ -135,6 +147,21 @@ export async function search(
   const params = new URLSearchParams();
   if (filters.text) params.set("text", filters.text);
   if (filters.object) params.set("object", filters.object);
+  if (filters.format) params.set("format", filters.format);
+  if (filters.sizeMin !== undefined) params.set("size_min", String(filters.sizeMin));
+  if (filters.sizeMax !== undefined) params.set("size_max", String(filters.sizeMax));
+  if (filters.dateFrom !== undefined) params.set("date_from", String(filters.dateFrom));
+  if (filters.dateTo !== undefined) params.set("date_to", String(filters.dateTo));
+  if (
+    (filters.dateFrom !== undefined || filters.dateTo !== undefined) &&
+    filters.dateField
+  ) {
+    params.set("date_field", filters.dateField);
+  }
+  if (filters.widthMin !== undefined) params.set("width_min", String(filters.widthMin));
+  if (filters.widthMax !== undefined) params.set("width_max", String(filters.widthMax));
+  if (filters.heightMin !== undefined) params.set("height_min", String(filters.heightMin));
+  if (filters.heightMax !== undefined) params.set("height_max", String(filters.heightMax));
   if (options.sort) params.set("sort", options.sort);
   if (options.offset !== undefined) params.set("offset", String(options.offset));
   if (options.limit !== undefined) params.set("limit", String(options.limit));

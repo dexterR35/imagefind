@@ -88,21 +88,30 @@ existing browser session.
 
 ## Start
 
+Local only, no tunnel:
+
 ```powershell
 npm start
 ```
 
+With a public Cloudflare tunnel:
+
+```powershell
+npm run start:tunnel
+```
+
 Open:
 
-- ImageFind (frontend and API): <http://localhost:8000>
-- API documentation: <http://localhost:8000/docs>
-- Public tunnel: use the temporary `trycloudflare.com` URL printed by the
-  `[tunnel]` process
+- ImageFind (frontend and API): <http://localhost:5175>
+- API documentation: <http://localhost:5175/docs>
+- Public tunnel (`start:tunnel` only): use the temporary `trycloudflare.com`
+  URL printed in the `[tunnel] Ready:` block once the backend is up
 
-`npm start` first creates an optimized React production build, then starts the
-single localhost-only FastAPI server and the Cloudflare quick tunnel. Vite is
-not exposed. Press `Ctrl+C` once to stop both processes. A new temporary public
-URL is generated each time the command starts.
+Both commands first create an optimized React production build, then start the
+single localhost-only FastAPI server; Vite is never exposed. `npm run
+start:tunnel` additionally runs a Cloudflare quick tunnel, started only after
+the backend is accepting connections, and prints a fresh temporary public URL
+each run. Press `Ctrl+C` once to stop everything.
 
 For frontend development only, run `npm run start:frontend`; that starts Vite
 on port 5173 and proxies `/api` to the local backend.
@@ -142,7 +151,7 @@ local setup instructions and protected API routes remain inaccessible.
 
 ## First-time setup
 
-1. Open the local app at <http://localhost:8000>, then open **Settings**.
+1. Open the local app at <http://localhost:5175>, then open **Settings**.
 2. Enter the image folder, for example `Z:\Photos` or
    `Z:\##Work\NETBET`.
 3. Select **Install RAM++ Model** if the model is not installed yet.
@@ -283,7 +292,7 @@ npm run build
 ## Remote access
 
 FastAPI serves the production frontend and API on one origin. The tunnel points
-to `127.0.0.1:8000`, while Uvicorn remains bound to localhost and runs without
-auto-reload. Share only the generated tunnel URL; do not bind port 8000 to the
+to `127.0.0.1:5175`, while Uvicorn remains bound to localhost and runs without
+auto-reload. Share only the generated tunnel URL; do not bind port 5175 to the
 LAN or internet. Quick tunnels are temporary infrastructure and do not provide
 an uptime guarantee.

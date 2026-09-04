@@ -5,11 +5,15 @@ from app.search import find_similar, search
 from app.storage import ImageEntry, IndexStore
 
 
-def _entry(id, objects=None, ocr_text="", date_taken=0.0, size=0, path=None):
+def _entry(
+    id, objects=None, ocr_text="", date_taken=0.0, size=0, path=None,
+    fmt="", width=0, height=0, mtime=0.0, indexed_at=0.0,
+):
     return ImageEntry(
         id=id, path=path or f"/imgs/{id}.png", thumbnail_path=f"/t/{id}.jpg",
         ocr_text=ocr_text, objects=objects or [],
-        mtime=0.0, size=size, date_taken=date_taken,
+        mtime=mtime, size=size, date_taken=date_taken,
+        format=fmt, width=width, height=height, indexed_at=indexed_at,
     )
 
 
@@ -29,6 +33,73 @@ def test_search_filters_by_exact_object(tmp_path):
     result, total = search(store, obj="clover")
     assert [e.id for e in result] == ["a"]
     assert total == 1
+
+
+def test_search_filters_by_format_with_jpg_jpeg_aliased(tmp_path):
+    store = _store_with(tmp_path, [
+        (_entry("png1", fmt="PNG"), [1, 0]),
+        (_entry("jpg1", fmt="JPG"), [1, 0]),
+        (_entry("jpeg1", fmt="JPEG"), [1, 0]),
+        (_entry("webp1", fmt="WEBP"), [1, 0]),
+    ])
+
+    assert {e.id for e in search(store, fmt="png")[0]} == {"png1"}
+    assert {e.id for e in search(store, fmt="webp")[0]} == {"webp1"}
+    # "jpg" and "jpeg" are the same request; both stored spellings come back.
+    assert {e.id for e in search(store, fmt="jpg")[0]} == {"jpg1", "jpeg1"}
+    assert {e.id for e in search(store, fmt="jpeg")[0]} == {"jpg1", "jpeg1"}
+
+
+def test_search_filters_by_size_range(tmp_path):
+    store = _store_with(tmp_path, [
+        (_entry("small", size=10_000), [1, 0]),
+        (_entry("mid", size=500_000), [1, 0]),
+        (_entry("big", size=5_000_000), [1, 0]),
+    ])
+
+    assert {e.id for e in search(store, size_min=100_000)[0]} == {"mid", "big"}
+    assert {e.id for e in search(store, size_max=1_000_000)[0]} == {"small", "mid"}
+    assert {e.id for e in search(store, size_min=100_000, size_max=1_000_000)[0]} == {"mid"}
+
+
+def test_search_date_range_targets_the_selected_field(tmp_path):
+    store = _store_with(tmp_path, [
+        (_entry("a", date_taken=1_000.0, mtime=9_000.0, indexed_at=100.0), [1, 0]),
+        (_entry("b", date_taken=5_000.0, mtime=2_000.0, indexed_at=800.0), [1, 0]),
+    ])
+
+    # Same numeric window, different field -> different rows.
+    assert [e.id for e in search(store, date_field="date_taken", date_from=3_000.0)[0]] == ["b"]
+    assert [e.id for e in search(store, date_field="mtime", date_from=3_000.0)[0]] == ["a"]
+    assert [e.id for e in search(store, date_field="indexed_at", date_to=500.0)[0]] == ["a"]
+    # An unknown field name falls back to date_taken rather than erroring.
+    assert [e.id for e in search(store, date_field="bogus", date_from=3_000.0)[0]] == ["b"]
+
+
+def test_search_filters_by_pixel_dimensions(tmp_path):
+    store = _store_with(tmp_path, [
+        (_entry("tiny", width=320, height=240), [1, 0]),
+        (_entry("hd", width=1920, height=1080), [1, 0]),
+        (_entry("tall", width=800, height=4000), [1, 0]),
+    ])
+
+    assert {e.id for e in search(store, width_min=1000)[0]} == {"hd"}
+    assert {e.id for e in search(store, height_min=2000)[0]} == {"tall"}
+    assert {e.id for e in search(store, width_min=500, width_max=1000, height_max=5000)[0]} == {"tall"}
+
+
+def test_search_combines_facets_with_text_and_object(tmp_path):
+    store = _store_with(tmp_path, [
+        (_entry("hit", objects=["clover"], ocr_text="bonus", fmt="PNG", size=2_000_000), [1, 0]),
+        (_entry("wrong_format", objects=["clover"], ocr_text="bonus", fmt="JPG", size=2_000_000), [1, 0]),
+        (_entry("too_small", objects=["clover"], ocr_text="bonus", fmt="PNG", size=1_000), [1, 0]),
+        (_entry("wrong_object", objects=["person"], ocr_text="bonus", fmt="PNG", size=2_000_000), [1, 0]),
+    ])
+
+    result, total = search(store, text="bonus", obj="clover", fmt="png", size_min=1_000_000)
+
+    assert total == 1
+    assert [e.id for e in result] == ["hit"]
 
 
 def test_search_text_matches_ocr_text(tmp_path):

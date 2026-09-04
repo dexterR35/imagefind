@@ -77,6 +77,14 @@ _PLACEHOLDERS = ", ".join("?" * 14)
 _DATABASE_SCHEMA_VERSION = 4
 _DERIVED_SCHEMA_VERSION = "4"
 
+# A user picking "jpg" means either spelling; PIL stores "JPEG" but the suffix
+# fallback in the indexer stores "JPG".
+_FORMAT_ALIASES = {
+    "jpg": ("jpg", "jpeg"),
+    "jpeg": ("jpg", "jpeg"),
+}
+_DATE_FIELDS = ("date_taken", "mtime", "indexed_at")
+
 
 @dataclass
 class ImageEntry:
@@ -546,6 +554,16 @@ class IndexStore:
         self,
         text: str | None = None,
         obj: str | None = None,
+        fmt: str | None = None,
+        size_min: int | None = None,
+        size_max: int | None = None,
+        date_field: str = "date_taken",
+        date_from: float | None = None,
+        date_to: float | None = None,
+        width_min: int | None = None,
+        width_max: int | None = None,
+        height_min: int | None = None,
+        height_max: int | None = None,
         sort: str = "date_desc",
         offset: int = 0,
         limit: int = 60,
@@ -580,6 +598,36 @@ class IndexStore:
                 "AND instr(lower(o.label), lower(?)) > 0))"
             )
             params.extend((text, text, text, text))
+
+        # Metadata facets. Each is an independent, indexed comparison on the
+        # images row and AND-s with everything above.
+        if fmt:
+            spellings = _FORMAT_ALIASES.get(fmt.lower(), (fmt.lower(),))
+            placeholders = ", ".join("?" * len(spellings))
+            clauses.append(f"lower(images.format) IN ({placeholders})")
+            params.extend(spellings)
+        if size_min is not None:
+            clauses.append("images.size >= ?")
+            params.append(size_min)
+        if size_max is not None:
+            clauses.append("images.size <= ?")
+            params.append(size_max)
+        date_column = date_field if date_field in _DATE_FIELDS else "date_taken"
+        if date_from is not None:
+            clauses.append(f"images.{date_column} >= ?")
+            params.append(date_from)
+        if date_to is not None:
+            clauses.append(f"images.{date_column} <= ?")
+            params.append(date_to)
+        for value, column, op in (
+            (width_min, "width", ">="),
+            (width_max, "width", "<="),
+            (height_min, "height", ">="),
+            (height_max, "height", "<="),
+        ):
+            if value is not None:
+                clauses.append(f"images.{column} {op} ?")
+                params.append(value)
 
         where = " WHERE " + " AND ".join(clauses) if clauses else ""
         # Columns must be qualified: the FTS join brings its own path/filename/

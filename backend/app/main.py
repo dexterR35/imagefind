@@ -173,6 +173,20 @@ def _sanitize_search_value(value: str | None, field: str) -> str | None:
     return value or None
 
 
+# Mirrors the indexer's IMAGE_EXTENSIONS (plus the "jpeg" spelling of "jpg").
+_ALLOWED_FORMATS = {"png", "jpg", "jpeg", "webp", "bmp"}
+
+
+def _normalize_format(value: str | None) -> str | None:
+    value = _sanitize_search_value(value, "format")
+    if value is None:
+        return None
+    value = value.lower().lstrip(".")
+    if value not in _ALLOWED_FORMATS:
+        raise HTTPException(status_code=422, detail=f"unsupported format {value!r}")
+    return value
+
+
 def _enforce_search_rate_limit(request: Request) -> None:
     client_key = _request_rate_limit_key(request)
     retry_after = _search_rate_limiter.retry_after(client_key)
@@ -431,11 +445,24 @@ def health():
     return {"status": "ok"}
 
 
+DateField = Literal["date_taken", "mtime", "indexed_at"]
+
+
 @app.get("/search")
 def search_endpoint(
     request: Request,
     text: str | None = Query(None, max_length=200),
     object: str | None = Query(None, max_length=128),
+    format: str | None = Query(None, max_length=16),
+    size_min: int | None = Query(None, ge=0, le=1_000_000_000_000),
+    size_max: int | None = Query(None, ge=0, le=1_000_000_000_000),
+    date_field: DateField = "date_taken",
+    date_from: float | None = Query(None, ge=0, le=100_000_000_000),
+    date_to: float | None = Query(None, ge=0, le=100_000_000_000),
+    width_min: int | None = Query(None, ge=0, le=1_000_000),
+    width_max: int | None = Query(None, ge=0, le=1_000_000),
+    height_min: int | None = Query(None, ge=0, le=1_000_000),
+    height_max: int | None = Query(None, ge=0, le=1_000_000),
     sort: SortOption = "date_desc",
     offset: int = Query(0, ge=0, le=10_000_000),
     limit: int = Query(60, ge=1, le=200),
@@ -443,8 +470,24 @@ def search_endpoint(
     _enforce_search_rate_limit(request)
     text = _sanitize_search_value(text, "text")
     object = _sanitize_search_value(object, "object")
+    fmt = _normalize_format(format)
     results, total = run_search(
-        store, text=text, obj=object, sort=sort, offset=offset, limit=limit
+        store,
+        text=text,
+        obj=object,
+        fmt=fmt,
+        size_min=size_min,
+        size_max=size_max,
+        date_field=date_field,
+        date_from=date_from,
+        date_to=date_to,
+        width_min=width_min,
+        width_max=width_max,
+        height_min=height_min,
+        height_max=height_max,
+        sort=sort,
+        offset=offset,
+        limit=limit,
     )
     return {"results": [_entry_to_dict(e) for e in results], "total": total}
 

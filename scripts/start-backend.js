@@ -5,11 +5,19 @@
 // backend/app/config.py already falls back to ./images, and it's meant to be
 // set via the Settings panel now (persisted to .index/settings.json).
 const fs = require("node:fs");
+const net = require("node:net");
 const path = require("node:path");
-const { spawnSync } = require("node:child_process");
+const { spawn, spawnSync } = require("node:child_process");
 
 const backendDir = path.join(__dirname, "..", "backend");
 const pythonRelPath = process.platform === "win32" ? "Scripts/python.exe" : "bin/python";
+const host = "127.0.0.1";
+const port = Number.parseInt(process.env.IMAGEFIND_PORT || "5175", 10);
+
+if (!Number.isInteger(port) || port < 1 || port > 65535) {
+  console.error(`Invalid IMAGEFIND_PORT: ${process.env.IMAGEFIND_PORT}`);
+  process.exit(1);
+}
 
 // Different machines/setups have ended up with the venv under different
 // names (.venv, venv, .venv312, ...) - rather than hardcoding one and
@@ -32,21 +40,143 @@ if (!venvDir) {
 
 const venvPython = path.join(backendDir, venvDir, pythonRelPath);
 
-const result = spawnSync(venvPython, [
-  "-m", "uvicorn", "app.main:app",
-  "--host", "127.0.0.1",
-  "--port", "8000",
-  "--proxy-headers",
-  "--forwarded-allow-ips", "127.0.0.1",
-  "--no-server-header",
-], {
-  cwd: backendDir,
-  stdio: "inherit",
-});
+function listeningPids() {
+  if (process.platform === "win32") {
+    const result = spawnSync("netstat", ["-ano", "-p", "tcp"], { encoding: "utf8" });
+    if (result.error || result.status !== 0) return [];
 
-if (result.error) {
-  console.error(`Failed to start backend: ${result.error.message}`);
-  process.exit(1);
+    const pids = new Set();
+    for (const line of result.stdout.split(/\r?\n/)) {
+      const columns = line.trim().split(/\s+/);
+      if (columns.length < 5 || columns[0].toUpperCase() !== "TCP") continue;
+      const localAddress = columns[1];
+      const state = columns[3].toUpperCase();
+      const pid = Number.parseInt(columns[4], 10);
+      if (state === "LISTENING" && localAddress.endsWith(`:${port}`) && pid !== process.pid) {
+        pids.add(pid);
+      }
+    }
+    return [...pids];
+  }
+
+  const result = spawnSync(
+    "lsof",
+    ["-nP", `-iTCP:${port}`, "-sTCP:LISTEN", "-t"],
+    { encoding: "utf8" },
+  );
+  if (result.error || (result.status !== 0 && result.status !== 1)) return [];
+  return [...new Set(
+    result.stdout
+      .split(/\s+/)
+      .map((value) => Number.parseInt(value, 10))
+      .filter((pid) => Number.isInteger(pid) && pid !== process.pid),
+  )];
 }
 
-process.exit(result.status ?? 1);
+function terminateProcessTree(pid) {
+  console.log(`Port ${port} is already in use by PID ${pid}; stopping it...`);
+  if (process.platform === "win32") {
+    const result = spawnSync("taskkill", ["/PID", String(pid), "/T", "/F"], { stdio: "inherit" });
+    return result.status === 0;
+  }
+
+  try {
+    process.kill(pid, "SIGTERM");
+    return true;
+  } catch (error) {
+    console.error(`Could not stop PID ${pid}: ${error.message}`);
+    return false;
+  }
+}
+
+function portIsAvailable() {
+  return new Promise((resolve) => {
+    const probe = net.createServer();
+    probe.unref();
+    probe.once("error", () => resolve(false));
+    probe.listen({ host, port }, () => probe.close(() => resolve(true)));
+  });
+}
+
+async function waitForAvailablePort(timeoutMs = 5000) {
+  const deadline = Date.now() + timeoutMs;
+  do {
+    if (await portIsAvailable()) return true;
+    await new Promise((resolve) => setTimeout(resolve, 100));
+  } while (Date.now() < deadline);
+  return false;
+}
+
+async function main() {
+  const owners = listeningPids();
+  if (owners.length > 0) {
+    const stopped = owners.every(terminateProcessTree);
+    if (!stopped || !(await waitForAvailablePort())) {
+      console.error(`Could not free ${host}:${port}. Stop its process manually and try again.`);
+      process.exit(1);
+    }
+  } else if (!(await portIsAvailable())) {
+    console.error(
+      `${host}:${port} is in use, but its owner could not be identified. ` +
+      "Stop that process manually and try again.",
+    );
+    process.exit(1);
+  }
+
+  const backend = spawn(venvPython, [
+    "-m", "uvicorn", "app.main:app",
+    "--host", host,
+    "--port", String(port),
+    "--proxy-headers",
+    "--forwarded-allow-ips", host,
+    "--no-server-header",
+  ], {
+    cwd: backendDir,
+    stdio: "inherit",
+  });
+
+  let shuttingDown = false;
+  let forceKillTimer;
+
+  function stopBackend(signal = "SIGTERM") {
+    if (shuttingDown) return;
+    shuttingDown = true;
+
+    if (backend.exitCode !== null || backend.signalCode !== null) return;
+    if (process.platform === "win32") {
+      // Ctrl+C is delivered to every process attached to the console, so give
+      // Uvicorn time to run its application shutdown hooks. SIGTERM from
+      // concurrently does not always reach grandchildren on Windows; taskkill
+      // is therefore retained as a short fallback for that case.
+      forceKillTimer = setTimeout(() => {
+        if (backend.exitCode === null && backend.signalCode === null) {
+          spawnSync("taskkill", ["/PID", String(backend.pid), "/T", "/F"], { stdio: "ignore" });
+        }
+      }, 5000);
+    } else {
+      backend.kill(signal);
+    }
+  }
+
+  for (const signal of ["SIGINT", "SIGTERM", "SIGHUP"]) {
+    process.on(signal, () => stopBackend(signal));
+  }
+
+  backend.on("error", (error) => {
+    console.error(`Failed to start backend: ${error.message}`);
+    process.exitCode = 1;
+  });
+
+  backend.on("exit", (code, signal) => {
+    clearTimeout(forceKillTimer);
+    if (!shuttingDown && signal) {
+      console.error(`Backend stopped by ${signal}.`);
+    }
+    process.exit(shuttingDown ? 0 : (code ?? 1));
+  });
+}
+
+main().catch((error) => {
+  console.error(`Failed to start backend: ${error.message}`);
+  process.exit(1);
+});

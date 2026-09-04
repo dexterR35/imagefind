@@ -123,13 +123,29 @@ query is parameterized — nothing you type can become SQL or FTS syntax. Typing
 is debounced in the browser and stale requests are cancelled; the server also
 limits each client to 30 searches per 10 seconds.
 
-### The Object filter
+### The "More filters" panel
 
-- **Object** dropdown = an **exact tag match** (`label = 'cat'`), not a substring.
-  Use it when a loose text match for `cat` would also hit `catalog.png` or a
-  `.../vacation/` folder.
-- Text and Object **combine with AND**. `bonus` + object `person` returns only
-  images matching both conditions.
+Below the search box, **More filters** expands to three optional facets. Every
+one is optional and they all **combine with AND** — with each other and with the
+search box.
+
+| Filter | Matches | Notes |
+|---|---|---|
+| **Object** | an **exact tag match** (`label = 'cat'`), not a substring | Use it when a loose text match for `cat` would also hit `catalog.png` or a `.../vacation/` folder. |
+| **Format** | `png`, `jpg`, `webp`, `bmp` | Exact match on the recorded format. `jpg` and `jpeg` are treated as the same thing. |
+| **Date range** | a **from** / **to** day range against one of three fields you pick: **Date taken** (EXIF capture date), **Modified** (file mtime), or **Indexed** (when ImageFind catalogued it) | Days are interpreted in **UTC**; the *to* day is inclusive. Images missing the chosen date (e.g. no EXIF capture date) are excluded once a bound is set. |
+
+The dates are debounced in the browser like the text box, so typing a range
+doesn't fire a request per keystroke. (The API also accepts file-size and pixel
+-dimension bounds; the UI just doesn't surface them.)
+
+### Card and table views
+
+Two buttons next to **Sort by** switch the results between **Cards** (the
+thumbnail grid) and **Table** (one row per image: preview, name, type,
+dimensions, size, added date, objects). Both views use the same search, filters,
+sort, and pagination; clicking a card or a table row opens the same detail
+modal. The choice resets to Cards on reload.
 
 ### Sorting
 

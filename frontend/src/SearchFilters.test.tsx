@@ -10,9 +10,8 @@ describe("SearchFilters", () => {
 
     render(<SearchFilters onChange={onChange} />);
 
-    await waitFor(() => expect(screen.getByRole("combobox")).toBeInTheDocument());
-
-    fireEvent.change(screen.getByRole("combobox"), { target: { value: "clover" } });
+    const objectSelect = await screen.findByRole("combobox", { name: "Filter by object" });
+    fireEvent.change(objectSelect, { target: { value: "clover" } });
     fireEvent.change(screen.getByRole("textbox", { name: "Search images" }), {
       target: { value: "netbet" },
     });
@@ -51,6 +50,30 @@ describe("SearchFilters", () => {
     }
   });
 
+  it("reports the format and date-range facets from the More filters panel", async () => {
+    vi.spyOn(api, "fetchObjects").mockResolvedValue([]);
+    const onChange = vi.fn();
+
+    render(<SearchFilters onChange={onChange} />);
+    await waitFor(() => expect(onChange).toHaveBeenCalled());
+
+    fireEvent.change(screen.getByRole("combobox", { name: "Filter by format" }), {
+      target: { value: "png" },
+    });
+    fireEvent.change(screen.getByLabelText("Date field"), { target: { value: "mtime" } });
+    fireEvent.change(screen.getByLabelText("From date"), { target: { value: "2024-01-01" } });
+
+    await waitFor(() =>
+      expect(onChange).toHaveBeenLastCalledWith({
+        text: undefined,
+        object: undefined,
+        format: "png",
+        dateField: "mtime",
+        dateFrom: Date.parse("2024-01-01T00:00:00Z") / 1000,
+      })
+    );
+  });
+
   it("keeps text search usable when optional filter lists fail to load", async () => {
     vi.spyOn(api, "fetchObjects").mockRejectedValue(new Error("offline"));
 
@@ -58,6 +81,6 @@ describe("SearchFilters", () => {
 
     await waitFor(() => expect(api.fetchObjects).toHaveBeenCalled());
     expect(screen.getByRole("textbox", { name: "Search images" })).toBeInTheDocument();
-    expect(screen.getByRole("combobox")).toBeInTheDocument();
+    expect(screen.getByRole("combobox", { name: "Filter by object" })).toBeInTheDocument();
   });
 });

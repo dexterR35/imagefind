@@ -183,6 +183,48 @@ def test_search_validates_lengths_and_rejects_control_characters(tmp_path, monke
     assert "control characters" in response.json()["detail"]
 
 
+def test_search_endpoint_applies_metadata_facets(tmp_path, monkeypatch):
+    main, _ = _fresh_app(tmp_path, monkeypatch)
+    from app.storage import ImageEntry
+
+    entries = [
+        ImageEntry(
+            id="png_big", path="/imgs/png_big.png", thumbnail_path=str(tmp_path / "1.jpg"),
+            ocr_text="", objects=[], mtime=5_000.0, size=3_000_000,
+            width=1920, height=1080, format="PNG", date_taken=1_000.0, indexed_at=10.0,
+        ),
+        ImageEntry(
+            id="jpg_small", path="/imgs/jpg_small.jpg", thumbnail_path=str(tmp_path / "2.jpg"),
+            ocr_text="", objects=[], mtime=8_000.0, size=50_000,
+            width=640, height=480, format="JPEG", date_taken=9_000.0, indexed_at=20.0,
+        ),
+    ]
+    for entry in entries:
+        main.store.upsert(entry, np.ones(512, dtype=np.float32))
+
+    client = TestClient(main.app)
+
+    by_format = client.get("/search", params={"format": "png"}).json()
+    assert [r["id"] for r in by_format["results"]] == ["png_big"]
+
+    by_size = client.get("/search", params={"size_min": 1_000_000}).json()
+    assert [r["id"] for r in by_size["results"]] == ["png_big"]
+
+    by_mtime = client.get(
+        "/search", params={"date_field": "mtime", "date_from": 6_000}
+    ).json()
+    assert [r["id"] for r in by_mtime["results"]] == ["jpg_small"]
+
+    by_dims = client.get("/search", params={"width_min": 1000, "height_min": 1000}).json()
+    assert [r["id"] for r in by_dims["results"]] == ["png_big"]
+
+    assert client.get("/search", params={"format": "jpeg"}).status_code == 200
+    assert client.get("/search", params={"format": "svg"}).status_code == 422
+    assert client.get("/search", params={"format": "tiff"}).status_code == 422
+    assert client.get("/search", params={"date_field": "nonsense"}).status_code == 422
+    assert client.get("/search", params={"width_min": -1}).status_code == 422
+
+
 def test_search_rate_limit_returns_429_with_retry_after(tmp_path, monkeypatch):
     main, _ = _fresh_app(tmp_path, monkeypatch)
     from app.rate_limit import SlidingWindowRateLimiter

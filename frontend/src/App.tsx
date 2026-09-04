@@ -12,7 +12,7 @@ import {
   type SortOption,
 } from "./api";
 import { BrandMark } from "./BrandMark";
-import { ImageGrid } from "./ImageGrid";
+import { ImageGrid, type ResultView } from "./ImageGrid";
 import { LoginScreen } from "./LoginScreen";
 import { ImageModal } from "./ImageModal";
 import { Pagination } from "./Pagination";
@@ -27,6 +27,7 @@ function Gallery({ onLogout }: { onLogout: () => void }) {
   const [selected, setSelected] = useState<ImageResult | null>(null);
   const [filters, setFilters] = useState<Filters>({});
   const [sort, setSort] = useState<SortOption>("date_desc");
+  const [view, setView] = useState<ResultView>("cards");
   const [page, setPage] = useState(1);
   const [total, setTotal] = useState(0);
   const [loading, setLoading] = useState(true);
@@ -136,24 +137,42 @@ function Gallery({ onLogout }: { onLogout: () => void }) {
               ? `${total} similar ${total === 1 ? "image" : "images"}`
               : `${rangeStart}–${rangeEnd} of ${total} ${total === 1 ? "image" : "images"}`}
         </p>
-        <label className="sort-control">
-          <span>Sort by</span>
-          <select value={sort} onChange={(event) => handleSortChange(event.target.value as SortOption)}>
-            <option value="date_desc">Newest first</option>
-            <option value="date_asc">Oldest first</option>
-            <option value="name_asc">Name A–Z</option>
-            <option value="name_desc">Name Z–A</option>
-            <option value="size_desc">Largest first</option>
-            <option value="size_asc">Smallest first</option>
-          </select>
-        </label>
+        <div className="toolbar-controls">
+          <div className="view-toggle" role="group" aria-label="Result view">
+            <button
+              type="button"
+              aria-pressed={view === "cards"}
+              onClick={() => setView("cards")}
+            >
+              Cards
+            </button>
+            <button
+              type="button"
+              aria-pressed={view === "table"}
+              onClick={() => setView("table")}
+            >
+              Table
+            </button>
+          </div>
+          <label className="sort-control">
+            <span>Sort by</span>
+            <select value={sort} onChange={(event) => handleSortChange(event.target.value as SortOption)}>
+              <option value="date_desc">Newest first</option>
+              <option value="date_asc">Oldest first</option>
+              <option value="name_asc">Name A–Z</option>
+              <option value="name_desc">Name Z–A</option>
+              <option value="size_desc">Largest first</option>
+              <option value="size_asc">Smallest first</option>
+            </select>
+          </label>
+        </div>
       </div>
       {loading && images.length === 0 ? (
         <div className="loading-grid" aria-hidden="true">
           {Array.from({ length: 12 }, (_, index) => <span key={index} />)}
         </div>
       ) : (
-        <ImageGrid images={images} onSelect={setSelected} />
+        <ImageGrid images={images} view={view} onSelect={setSelected} />
       )}
       {!showingSimilar && (
         <Pagination page={page} pageCount={pageCount} onChange={handlePageChange} />
