@@ -16,16 +16,31 @@ For how `npm start` is wired and every command, see
 ## Features
 
 - Search filenames, folder paths, OCR text, object tags, and custom tags.
-- Filter by an exact object tag.
+- Optional **Fuzzy** mode ranks by visual meaning (CLIP text-to-image) instead
+  of literal words.
+- Narrow results with filters: exact object tag, format, orientation, date
+  range (capture / modified / indexed), favorites, collection, and your tags.
 - Find visually similar images with one click.
+- Star favorites, add your own per-image tags and notes, and group images into
+  named collections. Curation is stored in the index and survives a reindex.
+- Select multiple images for bulk favorite, bulk tagging, add-to-collection, or
+  a single `.zip` of the originals.
+- Find near-duplicate images (resizes, re-exports, near-crops).
+- Library stats: totals, disk size, counts by format and by year, largest files.
+- Export the whole filtered result set to CSV or JSON.
+- Every search (text, filters, sort, view, page) lives in the URL, so a result
+  set is shareable and survives reload.
+- Card grid or table view; a detail view with a zoom/pan full-resolution preview.
 - Sort by date, filename, or file size.
 - Watch the selected folder for added, changed, moved, and deleted images.
 - Reconcile the NAS periodically in case a filesystem event was missed.
 - Keep completed indexing work when a long reindex is stopped.
+- Back up the SQLite catalog to a standalone file on demand.
 - Store the catalog in SQLite with FTS5 full-text and sqlite-vec vector search.
 
 Supported image formats: PNG, JPG/JPEG, WebP, BMP, GIF, TIFF, AVIF (HEIC/HEIF
-too if the optional `pillow-heif` package is installed).
+too if the optional `pillow-heif` package is installed). For multi-frame GIF or
+AVIF only the first frame is indexed. RAW, PSD, and SVG are not supported.
 
 ## Examples
 
@@ -210,25 +225,77 @@ scan. When the sort is left on its default, text results are ordered by
 relevance (bm25), with whole-word matches floated above matches that only occur
 inside a longer word.
 
-The object control is an exact filter. Text and object filters combine with
-**AND**, so searching `bonus` with object `person` returns only images matching
-both conditions.
+A **★ Favorites** toggle sits next to the search box, and **More filters**
+expands the rest: exact object tag, format, orientation (landscape / portrait /
+square), a from/to date range against one of capture date, file mtime, or index
+time, collection, and your own tags. Every filter is optional and they all
+combine with **AND**, with each other and with the text box, so searching
+`bonus` with object `person` returns only images matching both conditions.
 
-**Find Similar** is different: it uses the selected image's CLIP embedding to
-find visually related images. Normal text search deliberately does not use
-semantic CLIP matching, which avoids unrelated visual guesses in text results.
+**Exact / Fuzzy** by the search box switches the engine. **Exact** (the default)
+is the literal trigram/tag search above. **Fuzzy** embeds your words with CLIP
+and returns the images whose visual meaning is closest; it needs query text,
+ignores the other filters and pagination, and can be confidently wrong — use it
+to cast a wide net, then narrow with Exact.
+
+**Find Similar** is related: it uses a selected image's CLIP embedding rather
+than typed text to find visually related images. It is a transient view and,
+unlike a normal search, does not change the URL.
 
 Search input is debounced and stale browser requests are cancelled. The API
 also validates lengths and control characters, uses parameterized SQLite
 queries, treats FTS special characters literally, and limits each client to 30
 search requests per 10 seconds.
 
+## Organizing your library
+
+Favorites, tags, notes, and collections are *your* curation on top of what the
+models detected. They are stored in the index next to each image, **survive a
+reindex** (an image keeps its id), and — since ImageFind is a single-account
+app — are shared by everyone who opens it.
+
+- **Favorite** — the ★ on a card, a table row, or the detail view. Filter with
+  the **★ Favorites** toggle.
+- **Your tags** — free-text tags added in the detail view, kept separate from
+  RAM++ object tags so a reindex never overwrites them. Filter with **Your tag**.
+- **Note** — a free-text note per image, in the detail view, saved on blur.
+- **Collections** — named sets of images. The folder button in the header
+  creates, renames, and deletes them; "Add to collection…" in the detail view
+  files the open image. Filter with **Collection**. Deleting a collection never
+  touches the images.
+
+Tick the checkbox on any card or row to select images. While a selection is
+active a bulk bar offers: favorite / unfavorite, add comma-separated tags (kept
+additive), add to a collection, **Download .zip** of the originals (max 500;
+vanished files skipped), and Clear. The selection resets on a new search or
+Find Similar.
+
+## Duplicates, stats, backups, and export
+
+- **Duplicate finder** (overlapping-squares button) scans the first ~5,000
+  images and clusters ones that are visually near-identical (CLIP cosine
+  distance ≤ ~0.08 — resizes, re-exports, near-crops). ImageFind never deletes
+  files; it just shows you what to clean up on disk.
+- **Library stats** (bar-chart button) reads straight from the index: total
+  images and disk size, indexed-date range, counts by format and by year taken,
+  how many images have OCR text / objects / neither, and the ten largest files.
+- **Export → CSV / JSON** (next to the view toggle) downloads the entire current
+  result set — not just the visible page — with every filter and sort applied.
+  Columns include path, filename, format, dimensions, size, ISO-8601 UTC dates,
+  objects, your tags, favorite flag, note, and OCR text. Capped at 50,000 rows.
+- **Index backups** — **Settings → Index backups → Back up now** writes a
+  consistent standalone copy to `backend/.index/backups/index-<timestamp>.db`
+  (ten most recent kept) without blocking searches. To restore: stop the server,
+  replace `backend/.index/index.db` with a backup, delete any `index.db-wal` /
+  `index.db-shm` beside it, and start again. Local-only, not available through
+  the tunnel.
+
 ## Models and tools
 
 | Component | Purpose |
 |---|---|
 | RAM++ with Swin-L | Automatic object and scene tags (near-universal tags such as `photo` and `white background` are dropped; see `RAM_TAG_DENYLIST`) |
-| OpenCLIP ViT-B/32 (`openai`) | 512-dimensional image embeddings, Find Similar, and custom-tag matching |
+| OpenCLIP ViT-B/32 (`openai`) | 512-dimensional image embeddings for Find Similar, Fuzzy text search, the duplicate finder, and custom-tag matching |
 | EasyOCR | Text extraction from image pixels |
 | SQLite FTS5 (trigram) | Filename, path, OCR, and tag text search, with bm25 relevance ranking |
 | sqlite-vec | Cosine nearest-neighbor search over CLIP embeddings |
@@ -245,8 +312,10 @@ download their required model files on first use.
 
 Generated data is stored under `backend/.index/`:
 
-- `index.db` — SQLite catalog, FTS rows, and vector embeddings
+- `index.db` — SQLite catalog, FTS rows, vector embeddings, and your curation
+  (favorites, tags, notes, collections)
 - `thumbnails/` — generated preview images
+- `backups/` — on-demand `index-<timestamp>.db` snapshots (ten most recent kept)
 - `settings.json` — selected folder and RAM++ settings
 - `auth.db` — Argon2id credential metadata and hashed, revocable sessions
 
