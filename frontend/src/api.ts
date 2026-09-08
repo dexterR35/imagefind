@@ -101,6 +101,11 @@ export interface ReindexStatus {
   error: string | null;
   cancelled: boolean;
   failures?: ReindexFailure[];
+  // Present on server payloads; absent on the synthetic statuses the UI makes
+  // for a failed start or a lost connection.
+  job_id?: string;
+  started_at?: number;
+  elapsed_seconds?: number;
 }
 
 export interface Settings {
@@ -441,6 +446,15 @@ export async function startReindex(force = false): Promise<string> {
   if (!res.ok) throw new Error(await errorDetail(res));
   const data = await res.json();
   return data.job_id;
+}
+
+// The reindex thread lives on the server, so it keeps running when the tab
+// closes. This is how a newly opened tab finds a run already in flight.
+export async function fetchCurrentReindex(): Promise<ReindexStatus | null> {
+  const res = await apiFetch(`${BASE_URL}/reindex/current`);
+  if (!res.ok) throw new Error(`fetch current reindex failed: ${res.status}`);
+  const data = await res.json();
+  return data.job ?? null;
 }
 
 export async function fetchReindexStatus(jobId: string): Promise<ReindexStatus> {

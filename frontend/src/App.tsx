@@ -32,6 +32,7 @@ import { ImageGrid, type ResultView } from "./ImageGrid";
 import { LoginScreen } from "./LoginScreen";
 import { ImageModal } from "./ImageModal";
 import { Pagination } from "./Pagination";
+import { ReindexProgress } from "./ReindexProgress";
 import { SearchFilters } from "./SearchFilters";
 import { Settings } from "./Settings";
 import { Stats } from "./Stats";
@@ -80,6 +81,10 @@ function Gallery({ onLogout }: { onLogout: () => void }) {
   // after a back/forward navigation.
   const [seedFilters, setSeedFilters] = useState<Filters>(initial.filters);
   const [seedKey, setSeedKey] = useState(0);
+  // Indexing runs server-side and outlives this tab, so its progress bar is
+  // owned here rather than by the settings panel it can be started from.
+  const [reindexRunning, setReindexRunning] = useState(false);
+  const [reindexStartToken, setReindexStartToken] = useState(0);
   const requestId = useRef(0);
   const filtersRef = useRef<Filters>(initial.filters);
   const sortRef = useRef<SortOption>(initial.sort);
@@ -302,11 +307,21 @@ function Gallery({ onLogout }: { onLogout: () => void }) {
           <Collections collections={collections} onChanged={refreshCollections} />
           <Stats />
           {!isTunnelAccess && (
-            <Settings onReindexComplete={() => runSearch(filters, sort, 1)} />
+            <Settings
+              onReindexComplete={() => runSearch(filters, sort, 1)}
+              onReindexStart={() => setReindexStartToken((token) => token + 1)}
+              reindexRunning={reindexRunning}
+            />
           )}
           <button type="button" className="logout-button" onClick={onLogout}>Log out</button>
         </div>
       </header>
+      <ReindexProgress
+        enabled={!isTunnelAccess}
+        startToken={reindexStartToken}
+        onRunningChange={setReindexRunning}
+        onComplete={() => runSearch(filtersRef.current, sortRef.current, 1)}
+      />
       <SearchFilters
         key={seedKey}
         initialFilters={seedFilters}

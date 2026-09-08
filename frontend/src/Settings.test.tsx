@@ -149,6 +149,27 @@ describe("Settings", () => {
     expect(screen.getByText("Reindex")).not.toBeDisabled();
   });
 
+  it("stops a run started elsewhere, which it has no local job id for", async () => {
+    vi.spyOn(api, "fetchSettings").mockResolvedValue(sampleSettings);
+    const startSpy = vi.spyOn(api, "startReindex");
+    vi.spyOn(api, "fetchCurrentReindex").mockResolvedValue({
+      job_id: "elsewhere", processed: 5, total: 50, failed: 0,
+      done: false, error: null, cancelled: false,
+    });
+    const cancelSpy = vi.spyOn(api, "cancelReindex").mockResolvedValue();
+
+    render(<Settings onReindexComplete={vi.fn()} reindexRunning />);
+    fireEvent.click(screen.getByRole("button", { name: "Open settings" }));
+    await waitFor(() => expect(screen.getByDisplayValue("0.15")).toBeInTheDocument());
+
+    // Cannot start a second run over it...
+    expect(screen.getByText("Reindexing...")).toBeDisabled();
+    expect(startSpy).not.toHaveBeenCalled();
+    // ...but can still stop it, even with the progress bar hidden.
+    fireEvent.click(screen.getByText("Stop"));
+    await waitFor(() => expect(cancelSpy).toHaveBeenCalledWith("elsewhere"));
+  });
+
   it("does not show an install button when the model is already installed", async () => {
     vi.spyOn(api, "fetchSettings").mockResolvedValue(sampleSettings);
     vi.spyOn(api, "fetchModelStatus").mockResolvedValue({ installed: true });

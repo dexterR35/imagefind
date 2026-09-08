@@ -51,6 +51,12 @@ class ReindexJob:
     # the true total; this list is the first MAX_TRACKED_FAILURES of them, with
     # enough detail for the UI to tell the user which files need attention.
     failures: list[dict] = field(default_factory=list)
+    # Wall-clock start, so a client that reconnects mid-run (a reloaded or
+    # reopened tab) can still show elapsed time and estimate what is left.
+    started_at: float = field(default_factory=time.time)
+    # Set once the run ends, so a finished job reports how long it took rather
+    # than a duration that keeps growing every time it is read.
+    finished_at: float | None = None
     # Not exposed to API callers directly - set via Indexer.cancel(job).
     cancel_event: threading.Event = field(default_factory=threading.Event, repr=False, compare=False)
 
@@ -342,4 +348,5 @@ class Indexer:
                 # a failed job; log it while preserving the original outcome.
                 logger.warning("failed to unload RAM++ after reindex", exc_info=True)
             finally:
+                job.finished_at = time.time()
                 job.done = True

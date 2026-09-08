@@ -4,6 +4,7 @@ import {
   cancelReindex,
   createBackup,
   fetchBackups,
+  fetchCurrentReindex,
   fetchModelDownloadStatus,
   fetchModelStatus,
   fetchReindexStatus,
@@ -20,6 +21,10 @@ import {
 
 interface Props {
   onReindexComplete: () => void;
+  // Lets the app-level progress bar attach to the new job immediately.
+  onReindexStart?: () => void;
+  // A run started elsewhere (another tab, or before this one was opened).
+  reindexRunning?: boolean;
   isTunnelAccess?: boolean;
 }
 
@@ -34,6 +39,8 @@ function formatSize(bytes: number): string {
 
 export function Settings({
   onReindexComplete,
+  onReindexStart,
+  reindexRunning = false,
   isTunnelAccess = window.location.hostname.endsWith(".trycloudflare.com"),
 }: Props) {
   const [open, setOpen] = useState(false);
@@ -225,6 +232,7 @@ export function Settings({
       return;
     }
     jobIdRef.current = jobId;
+    onReindexStart?.();
 
     const onProgress = (s: ReindexStatus) => {
       setStatus(s);
@@ -262,11 +270,22 @@ export function Settings({
     }
   }
 
+  // Started from this panel, or already going when the panel was opened.
+  const elsewhereRunning = reindexRunning && !reindexing;
+  const busy = reindexing || reindexRunning;
+
   async function handleStopReindex() {
-    if (!jobIdRef.current) return;
     setStopping(true);
     try {
-      await cancelReindex(jobIdRef.current);
+      // A run started in another tab — or before this one was opened — has no
+      // local job id, so ask the server which run is going. Without this there
+      // is no way to stop it once the progress bar has been hidden.
+      const jobId = jobIdRef.current ?? (await fetchCurrentReindex())?.job_id;
+      if (!jobId) {
+        setStopping(false);
+        return;
+      }
+      await cancelReindex(jobId);
     } catch {
       setStopping(false);
     }
@@ -340,27 +359,34 @@ export function Settings({
               onChange={(e) => setCustomTagsText(e.target.value)}
             />
           </label>
-          <button type="button" className="btn-primary" onClick={handleSave} disabled={saving || reindexing}>
+          <button type="button" className="btn-primary" onClick={handleSave} disabled={saving || busy}>
             {saving ? "Saving..." : "Save"}
           </button>
           <button
             type="button"
             className="btn-ghost"
             onClick={handleReindex}
-            disabled={saving || reindexing || isTunnelAccess}
-            title={isTunnelAccess ? "Reindexing is available only from the local app." : undefined}
+            disabled={saving || busy || isTunnelAccess}
+            title={
+              isTunnelAccess
+                ? "Reindexing is available only from the local app."
+                : elsewhereRunning
+                  ? "A reindex is already running — see the progress bar."
+                  : undefined
+            }
           >
-            {reindexing ? "Reindexing..." : "Reindex"}
+            {busy ? "Reindexing..." : "Reindex"}
           </button>
           {isTunnelAccess && (
             <span>Reindexing is disabled through the public tunnel. Open ImageFind locally to run it.</span>
           )}
           {saveMessage && <span>{saveMessage}</span>}
-          {reindexing && (
+          {busy && (
             <button type="button" className="btn-ghost" onClick={handleStopReindex} disabled={stopping}>
               {stopping ? "Stopping..." : "Stop"}
             </button>
           )}
+          {elsewhereRunning && <span>A reindex is already running.</span>}
           {status && !status.done && (
             <span>
               {status.processed} / {status.total}

@@ -212,13 +212,21 @@ export function ImageModal({
   return (
     <div className="modal-backdrop" role="presentation" onClick={onClose}>
       <div className="modal" role="dialog" aria-modal="true" aria-labelledby="image-title" onClick={(e) => e.stopPropagation()}>
-        <div className="modal-header">
-          <div>
-            <h2 id="image-title">{filename}</h2>
+        <header className="modal-header">
+          <div className="modal-heading">
+            <h2 id="image-title" title={filename}>{filename}</h2>
             <p className="image-path" title={image.path}>{image.path}</p>
           </div>
-          <button type="button" className="icon-button" aria-label="Close" onClick={onClose}>×</button>
-        </div>
+          <div className="modal-header-actions">
+            {onToggleFavorite && (
+              <FavoriteButton
+                favorite={!!image.favorite}
+                onToggle={(next) => onToggleFavorite(image.id, next)}
+              />
+            )}
+            <button type="button" className="icon-button" aria-label="Close" onClick={onClose}>×</button>
+          </div>
+        </header>
         <div className="modal-content">
           <div className="modal-preview-wrap">
             <div
@@ -271,65 +279,73 @@ export function ImageModal({
                   ›
                 </button>
               )}
-            </div>
-            <div className="preview-toolbar" role="toolbar" aria-label="Image zoom controls">
-              <button type="button" className="icon-button" aria-label="Zoom out" onClick={() => zoomBy(1 / ZOOM_STEP)} disabled={scale <= MIN_SCALE}>−</button>
-              <span className="preview-zoom-level" aria-live="polite">{zoomPercent}%</span>
-              <button type="button" className="icon-button" aria-label="Zoom in" onClick={() => zoomBy(ZOOM_STEP)} disabled={scale >= MAX_SCALE}>+</button>
-              <button type="button" className="icon-button" aria-label="Reset and center" onClick={resetView} disabled={!zoomed}>⤢</button>
+              <div
+                className="preview-toolbar"
+                role="toolbar"
+                aria-label="Image zoom controls"
+                onPointerDown={(e) => e.stopPropagation()}
+                onDoubleClick={(e) => e.stopPropagation()}
+              >
+                <button type="button" className="icon-button" aria-label="Zoom out" onClick={() => zoomBy(1 / ZOOM_STEP)} disabled={scale <= MIN_SCALE}>−</button>
+                <span className="preview-zoom-level" aria-live="polite">{zoomPercent}%</span>
+                <button type="button" className="icon-button" aria-label="Zoom in" onClick={() => zoomBy(ZOOM_STEP)} disabled={scale >= MAX_SCALE}>+</button>
+                <span className="preview-toolbar-sep" aria-hidden="true" />
+                <button type="button" className="icon-button" aria-label="Reset and center" onClick={resetView} disabled={!zoomed}>⤢</button>
+              </div>
             </div>
           </div>
-          <div className="metadata-panel">
-            {(onToggleFavorite || onAddToCollection) && (
+          <aside className="metadata-panel">
+            {onAddToCollection && collections.length > 0 && (
               <div className="curation-bar">
-                {onToggleFavorite && (
-                  <FavoriteButton
-                    favorite={!!image.favorite}
-                    onToggle={(next) => onToggleFavorite(image.id, next)}
-                  />
-                )}
-                {onAddToCollection && collections.length > 0 && (
-                  <select
-                    aria-label="Add to collection"
-                    value=""
-                    onChange={(e) => {
-                      if (e.target.value) onAddToCollection(e.target.value, image.id);
-                      e.target.value = "";
-                    }}
-                  >
-                    <option value="">Add to collection…</option>
-                    {collections.map((c) => (
-                      <option key={c.id} value={c.id}>{c.name}</option>
-                    ))}
-                  </select>
-                )}
+                <select
+                  aria-label="Add to collection"
+                  value=""
+                  onChange={(e) => {
+                    if (e.target.value) onAddToCollection(e.target.value, image.id);
+                    e.target.value = "";
+                  }}
+                >
+                  <option value="">Add to collection…</option>
+                  {collections.map((c) => (
+                    <option key={c.id} value={c.id}>{c.name}</option>
+                  ))}
+                </select>
               </div>
             )}
-            <h3>Image details</h3>
-            <dl className="metadata-list">
-              <div><dt>Dimensions</dt><dd>{image.width && image.height ? `${image.width} × ${image.height} px` : "Unknown"}</dd></div>
-              <div><dt>Format</dt><dd>{image.format || "Unknown"}</dd></div>
-              <div><dt>File size</dt><dd>{formatBytes(image.size)}</dd></div>
-              <div><dt>Date</dt><dd>{formatDate(image.date_taken)}</dd></div>
-              <div><dt>Modified</dt><dd>{formatDate(image.mtime)}</dd></div>
-              <div><dt>Indexed</dt><dd>{formatDate(image.indexed_at)}</dd></div>
-            </dl>
-            <h3>Recognized objects</h3>
-            <div className="tag-list">
-              {image.objects.length > 0 ? image.objects.map((object) => <span key={object}>{object}</span>) : <p>None detected</p>}
-            </div>
-            {image.ocr_text && <><h3>Detected text</h3><p className="ocr-text">{image.ocr_text}</p></>}
+            <section className="meta-section">
+              <h3>Image details</h3>
+              <dl className="metadata-list">
+                <div><dt>Dimensions</dt><dd>{image.width && image.height ? `${image.width} × ${image.height} px` : "Unknown"}</dd></div>
+                <div><dt>Format</dt><dd>{image.format || "Unknown"}</dd></div>
+                <div><dt>File size</dt><dd>{formatBytes(image.size)}</dd></div>
+                <div><dt>Date</dt><dd>{formatDate(image.date_taken)}</dd></div>
+                <div><dt>Modified</dt><dd>{formatDate(image.mtime)}</dd></div>
+                <div><dt>Indexed</dt><dd>{formatDate(image.indexed_at)}</dd></div>
+              </dl>
+            </section>
+            <section className="meta-section">
+              <h3>Recognized objects</h3>
+              <div className="tag-list">
+                {image.objects.length > 0 ? image.objects.map((object) => <span key={object}>{object}</span>) : <p>None detected</p>}
+              </div>
+            </section>
+            {image.ocr_text && (
+              <section className="meta-section">
+                <h3>Detected text</h3>
+                <p className="ocr-text">{image.ocr_text}</p>
+              </section>
+            )}
             {onTagsChange && (
-              <>
+              <section className="meta-section">
                 <h3>Your tags</h3>
                 <TagEditor
                   tags={image.user_tags ?? []}
                   onChange={(tags) => onTagsChange(image.id, tags)}
                 />
-              </>
+              </section>
             )}
             {onNoteChange && (
-              <>
+              <section className="meta-section">
                 <h3>Note</h3>
                 <textarea
                   className="note-editor"
@@ -343,14 +359,15 @@ export function ImageModal({
                     if (noteDraft !== (image.note ?? "")) onNoteChange(image.id, noteDraft);
                   }}
                 />
-              </>
+              </section>
             )}
-          </div>
+          </aside>
         </div>
-        <div className="modal-actions">
+        <footer className="modal-actions">
+          <span className="modal-hint" aria-hidden="true">Scroll or double-click to zoom · ← → to page · Esc to close</span>
           <button type="button" className="btn-ghost" onClick={() => onFindSimilar(image.id)}>Find Similar</button>
           <a className="download-button primary" href={downloadUrl(image.id)} download>Download original</a>
-        </div>
+        </footer>
       </div>
     </div>
   );

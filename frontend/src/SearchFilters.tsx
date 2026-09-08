@@ -61,6 +61,12 @@ export function SearchFilters({ onChange, initialFilters, collections = [], user
   );
   const [dateFrom, setDateFrom] = useState(() => epochToDateInput(initialFilters?.dateFrom));
   const [dateTo, setDateTo] = useState(() => epochToDateInput(initialFilters?.dateTo));
+  // Open on load when a shared link already carries one of the advanced facets.
+  const [advancedOpen, setAdvancedOpen] = useState(() => Boolean(
+    initialFilters?.object || initialFilters?.format || initialFilters?.orientation ||
+    initialFilters?.collection || initialFilters?.userTag ||
+    initialFilters?.dateFrom || initialFilters?.dateTo,
+  ));
 
   useEffect(() => {
     let active = true;
@@ -112,133 +118,162 @@ export function SearchFilters({ onChange, initialFilters, collections = [], user
     onChange(applied);
   }, [applied, onChange]);
 
+  // Everything set beyond the always-visible row, echoed back as removable chips.
+  const chips: { key: string; label: string; clear: () => void }[] = [];
+  if (collection) {
+    const name = collections.find((c) => c.id === collection)?.name ?? collection;
+    chips.push({ key: "collection", label: `Collection: ${name}`, clear: () => setCollection(undefined) });
+  }
+  if (userTag) chips.push({ key: "tag", label: `Tag: ${userTag}`, clear: () => setUserTag(undefined) });
+  if (object) chips.push({ key: "object", label: `Object: ${object}`, clear: () => setObject(undefined) });
+  if (format) chips.push({ key: "format", label: format.toUpperCase(), clear: () => setFormat(undefined) });
+  if (orientation) {
+    const label = ORIENTATIONS.find((o) => o.value === orientation)?.label ?? orientation;
+    chips.push({ key: "orientation", label, clear: () => setOrientation(undefined) });
+  }
+  if (dateFrom || dateTo) {
+    const field = DATE_FIELDS.find((d) => d.value === dateField)?.label ?? dateField;
+    chips.push({
+      key: "date",
+      label: `${field}: ${dateFrom || "…"} → ${dateTo || "…"}`,
+      clear: () => { setDateFrom(""); setDateTo(""); },
+    });
+  }
+
+  function clearAll() {
+    setCollection(undefined);
+    setUserTag(undefined);
+    setObject(undefined);
+    setFormat(undefined);
+    setOrientation(undefined);
+    setDateFrom("");
+    setDateTo("");
+    setFavorite(false);
+  }
+
   return (
     <div className="search-filters">
-      <input
-        type="text"
-        aria-label="Search images"
-        placeholder="chair, person, dog..."
-        maxLength={200}
-        value={text}
-        onChange={(e) => setText(e.target.value)}
-      />
+      <div className="filter-row">
+        <div className="search-box">
+          <svg viewBox="0 0 24 24" aria-hidden="true">
+            <circle cx="11" cy="11" r="7" /><path d="m20 20-3.5-3.5" />
+          </svg>
+          <input
+            type="text"
+            aria-label="Search images"
+            placeholder="chair, person, dog…"
+            maxLength={200}
+            value={text}
+            onChange={(e) => setText(e.target.value)}
+          />
+          {text && (
+            <button type="button" className="search-clear" aria-label="Clear search" onClick={() => setText("")}>×</button>
+          )}
+        </div>
 
-      <div className="match-toggle" role="group" aria-label="Match mode">
-        <button type="button" aria-pressed={!semantic} onClick={() => setSemantic(false)}>Exact</button>
+        <div className="match-toggle" role="group" aria-label="Match mode">
+          <button type="button" aria-pressed={!semantic} onClick={() => setSemantic(false)}>Exact</button>
+          <button
+            type="button"
+            aria-pressed={semantic}
+            title="Rank by visual meaning (CLIP), ignoring the other filters"
+            onClick={() => setSemantic(true)}
+          >
+            Fuzzy
+          </button>
+        </div>
+
+        <label className="favorites-toggle">
+          <input
+            type="checkbox"
+            checked={favorite}
+            onChange={(e) => setFavorite(e.target.checked)}
+          />
+          <span>★ Favorites</span>
+        </label>
+
         <button
           type="button"
-          aria-pressed={semantic}
-          title="Rank by visual meaning (CLIP), ignoring the other filters"
-          onClick={() => setSemantic(true)}
+          className="filter-toggle"
+          aria-expanded={advancedOpen}
+          aria-controls="filter-fields"
+          onClick={() => setAdvancedOpen((open) => !open)}
         >
-          Fuzzy
+          Filters
+          {chips.length > 0 && <span className="filter-count">{chips.length}</span>}
         </button>
-      </div>
 
-      <label className="favorites-toggle">
-        <input
-          type="checkbox"
-          checked={favorite}
-          onChange={(e) => setFavorite(e.target.checked)}
-        />
-        <span>★ Favorites</span>
-      </label>
-
-      <details className="filter-advanced">
-        <summary>More filters</summary>
-        <div className="filter-grid">
-          <fieldset>
-            <legend>Collection</legend>
+        {/* Always mounted, so the selects keep their state while collapsed. */}
+        <div id="filter-fields" className={`filter-fields${advancedOpen ? " is-open" : ""}`}>
+          <label className="filter-field">
+            <span>Collection</span>
             <select
               aria-label="Filter by collection"
               value={collection ?? ""}
               onChange={(e) => setCollection(e.target.value || undefined)}
             >
-              <option value="">All collections</option>
+              <option value="">All</option>
               {collections.map((c) => (
-                <option key={c.id} value={c.id}>
-                  {c.name} ({c.count})
-                </option>
+                <option key={c.id} value={c.id}>{c.name} ({c.count})</option>
               ))}
             </select>
-          </fieldset>
+          </label>
 
-          <fieldset>
-            <legend>Your tag</legend>
+          <label className="filter-field">
+            <span>Tag</span>
             <select
               aria-label="Filter by your tag"
               value={userTag ?? ""}
               onChange={(e) => setUserTag(e.target.value || undefined)}
             >
-              <option value="">Any tag</option>
-              {userTags.map((tag) => (
-                <option key={tag} value={tag}>
-                  {tag}
-                </option>
-              ))}
+              <option value="">Any</option>
+              {userTags.map((tag) => <option key={tag} value={tag}>{tag}</option>)}
             </select>
-          </fieldset>
+          </label>
 
-          <fieldset>
-            <legend>Object</legend>
+          <label className="filter-field">
+            <span>Object</span>
             <select
               aria-label="Filter by object"
               value={object ?? ""}
               onChange={(e) => setObject(e.target.value || undefined)}
             >
-              <option value="">All objects</option>
-              {objects.map((o) => (
-                <option key={o} value={o}>
-                  {o}
-                </option>
-              ))}
+              <option value="">All</option>
+              {objects.map((o) => <option key={o} value={o}>{o}</option>)}
             </select>
-          </fieldset>
+          </label>
 
-          <fieldset>
-            <legend>Format</legend>
+          <label className="filter-field">
+            <span>Format</span>
             <select
               aria-label="Filter by format"
               value={format ?? ""}
               onChange={(e) => setFormat(e.target.value || undefined)}
             >
-              <option value="">All formats</option>
-              {FORMATS.map((f) => (
-                <option key={f} value={f}>
-                  {f.toUpperCase()}
-                </option>
-              ))}
+              <option value="">All</option>
+              {FORMATS.map((f) => <option key={f} value={f}>{f.toUpperCase()}</option>)}
             </select>
-          </fieldset>
+          </label>
 
-          <fieldset>
-            <legend>Orientation</legend>
+          <label className="filter-field">
+            <span>Shape</span>
             <select
               aria-label="Filter by orientation"
               value={orientation ?? ""}
               onChange={(e) => setOrientation((e.target.value || undefined) as Orientation | undefined)}
             >
-              <option value="">Any orientation</option>
-              {ORIENTATIONS.map((o) => (
-                <option key={o.value} value={o.value}>
-                  {o.label}
-                </option>
-              ))}
+              <option value="">Any</option>
+              {ORIENTATIONS.map((o) => <option key={o.value} value={o.value}>{o.label}</option>)}
             </select>
-          </fieldset>
+          </label>
 
-          <fieldset>
-            <legend>Date range</legend>
+          <div className="filter-field is-range">
             <select
               aria-label="Date field"
               value={dateField}
               onChange={(e) => setDateField(e.target.value as DateField)}
             >
-              {DATE_FIELDS.map((d) => (
-                <option key={d.value} value={d.value}>
-                  {d.label}
-                </option>
-              ))}
+              {DATE_FIELDS.map((d) => <option key={d.value} value={d.value}>{d.label}</option>)}
             </select>
             <input
               type="date" aria-label="From date"
@@ -249,9 +284,27 @@ export function SearchFilters({ onChange, initialFilters, collections = [], user
               type="date" aria-label="To date"
               value={dateTo} onChange={(e) => setDateTo(e.target.value)}
             />
-          </fieldset>
+          </div>
         </div>
-      </details>
+      </div>
+
+      {(chips.length > 0 || favorite) && (
+        <div className="filter-chips">
+          {favorite && (
+            <span className="filter-chip">
+              ★ Favorites
+              <button type="button" aria-label="Remove favorites filter" onClick={() => setFavorite(false)}>×</button>
+            </span>
+          )}
+          {chips.map((chip) => (
+            <span className="filter-chip" key={chip.key}>
+              {chip.label}
+              <button type="button" aria-label={`Remove ${chip.key} filter`} onClick={chip.clear}>×</button>
+            </span>
+          ))}
+          <button type="button" className="filter-clear-all" onClick={clearAll}>Clear all</button>
+        </div>
+      )}
     </div>
   );
 }

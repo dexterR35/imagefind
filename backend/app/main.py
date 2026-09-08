@@ -712,6 +712,22 @@ def reindex_endpoint(request: Request, force: bool = False):
     return {"job_id": job.id}
 
 
+@app.get("/reindex/current")
+def reindex_current(request: Request):
+    """The reindex still running, if any.
+
+    Indexing runs in a server-side thread, so closing the tab does not stop
+    it. This lets a newly opened tab pick the run back up and keep showing
+    progress instead of losing track of it.
+    """
+    _require_local_admin(request)
+    with _jobs_lock:
+        running = next((job for job in jobs.values() if not job.done), None)
+    if running is None:
+        return {"job": None}
+    return {"job": _reindex_job_payload(running)}
+
+
 @app.get("/reindex/status/{job_id}")
 def reindex_status(request: Request, job_id: str):
     _require_local_admin(request)
@@ -724,9 +740,12 @@ def reindex_status(request: Request, job_id: str):
 
 def _reindex_job_payload(job: ReindexJob) -> dict:
     return {
+        "job_id": job.id,
         "processed": job.processed, "total": job.total, "failed": job.failed,
         "done": job.done, "error": job.error, "cancelled": job.cancelled,
         "failures": job.failures,
+        "started_at": job.started_at,
+        "elapsed_seconds": max(0.0, (job.finished_at or time.time()) - job.started_at),
     }
 
 

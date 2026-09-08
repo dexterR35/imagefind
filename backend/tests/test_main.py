@@ -49,10 +49,31 @@ def test_reindex_on_empty_folder_completes_immediately(tmp_path, monkeypatch):
             break
         time.sleep(0.05)
 
-    assert status == {
+    assert {k: status[k] for k in ("processed", "total", "failed", "done", "error", "cancelled", "failures")} == {
         "processed": 0, "total": 0, "failed": 0, "done": True, "error": None,
         "cancelled": False, "failures": [],
     }
+    assert status["job_id"] == job_id
+    assert status["started_at"] > 0
+    assert status["elapsed_seconds"] >= 0
+
+
+def test_finished_job_reports_a_fixed_duration(tmp_path, monkeypatch):
+    """elapsed_seconds is how long the run took, not time since it started."""
+    main, _ = _fresh_app(tmp_path, monkeypatch)
+    client = TestClient(main.app)
+    job_id = client.post("/reindex").json()["job_id"]
+
+    for _ in range(40):
+        status = client.get(f"/reindex/status/{job_id}").json()
+        if status["done"]:
+            break
+        time.sleep(0.05)
+    assert status["done"]
+
+    first = status["elapsed_seconds"]
+    time.sleep(0.2)
+    assert client.get(f"/reindex/status/{job_id}").json()["elapsed_seconds"] == first
 
 
 def test_second_reindex_while_one_is_running_returns_409(tmp_path, monkeypatch):
@@ -74,6 +95,43 @@ def test_second_reindex_while_one_is_running_returns_409(tmp_path, monkeypatch):
         assert second.status_code == 409
     finally:
         release.set()
+
+
+def test_reindex_current_reports_the_running_job_then_clears(tmp_path, monkeypatch):
+    """A reopened tab finds the run that is still going via /reindex/current."""
+    main, _ = _fresh_app(tmp_path, monkeypatch)
+    release = threading.Event()
+
+    def fake_run_reindex(job, force=False):
+        job.total = 10
+        job.processed = 4
+        release.wait(timeout=5)
+        job.done = True
+
+    monkeypatch.setattr(main.indexer, "run_reindex", fake_run_reindex)
+    client = TestClient(main.app)
+
+    assert client.get("/reindex/current").json() == {"job": None}
+
+    job_id = client.post("/reindex").json()["job_id"]
+    try:
+        for _ in range(40):
+            current = client.get("/reindex/current").json()["job"]
+            if current is not None and current["total"] == 10:
+                break
+            time.sleep(0.05)
+        assert current is not None
+        assert current["job_id"] == job_id
+        assert (current["processed"], current["total"], current["done"]) == (4, 10, False)
+    finally:
+        release.set()
+
+    for _ in range(40):
+        if client.get(f"/reindex/status/{job_id}").json()["done"]:
+            break
+        time.sleep(0.05)
+    # A finished job is not "current" - the bar must not linger on reload.
+    assert client.get("/reindex/current").json() == {"job": None}
 
 
 def test_cancel_reindex_sets_the_job_cancel_event(tmp_path, monkeypatch):
