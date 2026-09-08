@@ -308,7 +308,6 @@ function Gallery({ onLogout }: { onLogout: () => void }) {
           <Stats />
           {!isTunnelAccess && (
             <Settings
-              onReindexComplete={() => runSearch(filters, sort, 1)}
               onReindexStart={() => setReindexStartToken((token) => token + 1)}
               reindexRunning={reindexRunning}
             />

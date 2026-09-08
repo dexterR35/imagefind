@@ -35,6 +35,8 @@ For how `npm start` is wired and every command, see
 - Watch the selected folder for added, changed, moved, and deleted images.
 - Reconcile the NAS periodically in case a filesystem event was missed.
 - Keep completed indexing work when a long reindex is stopped.
+- Indexing runs on the server with a progress bar: close the tab and it
+  keeps going, and only **Stop** cancels it.
 - Back up the SQLite catalog to a standalone file on demand.
 - Store the catalog in SQLite with FTS5 full-text and sqlite-vec vector search.
 
@@ -44,20 +46,27 @@ AVIF only the first frame is indexed. RAW, PSD, and SVG are not supported.
 
 ## Examples
 
+### Browse and filter the library
+
+<img src="example/library.png" width="640" alt="ImageFind library view: a grid of image cards, the filter bar above it, and the stats panel open on the right">
+
+Each card shows the thumbnail, filename, detected tags, and file details. The
+bar on top filters by collection, tag, object, format, shape, and date; the
+panel on the right summarises the index.
+
 ### Search by recognized object
 
-<img src="example/1.png" width="480" alt="ImageFind showing a fruit and coin illustration with automatically recognized objects">
+<img src="example/objects-casino.png" width="640" alt="Detail view of a casino icon sheet with the objects RAM++ recognized listed beside it">
 
-ImageFind automatically detected objects including `bag`, `cherry`, `clover`, `coin`, `fruit`, and
-`pot of gold`. Searching for **clover** finds this image.
+RAM++ tagged this sheet with `card game`, `casino`, `crown`, `playing card`,
+`poker chip`, `slot machine`, `trophy`, and `whiskey`. Searching for
+**slot machine** finds it, even though nothing in the filename says so.
 
-### Search text read from an image
+<img src="example/objects-mafia.png" width="640" alt="Detail view of a mafia-themed icon sheet with its recognized objects and detected text">
 
-<img src="example/2.png" width="480" alt="ImageFind showing OCR text extracted from a promotional storyboard">
-
-EasyOCR extracted the promotional copy from this storyboard. Searching for
-**NETBET**, **storyboard**, or another visible word finds the image even when
-the filename does not contain that word.
+The same for a different style: `cash`, `cigar`, `gun`, `money`,
+`playing card`, `weapon`, `whiskey`. EasyOCR also reads any text in the image,
+so a visible word finds the file too.
 
 Other useful searches include:
 
@@ -175,8 +184,12 @@ local setup instructions and protected API routes remain inaccessible.
 5. Leave the backend running while the first catalog is created.
 
 The first run can take a long time for hundreds of thousands of images. The
-index is saved regularly. If indexing is stopped, already completed images are
-kept; starting a normal **Reindex** later skips unchanged completed files.
+index is saved regularly. A progress bar at the top of the page shows how far
+along it is; indexing happens on the server, so closing the tab (or reopening
+it later) doesn't interrupt it — the bar reattaches to the run still going.
+Hiding the bar with **×** only hides it. Only **Stop** cancels the run, and
+already completed images are kept; starting a normal **Reindex** later skips
+unchanged completed files.
 
 Files that can't be processed (corrupt, removed mid-scan, or inside an
 unreadable subfolder) don't stop the run: everything reachable is still

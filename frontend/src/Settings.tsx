@@ -7,23 +7,21 @@ import {
   fetchCurrentReindex,
   fetchModelDownloadStatus,
   fetchModelStatus,
-  fetchReindexStatus,
   fetchSettings,
   startModelDownload,
   startReindex,
-  streamReindexStatus,
   updateSettings,
   type IndexBackup,
   type ModelDownloadStatus,
-  type ReindexStatus,
   type Settings as SettingsType,
 } from "./api";
 
 interface Props {
-  onReindexComplete: () => void;
-  // Lets the app-level progress bar attach to the new job immediately.
+  // Lets the app-level progress bar attach to the new job immediately. That
+  // bar owns the run from there on — including reporting when it finishes.
   onReindexStart?: () => void;
-  // A run started elsewhere (another tab, or before this one was opened).
+  // A run in flight, per the progress bar: started here, in another tab, or
+  // before this one was opened.
   reindexRunning?: boolean;
   isTunnelAccess?: boolean;
 }
@@ -38,7 +36,6 @@ function formatSize(bytes: number): string {
 }
 
 export function Settings({
-  onReindexComplete,
   onReindexStart,
   reindexRunning = false,
   isTunnelAccess = window.location.hostname.endsWith(".trycloudflare.com"),
@@ -49,11 +46,12 @@ export function Settings({
   const [settingsLoadError, setSettingsLoadError] = useState<string | null>(null);
   const [saving, setSaving] = useState(false);
   const [saveMessage, setSaveMessage] = useState<string | null>(null);
-  const [reindexing, setReindexing] = useState(false);
+  // Covers only the gap between the click and the progress bar reporting the
+  // run, so the button cannot fire twice.
+  const [starting, setStarting] = useState(false);
   const [stopping, setStopping] = useState(false);
-  const [status, setStatus] = useState<ReindexStatus | null>(null);
-  const stopReindexSubRef = useRef<(() => void) | null>(null);
-  const jobIdRef = useRef<string | null>(null);
+  // Failures of the actions this panel owns: saving, and starting a reindex.
+  const [actionError, setActionError] = useState<string | null>(null);
   const savedImagesDirRef = useRef<string | null>(null);
 
   const [modelInstalled, setModelInstalled] = useState<boolean | null>(null);
@@ -103,18 +101,20 @@ export function Settings({
   }
 
   useEffect(() => {
-    return () => {
-      stopPolling();
-      stopModelPolling();
-    };
+    return () => stopModelPolling();
   }, []);
 
-  function stopPolling() {
-    if (stopReindexSubRef.current !== null) {
-      stopReindexSubRef.current();
-      stopReindexSubRef.current = null;
+  useEffect(() => {
+    if (!starting) return undefined;
+    if (reindexRunning) {
+      setStarting(false);
+      return undefined;
     }
-  }
+    // Never latch: if the bar never reports the run (it finished in the gap,
+    // or it is not mounted) release the button anyway.
+    const timer = window.setTimeout(() => setStarting(false), 10_000);
+    return () => window.clearTimeout(timer);
+  }, [starting, reindexRunning]);
 
   function stopModelPolling() {
     if (modelPollRef.current !== null) {
@@ -191,7 +191,7 @@ export function Settings({
 
     setSaving(true);
     setSaveMessage(null);
-    setStatus(null);
+    setActionError(null);
     const ram_custom_tags = customTagsText
       .split(",")
       .map((v) => v.trim())
@@ -203,10 +203,7 @@ export function Settings({
       savedImagesDirRef.current = saved.images_dir;
       setSaveMessage("Settings saved.");
     } catch (err) {
-      setStatus({
-        processed: 0, total: 0, failed: 0, done: true, cancelled: false,
-        error: `Failed to save settings: ${err instanceof Error ? err.message : String(err)}`,
-      });
+      setActionError(`Failed to save settings: ${err instanceof Error ? err.message : String(err)}`);
     } finally {
       setSaving(false);
     }
@@ -216,71 +213,32 @@ export function Settings({
     if (isTunnelAccess) return;
     if (!window.confirm("Force a full image reindex now? This can take a while.\n\nContinue?")) return;
 
-    setReindexing(true);
+    setStarting(true);
     setStopping(false);
     setSaveMessage(null);
-    setStatus(null);
-    let jobId: string;
+    setActionError(null);
     try {
-      jobId = await startReindex(true);
+      await startReindex(true);
     } catch (err) {
-      setReindexing(false);
-      setStatus({
-        processed: 0, total: 0, failed: 0, done: true, cancelled: false,
-        error: `Failed to start reindex: ${err instanceof Error ? err.message : String(err)}`,
-      });
+      setStarting(false);
+      setActionError(`Failed to start reindex: ${err instanceof Error ? err.message : String(err)}`);
       return;
     }
-    jobIdRef.current = jobId;
+    // From here the app-level progress bar follows the run: it reports the
+    // progress, the completion and the errors, and survives this panel closing.
     onReindexStart?.();
-
-    const onProgress = (s: ReindexStatus) => {
-      setStatus(s);
-      if (s.done) {
-        stopPolling();
-        setReindexing(false);
-        setStopping(false);
-        jobIdRef.current = null;
-        onReindexComplete();
-      }
-    };
-    const onLost = () => {
-      stopPolling();
-      setReindexing(false);
-      setStopping(false);
-      jobIdRef.current = null;
-      setStatus({
-        processed: 0, total: 0, failed: 0, done: true, cancelled: false,
-        error: "Lost connection while checking reindex status.",
-      });
-    };
-
-    const stopStream = streamReindexStatus(jobId, onProgress, onLost);
-    if (stopStream) {
-      stopReindexSubRef.current = stopStream;
-    } else {
-      const timer = window.setInterval(async () => {
-        try {
-          onProgress(await fetchReindexStatus(jobId));
-        } catch {
-          onLost();
-        }
-      }, 500);
-      stopReindexSubRef.current = () => window.clearInterval(timer);
-    }
   }
 
-  // Started from this panel, or already going when the panel was opened.
-  const elsewhereRunning = reindexRunning && !reindexing;
-  const busy = reindexing || reindexRunning;
+  // Already going when this panel was opened, or started from another tab.
+  const elsewhereRunning = reindexRunning && !starting;
+  const busy = starting || reindexRunning;
 
   async function handleStopReindex() {
     setStopping(true);
     try {
-      // A run started in another tab — or before this one was opened — has no
-      // local job id, so ask the server which run is going. Without this there
-      // is no way to stop it once the progress bar has been hidden.
-      const jobId = jobIdRef.current ?? (await fetchCurrentReindex())?.job_id;
+      // The server is the one source of the job id: this panel does not track
+      // the run, and a run started in another tab was never known here at all.
+      const jobId = (await fetchCurrentReindex())?.job_id;
       if (!jobId) {
         setStopping(false);
         return;
@@ -387,18 +345,7 @@ export function Settings({
             </button>
           )}
           {elsewhereRunning && <span>A reindex is already running.</span>}
-          {status && !status.done && (
-            <span>
-              {status.processed} / {status.total}
-            </span>
-          )}
-          {status?.done && status.cancelled && (
-            <span>Reindex stopped — kept {status.processed} already-processed image(s).</span>
-          )}
-          {status?.done && status.failed > 0 && (
-            <span className="reindex-error">{status.failed} image(s) failed to index — check server logs.</span>
-          )}
-          {status?.error && <span className="reindex-error">{status.error}</span>}
+          {actionError && <span className="reindex-error">{actionError}</span>}
 
           <div className="settings-backups">
             <div className="settings-backups-head">

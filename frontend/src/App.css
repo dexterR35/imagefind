@@ -681,12 +681,6 @@
   color: var(--text-muted);
 }
 
-.reindex {
-  display: flex;
-  align-items: center;
-  gap: 10px;
-}
-
 .settings-panel {
   position: absolute;
   top: 44px;

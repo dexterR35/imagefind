@@ -27,7 +27,7 @@ describe("Settings", () => {
   it("loads current settings when opened and pre-fills the custom tags field", async () => {
     vi.spyOn(api, "fetchSettings").mockResolvedValue(sampleSettings);
 
-    render(<Settings onReindexComplete={vi.fn()} />);
+    render(<Settings />);
     fireEvent.click(screen.getByRole("button", { name: "Open settings" }));
 
     await waitFor(() => expect(screen.getByDisplayValue("0.15")).toBeInTheDocument());
@@ -38,7 +38,7 @@ describe("Settings", () => {
   it("shows a connection error when settings fail to load", async () => {
     vi.spyOn(api, "fetchSettings").mockRejectedValue(new Error("offline"));
 
-    render(<Settings onReindexComplete={vi.fn()} />);
+    render(<Settings />);
     fireEvent.click(screen.getByRole("button", { name: "Open settings" }));
 
     expect(await screen.findByRole("alert")).toHaveTextContent("Could not load settings");
@@ -52,7 +52,7 @@ describe("Settings", () => {
     });
     const reindexSpy = vi.spyOn(api, "startReindex");
 
-    render(<Settings onReindexComplete={vi.fn()} />);
+    render(<Settings />);
     fireEvent.click(screen.getByRole("button", { name: "Open settings" }));
     await waitFor(() => expect(screen.getByDisplayValue("/photos")).toBeInTheDocument());
 
@@ -72,7 +72,7 @@ describe("Settings", () => {
     const reindexSpy = vi.spyOn(api, "startReindex");
     vi.mocked(window.confirm).mockReturnValueOnce(false);
 
-    render(<Settings onReindexComplete={vi.fn()} />);
+    render(<Settings />);
     fireEvent.click(screen.getByRole("button", { name: "Open settings" }));
     await waitFor(() => expect(screen.getByDisplayValue("/photos")).toBeInTheDocument());
     fireEvent.change(screen.getByDisplayValue("/photos"), { target: { value: "/other-photos" } });
@@ -91,7 +91,7 @@ describe("Settings", () => {
     });
     const reindexSpy = vi.spyOn(api, "startReindex");
 
-    render(<Settings onReindexComplete={vi.fn()} />);
+    render(<Settings />);
     fireEvent.click(screen.getByRole("button", { name: "Open settings" }));
     await waitFor(() => expect(screen.getByDisplayValue("0.15")).toBeInTheDocument());
 
@@ -115,7 +115,7 @@ describe("Settings", () => {
     vi.spyOn(api, "updateSettings").mockRejectedValue(new Error("network down"));
     const reindexSpy = vi.spyOn(api, "startReindex");
 
-    render(<Settings onReindexComplete={vi.fn()} />);
+    render(<Settings />);
     fireEvent.click(screen.getByRole("button", { name: "Open settings" }));
     await waitFor(() => expect(screen.getByDisplayValue("0.15")).toBeInTheDocument());
 
@@ -127,26 +127,36 @@ describe("Settings", () => {
     expect(screen.getByText("Save")).not.toBeDisabled();
   });
 
-  it("starts a forced reindex independently and polls to completion", async () => {
+  it("starts a forced reindex without saving, and hands it to the progress bar", async () => {
     vi.spyOn(api, "fetchSettings").mockResolvedValue(sampleSettings);
     const updateSpy = vi.spyOn(api, "updateSettings");
     const reindexSpy = vi.spyOn(api, "startReindex").mockResolvedValue("job1");
-    vi.spyOn(api, "fetchReindexStatus").mockResolvedValue({
-      processed: 1, total: 1, failed: 0, done: true, error: null, cancelled: false,
-    });
-    const onReindexComplete = vi.fn();
+    const onReindexStart = vi.fn();
 
-    render(<Settings onReindexComplete={onReindexComplete} />);
+    render(<Settings onReindexStart={onReindexStart} />);
     fireEvent.click(screen.getByRole("button", { name: "Open settings" }));
     await waitFor(() => expect(screen.getByDisplayValue("0.15")).toBeInTheDocument());
 
     fireEvent.click(screen.getByText("Reindex"));
     await waitFor(() => expect(reindexSpy).toHaveBeenCalledWith(true));
     expect(updateSpy).not.toHaveBeenCalled();
+    // The panel does not follow the run itself; it just points the bar at it.
+    await waitFor(() => expect(onReindexStart).toHaveBeenCalled());
+  });
 
-    await vi.advanceTimersByTimeAsync(500);
-    await waitFor(() => expect(onReindexComplete).toHaveBeenCalled());
-    expect(screen.getByText("Reindex")).not.toBeDisabled();
+  it("releases the Reindex button even if the run is never reported back", async () => {
+    vi.spyOn(api, "fetchSettings").mockResolvedValue(sampleSettings);
+    vi.spyOn(api, "startReindex").mockResolvedValue("job1");
+
+    render(<Settings />);
+    fireEvent.click(screen.getByRole("button", { name: "Open settings" }));
+    await waitFor(() => expect(screen.getByDisplayValue("0.15")).toBeInTheDocument());
+
+    fireEvent.click(screen.getByText("Reindex"));
+    await waitFor(() => expect(screen.getByText("Reindexing...")).toBeDisabled());
+
+    await vi.advanceTimersByTimeAsync(10_000);
+    await waitFor(() => expect(screen.getByText("Reindex")).not.toBeDisabled());
   });
 
   it("stops a run started elsewhere, which it has no local job id for", async () => {
@@ -158,7 +168,7 @@ describe("Settings", () => {
     });
     const cancelSpy = vi.spyOn(api, "cancelReindex").mockResolvedValue();
 
-    render(<Settings onReindexComplete={vi.fn()} reindexRunning />);
+    render(<Settings reindexRunning />);
     fireEvent.click(screen.getByRole("button", { name: "Open settings" }));
     await waitFor(() => expect(screen.getByDisplayValue("0.15")).toBeInTheDocument());
 
@@ -174,7 +184,7 @@ describe("Settings", () => {
     vi.spyOn(api, "fetchSettings").mockResolvedValue(sampleSettings);
     vi.spyOn(api, "fetchModelStatus").mockResolvedValue({ installed: true });
 
-    render(<Settings onReindexComplete={vi.fn()} />);
+    render(<Settings />);
     fireEvent.click(screen.getByRole("button", { name: "Open settings" }));
 
     await waitFor(() => expect(screen.getByDisplayValue("/photos")).toBeInTheDocument());
@@ -196,7 +206,7 @@ describe("Settings", () => {
         done: true, error: null, cancelled: false,
       });
 
-    render(<Settings onReindexComplete={vi.fn()} />);
+    render(<Settings />);
     fireEvent.click(screen.getByRole("button", { name: "Open settings" }));
 
     const installButton = await screen.findByText("Install RAM++ Model");
@@ -221,7 +231,7 @@ describe("Settings", () => {
       name: "index-20240102-120000.db", size: 3 * 1024 * 1024, created_at: 2,
     });
 
-    render(<Settings onReindexComplete={vi.fn()} />);
+    render(<Settings />);
     fireEvent.click(screen.getByRole("button", { name: "Open settings" }));
 
     await screen.findByText("index-20240101-000000.db");
@@ -241,7 +251,7 @@ describe("Settings", () => {
       error: "Failed to download RAM++ checkpoint: connection reset",
     });
 
-    render(<Settings onReindexComplete={vi.fn()} />);
+    render(<Settings />);
     fireEvent.click(screen.getByRole("button", { name: "Open settings" }));
 
     const installButton = await screen.findByText("Install RAM++ Model");
