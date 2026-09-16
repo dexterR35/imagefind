@@ -18,13 +18,19 @@ interface Props {
   groupByDate?: boolean;
 }
 
-// Local day key ("2026-09-07") from a unix-seconds timestamp.
+const UNKNOWN_DATE_KEY = "unknown";
+
+// Local day key ("2026-09-07") from a unix-seconds timestamp. Images whose
+// added_at was never populated (pre-migration rows, still 0 until the next
+// reindex backfills it) group together instead of rendering as Jan 1 1970.
 function dayKey(seconds: number): string {
+  if (!seconds) return UNKNOWN_DATE_KEY;
   const d = new Date(seconds * 1000);
   return `${d.getFullYear()}-${d.getMonth()}-${d.getDate()}`;
 }
 
 function dayLabel(seconds: number): string {
+  if (!seconds) return "Unknown date";
   const d = new Date(seconds * 1000);
   const now = new Date();
   const opts: Intl.DateTimeFormatOptions = { day: "numeric", month: "short" };

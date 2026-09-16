@@ -477,7 +477,7 @@ class IndexStore:
         stat = path.stat()
         metadata_missing = (
             entry.width <= 0 or entry.height <= 0 or not entry.format
-            or entry.date_taken <= 0 or entry.indexed_at <= 0
+            or entry.date_taken <= 0 or entry.indexed_at <= 0 or entry.added_at <= 0
         )
         mtime_changed = abs(entry.mtime - stat.st_mtime) > config.MTIME_TOLERANCE_SECONDS
         return metadata_missing or mtime_changed or entry.size != stat.st_size

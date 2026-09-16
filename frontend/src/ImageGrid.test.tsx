@@ -86,4 +86,17 @@ describe("ImageGrid", () => {
     const headings = screen.getAllByRole("heading", { level: 2 }).map((h) => h.textContent);
     expect(headings).toEqual(["Sep 7", "Sep 3"]);
   });
+
+  it("groups images with no added_at under an Unknown date heading instead of Jan 1 1970", () => {
+    const day1 = new Date(2026, 8, 7, 10, 0, 0).getTime() / 1000;
+    const images: ImageResult[] = [
+      { ...sample[0], id: "a", path: "/imgs/a.png", added_at: day1 },
+      { ...sample[0], id: "b", path: "/imgs/b.png", added_at: 0 },
+    ];
+    render(<ImageGrid images={images} onSelect={vi.fn()} groupByDate />);
+
+    const headings = screen.getAllByRole("heading", { level: 2 }).map((h) => h.textContent);
+    expect(headings).toEqual(["Sep 7", "Unknown date"]);
+    expect(screen.queryByText(/1970/)).not.toBeInTheDocument();
+  });
 });

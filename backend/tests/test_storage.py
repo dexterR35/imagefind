@@ -97,6 +97,7 @@ def test_needs_reindex_detects_new_and_unchanged_files(tmp_path):
     entry = _entry(
         path=str(img_path), mtime=stat.st_mtime, size=stat.st_size,
         width=10, height=10, format="PNG", date_taken=stat.st_mtime, indexed_at=1.0,
+        added_at=stat.st_mtime,
     )
     store.upsert(entry, np.zeros(4, dtype=np.float32))
     assert store.needs_reindex(img_path) is False
@@ -110,6 +111,24 @@ def test_needs_reindex_backfills_metadata_for_an_unchanged_legacy_row(tmp_path):
     store.load()
     store.upsert(
         _entry(path=str(img_path), mtime=stat.st_mtime, size=stat.st_size),
+        np.zeros(4, dtype=np.float32),
+    )
+
+    assert store.needs_reindex(img_path) is True
+
+
+def test_needs_reindex_backfills_added_at_for_an_otherwise_complete_row(tmp_path):
+    img_path = tmp_path / "photo.png"
+    img_path.write_bytes(b"fake-image-bytes")
+    stat = img_path.stat()
+    store = IndexStore(tmp_path / "idx", embedding_dim=4)
+    store.load()
+    store.upsert(
+        _entry(
+            path=str(img_path), mtime=stat.st_mtime, size=stat.st_size,
+            width=10, height=10, format="PNG", date_taken=stat.st_mtime, indexed_at=1.0,
+            # added_at left at its 0.0 default, as pre-migration rows have it.
+        ),
         np.zeros(4, dtype=np.float32),
     )
 
@@ -142,7 +161,7 @@ def test_needs_reindex_tolerates_sub_second_mtime_drift(tmp_path, monkeypatch):
     # but the size is unchanged - the pipeline must not re-run.
     store.upsert(
         _entry(path=str(img_path), mtime=stat.st_mtime - 1.0, size=stat.st_size,
-               width=1, height=1, format="PNG", date_taken=1.0, indexed_at=1.0),
+               width=1, height=1, format="PNG", date_taken=1.0, indexed_at=1.0, added_at=1.0),
         np.zeros(4, dtype=np.float32),
     )
     assert store.needs_reindex(img_path) is False

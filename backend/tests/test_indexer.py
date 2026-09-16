@@ -33,6 +33,7 @@ def _fake_process_image(index_dir):
             thumbnail_path=str(index_dir / "thumbnails" / f"{path.name}.jpg"),
             ocr_text="", objects=[], mtime=stat.st_mtime, size=stat.st_size,
             width=64, height=64, format="PNG", date_taken=stat.st_mtime, indexed_at=1.0,
+            added_at=stat.st_mtime,
         )
         return entry, np.zeros(512, dtype=np.float32)
 
