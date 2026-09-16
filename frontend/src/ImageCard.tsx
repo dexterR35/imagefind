@@ -40,7 +40,7 @@ export function ImageCard({ image, onClick, onToggleFavorite, selected, onToggle
   const details = [
     image.width > 0 && image.height > 0 ? `${image.width} × ${image.height}` : "",
     formatBytes(image.size),
-    "Added " + formatDate(image.indexed_at),
+    "Added " + formatDate(image.added_at),
   ].filter(Boolean).join(" · ");
   // Only the user's own note. OCR text is too noisy to show here (a logo gets
   // read a dozen ways); it stays in the modal's "Detected text" section.

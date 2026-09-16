@@ -7,13 +7,14 @@ from app.storage import ImageEntry, IndexStore
 
 def _entry(
     id, objects=None, ocr_text="", date_taken=0.0, size=0, path=None,
-    fmt="", width=0, height=0, mtime=0.0, indexed_at=0.0,
+    fmt="", width=0, height=0, mtime=0.0, indexed_at=0.0, added_at=0.0,
 ):
     return ImageEntry(
         id=id, path=path or f"/imgs/{id}.png", thumbnail_path=f"/t/{id}.jpg",
         ocr_text=ocr_text, objects=objects or [],
         mtime=mtime, size=size, date_taken=date_taken,
         format=fmt, width=width, height=height, indexed_at=indexed_at,
+        added_at=added_at,
     )
 
 
@@ -205,15 +206,15 @@ def test_search_ranks_stronger_text_matches_first_by_default(tmp_path):
 
 def test_search_explicit_sort_overrides_relevance(tmp_path):
     store = _store_with(tmp_path, [
-        (_entry("weak", ocr_text="clover", date_taken=100.0), [1.0, 0.0]),
-        (_entry("strong", ocr_text="clover clover clover", date_taken=1.0), [1.0, 0.0]),
+        (_entry("weak", ocr_text="clover", added_at=100.0), [1.0, 0.0]),
+        (_entry("strong", ocr_text="clover clover clover", added_at=1.0), [1.0, 0.0]),
     ])
 
     result, _ = search(store, text="clover", sort="date_desc")
     assert [e.id for e in result] == ["strong", "weak"]  # default: relevance first
 
     result, _ = search(store, text="clover", sort="date_asc")
-    assert [e.id for e in result] == ["strong", "weak"]  # explicit date_asc: strong is older
+    assert [e.id for e in result] == ["strong", "weak"]  # explicit date_asc: strong added earlier
 
     result, _ = search(store, text="clover", sort="name_desc")
     assert [e.id for e in result] == ["weak", "strong"]  # explicit name sort wins
@@ -301,7 +302,7 @@ def test_search_text_has_no_semantic_fallback(tmp_path):
 
 def test_search_paginates_with_offset_and_limit_and_reports_total(tmp_path):
     store = _store_with(tmp_path, [
-        (_entry(f"e{i}", date_taken=float(i)), [1.0, 0.0]) for i in range(5)
+        (_entry(f"e{i}", added_at=float(i)), [1.0, 0.0]) for i in range(5)
     ])
     result, total = search(store, sort="date_asc", offset=2, limit=2)
     assert [e.id for e in result] == ["e2", "e3"]
@@ -309,10 +310,13 @@ def test_search_paginates_with_offset_and_limit_and_reports_total(tmp_path):
 
 
 def test_search_sorts_by_date_desc_by_default(tmp_path):
+    # Sorted by added_at (file creation time, i.e. when it appeared on the
+    # NAS), not EXIF date_taken, so a file copied onto the NAS today surfaces
+    # as "new" regardless of when the photo itself was originally taken.
     store = _store_with(tmp_path, [
-        (_entry("old", date_taken=1.0), [1.0, 0.0]),
-        (_entry("new", date_taken=3.0), [1.0, 0.0]),
-        (_entry("mid", date_taken=2.0), [1.0, 0.0]),
+        (_entry("old", date_taken=99.0, added_at=1.0), [1.0, 0.0]),
+        (_entry("new", date_taken=1.0, added_at=3.0), [1.0, 0.0]),
+        (_entry("mid", date_taken=50.0, added_at=2.0), [1.0, 0.0]),
     ])
     result, _ = search(store)
     assert [e.id for e in result] == ["new", "mid", "old"]

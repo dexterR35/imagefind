@@ -214,7 +214,7 @@ def test_search_paginates_and_reports_metadata(tmp_path, monkeypatch):
             id=f"e{i}", path=f"/imgs/e{i}.png", thumbnail_path=str(tmp_path / f"e{i}.jpg"),
             ocr_text="", objects=[], mtime=0.0, size=100 * i,
             width=10, height=20, format="PNG", date_taken=float(i),
-            indexed_at=100.0 + i,
+            indexed_at=100.0 + i, added_at=200.0 + i,
         )
         main.store.upsert(entry, np.ones(512, dtype=np.float32))
 

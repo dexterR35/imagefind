@@ -21,6 +21,7 @@ const FORMATS = ["png", "jpg", "webp", "bmp", "gif", "tiff", "avif", "heic"];
 const DATE_FIELDS: { value: DateField; label: string }[] = [
   { value: "date_taken", label: "Date taken" },
   { value: "mtime", label: "Modified" },
+  { value: "added_at", label: "Added" },
   { value: "indexed_at", label: "Indexed" },
 ];
 const ORIENTATIONS: { value: Orientation; label: string }[] = [

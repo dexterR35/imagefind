@@ -169,7 +169,7 @@ def _entry_to_dict(e) -> dict:
         "ocr_text": e.ocr_text, "objects": e.objects,
         "width": e.width, "height": e.height, "format": e.format,
         "size": e.size, "mtime": e.mtime, "date_taken": e.date_taken,
-        "indexed_at": e.indexed_at,
+        "indexed_at": e.indexed_at, "added_at": e.added_at,
     }
 
 
@@ -470,7 +470,7 @@ def health():
     return {"status": "ok"}
 
 
-DateField = Literal["date_taken", "mtime", "indexed_at"]
+DateField = Literal["date_taken", "mtime", "indexed_at", "added_at"]
 
 EXPORT_MAX_ROWS = 50_000
 
@@ -609,7 +609,7 @@ def _iso(timestamp: float | None) -> str:
 
 _EXPORT_HEADER = [
     "id", "path", "filename", "format", "width", "height", "size",
-    "date_taken", "mtime", "indexed_at", "objects", "user_tags", "favorite", "note", "ocr_text",
+    "date_taken", "mtime", "indexed_at", "added_at", "objects", "user_tags", "favorite", "note", "ocr_text",
 ]
 
 
@@ -625,6 +625,7 @@ def _export_row(entry: dict) -> dict:
         "date_taken": _iso(entry["date_taken"]),
         "mtime": _iso(entry["mtime"]),
         "indexed_at": _iso(entry["indexed_at"]),
+        "added_at": _iso(entry["added_at"]),
         "objects": entry["objects"],
         "user_tags": entry["user_tags"],
         "favorite": entry["favorite"],

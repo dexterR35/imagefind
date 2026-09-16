@@ -61,6 +61,7 @@ def test_process_image_captures_dimensions_format_and_falls_back_date_taken(tmp_
     assert entry.format == "PNG"
     assert entry.date_taken == expected_mtime
     assert entry.indexed_at > 0
+    assert entry.added_at > 0
 
 
 def test_process_image_removes_temporary_thumbnail_after_pipeline_failure(tmp_path, monkeypatch):

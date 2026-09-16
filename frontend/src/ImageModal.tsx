@@ -320,6 +320,7 @@ export function ImageModal({
                 <div><dt>File size</dt><dd>{formatBytes(image.size)}</dd></div>
                 <div><dt>Date</dt><dd>{formatDate(image.date_taken)}</dd></div>
                 <div><dt>Modified</dt><dd>{formatDate(image.mtime)}</dd></div>
+                <div><dt>Added</dt><dd>{formatDate(image.added_at)}</dd></div>
                 <div><dt>Indexed</dt><dd>{formatDate(image.indexed_at)}</dd></div>
               </dl>
             </section>

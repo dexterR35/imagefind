@@ -390,6 +390,7 @@ function Gallery({ onLogout }: { onLogout: () => void }) {
           onToggleFavorite={handleToggleFavorite}
           selectedIds={selectedIds}
           onToggleSelect={toggleSelect}
+          groupByDate={!showingSimilar && !isSemantic && (sort === "date_desc" || sort === "date_asc")}
         />
       )}
       {!showingSimilar && !isSemantic && (

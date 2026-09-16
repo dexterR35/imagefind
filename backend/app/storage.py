@@ -29,6 +29,7 @@ CREATE TABLE IF NOT EXISTS images (
     format TEXT NOT NULL DEFAULT '',
     date_taken REAL NOT NULL DEFAULT 0,
     indexed_at REAL NOT NULL DEFAULT 0,
+    added_at REAL NOT NULL DEFAULT 0,
     embedding BLOB NOT NULL
 );
 
@@ -84,6 +85,8 @@ CREATE TABLE IF NOT EXISTS image_notes (
 );
 
 CREATE INDEX IF NOT EXISTS images_date_taken_idx ON images(date_taken, id);
+CREATE INDEX IF NOT EXISTS images_indexed_at_idx ON images(indexed_at, id);
+CREATE INDEX IF NOT EXISTS images_added_at_idx ON images(added_at, id);
 CREATE INDEX IF NOT EXISTS images_filename_idx ON images(filename COLLATE NOCASE, id);
 CREATE INDEX IF NOT EXISTS images_size_idx ON images(size, id);
 CREATE INDEX IF NOT EXISTS image_objects_label_idx ON image_objects(label, image_id);
@@ -98,18 +101,19 @@ _METADATA_COLUMNS = [
     ("format", "TEXT NOT NULL DEFAULT ''"),
     ("date_taken", "REAL NOT NULL DEFAULT 0"),
     ("indexed_at", "REAL NOT NULL DEFAULT 0"),
+    ("added_at", "REAL NOT NULL DEFAULT 0"),
 ]
 
 _SELECT_COLUMNS = (
     "id, path, thumbnail_path, ocr_text, objects, mtime, size, "
-    "width, height, format, date_taken, indexed_at"
+    "width, height, format, date_taken, indexed_at, added_at"
 )
 _INSERT_COLUMNS = (
     "id, path, filename, thumbnail_path, ocr_text, objects, mtime, size, "
-    "width, height, format, date_taken, indexed_at, embedding"
+    "width, height, format, date_taken, indexed_at, added_at, embedding"
 )
-_PLACEHOLDERS = ", ".join("?" * 14)
-_DATABASE_SCHEMA_VERSION = 5
+_PLACEHOLDERS = ", ".join("?" * 15)
+_DATABASE_SCHEMA_VERSION = 6
 _DERIVED_SCHEMA_VERSION = "4"
 
 # A user picking "jpg" means either spelling; PIL stores "JPEG" but the suffix
@@ -122,7 +126,7 @@ _FORMAT_ALIASES = {
     "heic": ("heic", "heif"),
     "heif": ("heic", "heif"),
 }
-_DATE_FIELDS = ("date_taken", "mtime", "indexed_at")
+_DATE_FIELDS = ("date_taken", "mtime", "indexed_at", "added_at")
 
 
 @dataclass
@@ -139,6 +143,9 @@ class ImageEntry:
     format: str = ""
     date_taken: float = 0.0
     indexed_at: float = 0.0
+    # File creation time on disk (when it appeared on the NAS), distinct from
+    # indexed_at (when the app finished processing it). See indexer.py.
+    added_at: float = 0.0
 
 
 def _row_to_entry(row: tuple) -> ImageEntry:
@@ -146,7 +153,7 @@ def _row_to_entry(row: tuple) -> ImageEntry:
         id=row[0], path=row[1], thumbnail_path=row[2], ocr_text=row[3],
         objects=json.loads(row[4]), mtime=row[5], size=row[6],
         width=row[7], height=row[8], format=row[9], date_taken=row[10],
-        indexed_at=row[11],
+        indexed_at=row[11], added_at=row[12],
     )
 
 
@@ -212,7 +219,8 @@ class IndexStore:
             "objects TEXT NOT NULL, mtime REAL NOT NULL, size INTEGER NOT NULL, "
             "width INTEGER NOT NULL DEFAULT 0, height INTEGER NOT NULL DEFAULT 0, "
             "format TEXT NOT NULL DEFAULT '', date_taken REAL NOT NULL DEFAULT 0, "
-            "indexed_at REAL NOT NULL DEFAULT 0, embedding BLOB NOT NULL)"
+            "indexed_at REAL NOT NULL DEFAULT 0, added_at REAL NOT NULL DEFAULT 0, "
+            "embedding BLOB NOT NULL)"
         )
         self._migrate_add_metadata_columns(conn)
         self._migrate_remove_colors(conn)
@@ -298,13 +306,18 @@ class IndexStore:
             "mtime REAL NOT NULL, size INTEGER NOT NULL, width INTEGER NOT NULL DEFAULT 0, "
             "height INTEGER NOT NULL DEFAULT 0, format TEXT NOT NULL DEFAULT '', "
             "date_taken REAL NOT NULL DEFAULT 0, indexed_at REAL NOT NULL DEFAULT 0, "
-            "embedding BLOB NOT NULL)"
+            "added_at REAL NOT NULL DEFAULT 0, embedding BLOB NOT NULL)"
         )
+        legacy_columns = {
+            row[1] for row in conn.execute("PRAGMA table_info(images_with_colors)").fetchall()
+        }
+        added_at_select = "added_at" if "added_at" in legacy_columns else "0"
         conn.execute(
             "INSERT INTO images (rowid, id, path, filename, thumbnail_path, ocr_text, objects, "
-            "mtime, size, width, height, format, date_taken, indexed_at, embedding) "
+            "mtime, size, width, height, format, date_taken, indexed_at, added_at, embedding) "
             "SELECT rowid, id, path, filename, thumbnail_path, ocr_text, objects, mtime, size, "
-            "width, height, format, date_taken, indexed_at, embedding FROM images_with_colors"
+            f"width, height, format, date_taken, indexed_at, {added_at_select}, embedding "
+            "FROM images_with_colors"
         )
         conn.execute("DROP TABLE images_with_colors")
 
@@ -319,7 +332,7 @@ class IndexStore:
             entry.id, entry.path, Path(entry.path).name, entry.thumbnail_path,
             entry.ocr_text, json.dumps(entry.objects), entry.mtime, entry.size,
             entry.width, entry.height, entry.format, entry.date_taken,
-            entry.indexed_at, vector.tobytes(),
+            entry.indexed_at, entry.added_at, vector.tobytes(),
         )
 
     def _sync_derived(self, rowid: int, entry: ImageEntry, embedding: np.ndarray) -> None:
@@ -413,8 +426,8 @@ class IndexStore:
             for row in rows:
                 rowid = row[0]
                 try:
-                    entry = _row_to_entry(row[1:13])
-                    vector = np.frombuffer(row[13], dtype=np.float32)
+                    entry = _row_to_entry(row[1:14])
+                    vector = np.frombuffer(row[14], dtype=np.float32)
                     if vector.shape != (self.embedding_dim,):
                         raise ValueError(
                             f"embedding shape {vector.shape}; expected ({self.embedding_dim},)"
@@ -486,7 +499,7 @@ class IndexStore:
                     "ocr_text=excluded.ocr_text, objects=excluded.objects, "
                     "mtime=excluded.mtime, size=excluded.size, width=excluded.width, height=excluded.height, "
                     "format=excluded.format, date_taken=excluded.date_taken, indexed_at=excluded.indexed_at, "
-                    "embedding=excluded.embedding RETURNING rowid",
+                    "added_at=excluded.added_at, embedding=excluded.embedding RETURNING rowid",
                     values,
                 ).fetchone()
                 self._sync_derived(row[0], entry, embedding)
@@ -993,13 +1006,18 @@ class IndexStore:
         # ocr_text columns that would otherwise make the SELECT ambiguous.
         select_cols = ", ".join(f"images.{col.strip()}" for col in _SELECT_COLUMNS.split(","))
         base_order = {
-            "date_desc": "images.date_taken DESC",
-            "date_asc": "images.date_taken ASC",
+            # Ordered by added_at (file creation time on the NAS/filesystem),
+            # not EXIF date_taken -- an old photo copied in today should
+            # surface as "new" rather than sort by when it was originally
+            # shot. Unlike indexed_at (stamped once processing finishes),
+            # added_at doesn't drift with queue position on a bulk import.
+            "date_desc": "images.added_at DESC",
+            "date_asc": "images.added_at ASC",
             "name_asc": "images.filename COLLATE NOCASE ASC",
             "name_desc": "images.filename COLLATE NOCASE DESC",
             "size_desc": "images.size DESC",
             "size_asc": "images.size ASC",
-        }.get(sort, "images.date_taken DESC")
+        }.get(sort, "images.added_at DESC")
         order_params: list[object] = []
         if rank_by_relevance and sort == "date_desc":
             # "date_desc" is also the default the frontend sends when the user

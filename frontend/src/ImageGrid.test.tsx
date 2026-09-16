@@ -7,7 +7,7 @@ const sample: ImageResult[] = [
   {
     id: "a1", path: "/imgs/clover.png", thumbnail_url: "/thumbnail/a1", ocr_text: "", objects: ["clover"],
     width: 1920, height: 1080, format: "PNG", size: 2048,
-    mtime: 1, date_taken: 1, indexed_at: 2,
+    mtime: 1, date_taken: 1, indexed_at: 2, added_at: 3,
   },
 ];
 
@@ -71,5 +71,19 @@ describe("ImageGrid", () => {
 
     expect(screen.getByAltText("Promo ™.png")).toBeInTheDocument();
     expect(screen.queryByText(windowsImage.path)).not.toBeInTheDocument();
+  });
+
+  it("splits into day-by-day sections keyed by added_at when groupByDate is set", () => {
+    const day1 = new Date(2026, 8, 7, 10, 0, 0).getTime() / 1000;
+    const day2 = new Date(2026, 8, 3, 10, 0, 0).getTime() / 1000;
+    const images: ImageResult[] = [
+      { ...sample[0], id: "a", path: "/imgs/a.png", added_at: day1 },
+      { ...sample[0], id: "b", path: "/imgs/b.png", added_at: day1 + 60 },
+      { ...sample[0], id: "c", path: "/imgs/c.png", added_at: day2 },
+    ];
+    render(<ImageGrid images={images} onSelect={vi.fn()} groupByDate />);
+
+    const headings = screen.getAllByRole("heading", { level: 2 }).map((h) => h.textContent);
+    expect(headings).toEqual(["Sep 7", "Sep 3"]);
   });
 });

@@ -273,10 +273,6 @@
   flex-direction: column;
   gap: 8px;
   margin-bottom: 12px;
-  padding: 8px;
-  background: var(--bg-raised);
-  border: 1px solid var(--border);
-  border-radius: var(--radius);
 }
 
 .filter-row {
@@ -1050,6 +1046,19 @@
   display: grid;
   grid-template-columns: repeat(auto-fill, minmax(248px, 1fr));
   gap: 16px;
+}
+
+.image-grid-groups {
+  display: flex;
+  flex-direction: column;
+  gap: 24px;
+}
+
+.image-grid-date {
+  margin: 0 0 12px;
+  color: var(--text-h);
+  font-size: 14px;
+  font-weight: 600;
 }
 
 .image-card-wrap {

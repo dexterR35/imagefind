@@ -8,7 +8,7 @@ function img(id: string): ImageResult {
   return {
     id, path: `/imgs/${id}.png`, thumbnail_url: `/api/thumbnail/${id}`,
     ocr_text: "", objects: [], width: 10, height: 10, format: "PNG",
-    size: 2048, mtime: 1, date_taken: 1, indexed_at: 1,
+    size: 2048, mtime: 1, date_taken: 1, indexed_at: 1, added_at: 1,
   };
 }
 

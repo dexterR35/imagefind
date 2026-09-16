@@ -136,6 +136,13 @@ class Indexer:
                 mtime=stat.st_mtime, size=stat.st_size,
                 width=width, height=height, format=img_format,
                 date_taken=date_taken, indexed_at=time.time(),
+                # File creation time, i.e. when it actually appeared on this
+                # filesystem/NAS share - unlike indexed_at (stamped once
+                # processing finishes), this doesn't drift with queue position
+                # or how long a bulk import takes to grind through.
+                # st_birthtime (macOS/BSD) is true creation time; st_ctime is
+                # creation time on Windows, metadata-change time on Linux.
+                added_at=getattr(stat, "st_birthtime", stat.st_ctime),
             )
             os.replace(temporary_thumb, thumb_path)
             return entry, embedding

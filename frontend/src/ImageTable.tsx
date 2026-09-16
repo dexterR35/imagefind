@@ -102,7 +102,7 @@ export function ImageTable({
                     : "—"}
                 </td>
                 <td>{formatBytes(image.size)}</td>
-                <td>{formatDate(image.indexed_at)}</td>
+                <td>{formatDate(image.added_at)}</td>
                 <td className="col-objects" title={image.objects.join(", ")}>
                   {image.objects.length > 0 ? image.objects.join(", ") : "—"}
                 </td>

@@ -11,6 +11,7 @@ export interface ImageResult {
   mtime: number;
   date_taken: number;
   indexed_at: number;
+  added_at: number;
   favorite?: boolean;
   user_tags?: string[];
   note?: string;
@@ -23,7 +24,7 @@ export interface Collection {
   count: number;
 }
 
-export type DateField = "date_taken" | "mtime" | "indexed_at";
+export type DateField = "date_taken" | "mtime" | "indexed_at" | "added_at";
 export type Orientation = "portrait" | "landscape" | "square";
 
 export interface SearchFilters {
@@ -265,7 +266,7 @@ export function filtersToSearchParams(filters: SearchFilters): URLSearchParams {
   return params;
 }
 
-const DATE_FIELDS: DateField[] = ["date_taken", "mtime", "indexed_at"];
+const DATE_FIELDS: DateField[] = ["date_taken", "mtime", "indexed_at", "added_at"];
 const ORIENTATIONS: Orientation[] = ["portrait", "landscape", "square"];
 
 // Inverse of filtersToSearchParams — tolerant of junk (unknown or malformed

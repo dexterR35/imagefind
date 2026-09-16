@@ -28,7 +28,7 @@ def test_upsert_save_load_roundtrip(tmp_path):
     assert reloaded.get("a1").ocr_text == "NETBET"
     assert reloaded.get_embedding("a1").tolist() == [1.0, 0.0, 0.0, 0.0]
     assert reloaded.get_by_path("/imgs/a.png").id == "a1"
-    assert reloaded._conn.execute("PRAGMA user_version").fetchone()[0] == 5
+    assert reloaded._conn.execute("PRAGMA user_version").fetchone()[0] == 6
 
 
 def test_upsert_save_load_roundtrip_preserves_new_metadata_fields(tmp_path):
