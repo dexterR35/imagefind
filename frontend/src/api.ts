@@ -47,7 +47,10 @@ export interface SearchFilters {
   mode?: "semantic";
 }
 
+// "relevance" (Best match) ranks text hits first and is otherwise newest
+// first; every other option is applied strictly, even with a text query.
 export type SortOption =
+  | "relevance"
   | "date_desc"
   | "date_asc"
   | "name_asc"
@@ -56,6 +59,7 @@ export type SortOption =
   | "size_asc";
 
 export const SORT_OPTIONS: SortOption[] = [
+  "relevance",
   "date_desc",
   "date_asc",
   "name_asc",
@@ -63,6 +67,14 @@ export const SORT_OPTIONS: SortOption[] = [
   "size_desc",
   "size_asc",
 ];
+
+export const DEFAULT_SORT: SortOption = "relevance";
+
+// The moment that orders "Newest first": when the file arrived on the NAS or
+// was last edited, whichever is later. Mirrors the backend's sort key.
+export function updatedAt(image: Pick<ImageResult, "added_at" | "mtime">): number {
+  return Math.max(image.added_at || 0, image.mtime || 0);
+}
 
 export interface SearchOptions {
   sort?: SortOption;
@@ -107,6 +119,8 @@ export interface ReindexStatus {
   job_id?: string;
   started_at?: number;
   elapsed_seconds?: number;
+  // Where the models run: "cuda" when a GPU was found, else "cpu".
+  device?: string;
 }
 
 export interface Settings {
@@ -203,7 +217,7 @@ export function exportUrl(
   output: "csv" | "json",
 ): string {
   const params = filtersToSearchParams(filters);
-  if (sort !== "date_desc") params.set("sort", sort);
+  if (sort !== DEFAULT_SORT) params.set("sort", sort);
   params.set("output", output);
   return `${BASE_URL}/search/export?${params.toString()}`;
 }
@@ -327,8 +341,11 @@ export async function findSimilar(imageId: string, signal?: AbortSignal): Promis
   return toAbsolute(data);
 }
 
-export async function fetchDuplicates(threshold = 0.08): Promise<ImageResult[][]> {
-  const res = await apiFetch(`${BASE_URL}/duplicates?threshold=${threshold}`);
+// Without a threshold the server uses the cut-off calibrated for its
+// embedding model; distances differ too much between models to hard-code one.
+export async function fetchDuplicates(threshold?: number): Promise<ImageResult[][]> {
+  const query = threshold === undefined ? "" : `?threshold=${threshold}`;
+  const res = await apiFetch(`${BASE_URL}/duplicates${query}`);
   if (!res.ok) throw new Error(`find duplicates failed: ${res.status}`);
   const groups: ImageResult[][] = await res.json();
   return groups.map(toAbsolute);
@@ -354,6 +371,39 @@ export async function setFavorite(imageId: string, favorite: boolean): Promise<b
 export async function setImageTags(imageId: string, tags: string[]): Promise<string[]> {
   const data = await putJson<{ user_tags: string[] }>(`/images/${imageId}/tags`, { tags });
   return data.user_tags;
+}
+
+// [x0, y0, x1, y1] as fractions of the image's width and height.
+export type Box = [number, number, number, number];
+
+export interface DetectedBox {
+  label: string;
+  score: number;
+  // "word": the detector matched the word; "example": it looks like one of
+  // the tag's reference pictures.
+  source: "word" | "example";
+  box: Box;
+}
+
+export async function detectInImage(
+  imageId: string, word: string, signal?: AbortSignal,
+): Promise<DetectedBox[]> {
+  const params = new URLSearchParams({ q: word });
+  const res = await apiFetch(`${BASE_URL}/images/${imageId}/detect?${params}`, { signal });
+  if (!res.ok) throw new Error(await errorDetail(res));
+  const data: { boxes: DetectedBox[] } = await res.json();
+  return data.boxes;
+}
+
+export interface ExampleSaved {
+  tag: string;
+  examples: number;
+  user_tags: string[];
+}
+
+// Save the boxed part of an image as a reference picture for a custom tag.
+export function addExample(imageId: string, tag: string, box: Box): Promise<ExampleSaved> {
+  return postJson<ExampleSaved>(`/images/${imageId}/examples`, { tag, box });
 }
 
 async function postJson<T>(url: string, body: unknown): Promise<T> {

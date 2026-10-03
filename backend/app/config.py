@@ -77,18 +77,59 @@ else:
     _ram_confidence_env = os.environ.get("RAM_CONFIDENCE")
     RAM_CONFIDENCE = float(_ram_confidence_env) if _ram_confidence_env else None
 
-# Extra words to look for on top of RAM++'s automatic tags — matched via CLIP
-# image/text cosine similarity (the same CLIP model used for "Find Similar"
-# in embeddings.py), not RAM++'s own open-set mode (which needs a separate
-# CLIP package and replaces the whole tag vocabulary rather than adding to it).
-RAM_CUSTOM_TAGS: list[str] = _persisted.get("ram_custom_tags", [])
-RAM_CUSTOM_TAG_THRESHOLD = float(os.environ.get("RAM_CUSTOM_TAG_THRESHOLD", "0.22"))
+# Image/text embedding model (OpenCLIP) behind Find Similar, Fuzzy search,
+# custom tags and the duplicate finder. SigLIP 2 base: ~1.5 GB, downloaded on
+# first use. Changing it changes EMBEDDING_DIM, which drops the index on the
+# next start - reindex to rebuild.
+EMBEDDING_MODEL_NAME = "ViT-B-16-SigLIP2"
+EMBEDDING_PRETRAINED = "webli"
+EMBEDDING_DIM = 768
+# Cosine cut-offs calibrated for this model on real icon sheets (matching vs.
+# unrelated tags; resized/re-encoded/10-20%-cropped copies vs. different images
+# in the same style). SigLIP scores sit far lower than CLIP's, so re-calibrate
+# these if the model changes.
+DUPLICATE_DISTANCE_THRESHOLD = 0.035
 
-# Optional reference images for a custom tag, for named entities/characters CLIP's
-# bare text embedding alone may not pin down well (e.g. "zeus"): drop a few example
-# photos in RAM_CUSTOM_TAG_REFERENCE_DIR/<tag name>/ and they're blended in with the
-# text embedding to build a more accurate match target for that tag.
+# Open-vocabulary detector behind "Find in image" (boxes for a word). Loaded
+# on first use only (~600 MB download), never during indexing.
+DETECTOR_MODEL = "google/owlv2-base-patch16-ensemble"
+# OWLv2 word-match score: real objects on icon sheets scored 0.31-0.77, a
+# false hit 0.26.
+DETECT_TEXT_THRESHOLD = float(os.environ.get("DETECT_TEXT_THRESHOLD", "0.30"))
+# Crop-vs-reference cosine: a reference pasted at 1/6 of a sheet's width
+# scored 0.93, the best crop on sheets without it 0.61.
+DETECT_EXAMPLE_THRESHOLD = float(os.environ.get("DETECT_EXAMPLE_THRESHOLD", "0.75"))
+
+# During indexing, also look for custom tags' reference pictures among the
+# objects *inside* each image (one OWLv2 pass per image), so a small instance
+# on a busy sheet gets the tag. "auto" turns it on only when a GPU is found
+# at the start of a reindex: ~0.2 s/image there, several seconds on CPU.
+INDEX_EXAMPLE_DETECTION = os.environ.get("INDEX_EXAMPLE_DETECTION", "auto").lower()
+if INDEX_EXAMPLE_DETECTION not in ("auto", "on", "off"):
+    raise ValueError(
+        f"INDEX_EXAMPLE_DETECTION={INDEX_EXAMPLE_DETECTION!r}; expected auto, on or off"
+    )
+
+# Extra words to look for on top of RAM++'s automatic tags — matched via the
+# embedding model's image/text cosine similarity (the same model used for
+# "Find Similar" in embeddings.py), not RAM++'s own open-set mode (which needs
+# a separate CLIP package and replaces the whole tag vocabulary).
+RAM_CUSTOM_TAGS: list[str] = _persisted.get("ram_custom_tags", [])
+RAM_CUSTOM_TAG_THRESHOLD = float(os.environ.get("RAM_CUSTOM_TAG_THRESHOLD", "0.06"))
+
+# Optional reference images for a custom tag, for named entities/characters the
+# bare word may not pin down well (e.g. "zeus"): drop a few example pictures in
+# RAM_CUSTOM_TAG_REFERENCE_DIR/<tag name>/ and an image also gets the tag when it
+# looks like any of them. Image-to-image scores run far higher than text ones,
+# hence the separate cut-off. An example drawn on one of your sheets carries
+# that sheet's style, so unrelated sheets scored up to 0.64 against it; a sheet
+# where the subject fills half the width scored 0.61-0.77. Smaller instances on
+# a busy sheet are not separable this way - see INDEX_EXAMPLE_DETECTION, which
+# replaces this whole-image check when it is on.
 RAM_CUSTOM_TAG_REFERENCE_DIR = Path(os.environ.get("RAM_CUSTOM_TAG_REFERENCE_DIR", "reference_tags"))
+RAM_CUSTOM_TAG_REFERENCE_THRESHOLD = float(
+    os.environ.get("RAM_CUSTOM_TAG_REFERENCE_THRESHOLD", "0.70")
+)
 
 # DAM-style real-time indexing: a watchdog observer processes new/changed
 # files as they land instead of waiting for a manual reindex. Enabled for the
@@ -97,7 +138,7 @@ RAM_CUSTOM_TAG_REFERENCE_DIR = Path(os.environ.get("RAM_CUSTOM_TAG_REFERENCE_DIR
 ENABLE_WATCHER = os.environ.get("ENABLE_WATCHER", "true").lower() == "true"
 # needs_reindex() re-processes a file when its stored mtime no longer matches
 # the file on disk. SMB/FAT/NFS commonly round mtime to whole seconds, and a
-# bare `!=` then makes every reconciliation scan re-run the full OCR/RAM++/CLIP
+# bare `!=` then makes every reconciliation scan re-run the full OCR/RAM++/embedding
 # pipeline on files that never actually changed. A genuine edit moves mtime by
 # far more than this tolerance, so a small window removes the churn without
 # hiding real changes.

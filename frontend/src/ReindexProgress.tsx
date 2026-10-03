@@ -201,6 +201,7 @@ export function ReindexProgress({ enabled = true, startToken = 0, onComplete, on
           {!scanning && status.total > 0 && <> · {percent}%</>}
           {remaining !== null && <> · ~{formatDuration(remaining)} left</>}
           {status.done && elapsed > 0 && <> · took {formatDuration(elapsed)}</>}
+          {status.device && <> · {status.device === "cuda" ? "GPU" : "CPU"}</>}
         </span>
         {running && (
           <button

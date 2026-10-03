@@ -1,13 +1,14 @@
 import numpy as np
 from PIL import Image, ImageDraw
 
+from app import config
 from app.embeddings import cosine_similarity, embed_image, embed_text
 
 
 def test_embed_image_returns_unit_vector():
     img = Image.new("RGB", (224, 224), (200, 30, 30))
     vec = embed_image(img)
-    assert vec.shape == (512,)
+    assert vec.shape == (config.EMBEDDING_DIM,)
     assert vec.dtype == np.float32
     assert abs(np.linalg.norm(vec) - 1.0) < 1e-3
 

@@ -87,11 +87,26 @@ describe("ImageGrid", () => {
     expect(headings).toEqual(["Sep 7", "Sep 3"]);
   });
 
+  it("groups by the later of added_at and mtime, matching the Newest first sort", () => {
+    const sep7 = new Date(2026, 8, 7, 10, 0, 0).getTime() / 1000;
+    const sep3 = new Date(2026, 8, 3, 10, 0, 0).getTime() / 1000;
+    const images: ImageResult[] = [
+      // Edited in place on Sep 7 after arriving on Sep 3.
+      { ...sample[0], id: "a", path: "/imgs/a.png", added_at: sep3, mtime: sep7 },
+      // Copied in on Sep 3 with an older preserved mtime.
+      { ...sample[0], id: "b", path: "/imgs/b.png", added_at: sep3, mtime: 1 },
+    ];
+    render(<ImageGrid images={images} onSelect={vi.fn()} groupByDate />);
+
+    const headings = screen.getAllByRole("heading", { level: 2 }).map((h) => h.textContent);
+    expect(headings).toEqual(["Sep 7", "Sep 3"]);
+  });
+
   it("groups images with no added_at under an Unknown date heading instead of Jan 1 1970", () => {
     const day1 = new Date(2026, 8, 7, 10, 0, 0).getTime() / 1000;
     const images: ImageResult[] = [
       { ...sample[0], id: "a", path: "/imgs/a.png", added_at: day1 },
-      { ...sample[0], id: "b", path: "/imgs/b.png", added_at: 0 },
+      { ...sample[0], id: "b", path: "/imgs/b.png", added_at: 0, mtime: 0 },
     ];
     render(<ImageGrid images={images} onSelect={vi.fn()} groupByDate />);
 

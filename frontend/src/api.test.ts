@@ -207,7 +207,7 @@ describe("exportUrl", () => {
       "/api/search/export?text=clover&favorite=true&sort=name_asc&output=csv",
     );
     // Default sort is omitted, JSON output is explicit.
-    expect(exportUrl({}, "date_desc", "json")).toBe("/api/search/export?output=json");
+    expect(exportUrl({}, "relevance", "json")).toBe("/api/search/export?output=json");
   });
 });
 
@@ -219,7 +219,7 @@ describe("duplicates + reindex stream", () => {
     vi.stubGlobal("fetch", mockFetch);
 
     const groups = await fetchDuplicates();
-    expect(mockFetch).toHaveBeenCalledWith("/api/duplicates?threshold=0.08");
+    expect(mockFetch).toHaveBeenCalledWith("/api/duplicates");
     expect(groups[0][0].thumbnail_url).toBe("/api/thumbnail/a");
   });
 

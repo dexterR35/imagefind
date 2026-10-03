@@ -1,8 +1,13 @@
 from PIL import Image
 
 import datetime
+import os
+import sys
 
-from app.image_utils import extract_date_taken, flatten_to_rgb
+import pytest
+
+from app import image_utils
+from app.image_utils import extract_date_taken, file_added_time, flatten_to_rgb
 
 
 def test_flatten_to_rgb_composites_transparency_onto_white():
@@ -61,3 +66,28 @@ def test_extract_date_taken_uses_next_valid_tag_then_file_mtime():
 
     empty = Image.new("RGB", (1, 1))
     assert extract_date_taken(empty, fallback=123.0) == 123.0
+
+
+def test_file_added_time_ignores_posix_ctime(tmp_path, monkeypatch):
+    # On Linux st_ctime is the last chmod/rename, never creation time.
+    path = tmp_path / "a.png"
+    path.write_bytes(b"x")
+    os.utime(path, (1_000_000, 1_000_000))
+    os.chmod(path, 0o644)  # bumps ctime to now
+    monkeypatch.setattr(image_utils, "_linux_birth_time", lambda p: None)
+    stat = path.stat()
+    if hasattr(stat, "st_birthtime") or os.name == "nt":
+        pytest.skip("platform exposes a real creation time")
+    assert file_added_time(path, stat) == 1_000_000
+
+
+@pytest.mark.skipif(not sys.platform.startswith("linux"), reason="statx is Linux-only")
+def test_linux_birth_time_is_creation_not_mtime(tmp_path):
+    path = tmp_path / "a.png"
+    path.write_bytes(b"x")
+    os.utime(path, (1_000_000, 1_000_000))  # pretend it was copied with an old mtime
+    birth = image_utils._linux_birth_time(path)
+    if birth is None:
+        pytest.skip("filesystem does not record birth time")
+    assert birth > 1_000_000
+    assert file_added_time(path, path.stat()) == birth

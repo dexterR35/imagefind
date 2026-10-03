@@ -87,6 +87,7 @@ CREATE TABLE IF NOT EXISTS image_notes (
 CREATE INDEX IF NOT EXISTS images_date_taken_idx ON images(date_taken, id);
 CREATE INDEX IF NOT EXISTS images_indexed_at_idx ON images(indexed_at, id);
 CREATE INDEX IF NOT EXISTS images_added_at_idx ON images(added_at, id);
+CREATE INDEX IF NOT EXISTS images_updated_idx ON images(max(added_at, mtime), id);
 CREATE INDEX IF NOT EXISTS images_filename_idx ON images(filename COLLATE NOCASE, id);
 CREATE INDEX IF NOT EXISTS images_size_idx ON images(size, id);
 CREATE INDEX IF NOT EXISTS image_objects_label_idx ON image_objects(label, image_id);
@@ -113,7 +114,7 @@ _INSERT_COLUMNS = (
     "width, height, format, date_taken, indexed_at, added_at, embedding"
 )
 _PLACEHOLDERS = ", ".join("?" * 15)
-_DATABASE_SCHEMA_VERSION = 6
+_DATABASE_SCHEMA_VERSION = 7
 _DERIVED_SCHEMA_VERSION = "4"
 
 # A user picking "jpg" means either spelling; PIL stores "JPEG" but the suffix
@@ -127,6 +128,10 @@ _FORMAT_ALIASES = {
     "heif": ("heic", "heif"),
 }
 _DATE_FIELDS = ("date_taken", "mtime", "indexed_at", "added_at")
+# "Last updated": when the file arrived (added_at) or was last edited in place
+# (mtime), whichever is later. Must match images_updated_idx exactly for
+# SQLite to use that index for ORDER BY.
+_UPDATED_AT_SQL = "max(images.added_at, images.mtime)"
 
 
 @dataclass
@@ -144,7 +149,8 @@ class ImageEntry:
     date_taken: float = 0.0
     indexed_at: float = 0.0
     # File creation time on disk (when it appeared on the NAS), distinct from
-    # indexed_at (when the app finished processing it). See indexer.py.
+    # indexed_at (when the app finished processing it).
+    # See image_utils.file_added_time.
     added_at: float = 0.0
 
 
@@ -165,7 +171,7 @@ class IndexStore:
     similarity uses sqlite-vec's vec0 virtual table.
     """
 
-    def __init__(self, index_dir: Path, embedding_dim: int = 512):
+    def __init__(self, index_dir: Path, embedding_dim: int = config.EMBEDDING_DIM):
         self.index_dir = Path(index_dir)
         self.index_dir.mkdir(parents=True, exist_ok=True)
         self.db_path = self.index_dir / "index.db"
@@ -423,19 +429,22 @@ class IndexStore:
             rows = self._conn.execute(
                 f"SELECT rowid, {_SELECT_COLUMNS}, embedding FROM images ORDER BY rowid"
             ).fetchall()
+            other_model = 0
             for row in rows:
                 rowid = row[0]
                 try:
                     entry = _row_to_entry(row[1:14])
                     vector = np.frombuffer(row[14], dtype=np.float32)
-                    if vector.shape != (self.embedding_dim,):
-                        raise ValueError(
-                            f"embedding shape {vector.shape}; expected ({self.embedding_dim},)"
-                        )
                 except (json.JSONDecodeError, TypeError, ValueError) as exc:
                     # A single malformed primary row is recoverable from its
                     # source image. Do not discard the rest of a large index.
                     logger.warning("dropping unreadable image rowid %s: %s", rowid, exc)
+                    self._conn.execute("DELETE FROM images WHERE rowid=?", (rowid,))
+                    continue
+                if vector.shape != (self.embedding_dim,):
+                    # Embedded by a different model. Drop the row (and, by
+                    # cascade, its curation); the next reindex rebuilds it.
+                    other_model += 1
                     self._conn.execute("DELETE FROM images WHERE rowid=?", (rowid,))
                     continue
                 self._conn.execute(
@@ -443,6 +452,11 @@ class IndexStore:
                     (Path(entry.path).name, rowid),
                 )
                 self._sync_derived(rowid, entry, vector)
+            if other_model:
+                logger.warning(
+                    "dropped %d image(s) embedded by a different model; reindex to rebuild them",
+                    other_model,
+                )
             self._conn.execute(
                 "INSERT OR REPLACE INTO index_store_meta(key, value) "
                 "VALUES ('derived_schema_version', ?)",
@@ -477,7 +491,7 @@ class IndexStore:
         stat = path.stat()
         metadata_missing = (
             entry.width <= 0 or entry.height <= 0 or not entry.format
-            or entry.date_taken <= 0 or entry.indexed_at <= 0 or entry.added_at <= 0
+            or entry.date_taken <= 0 or entry.indexed_at <= 0
         )
         mtime_changed = abs(entry.mtime - stat.st_mtime) > config.MTIME_TOLERANCE_SECONDS
         return metadata_missing or mtime_changed or entry.size != stat.st_size
@@ -905,7 +919,7 @@ class IndexStore:
         fmt: str | None = None,
         size_min: int | None = None,
         size_max: int | None = None,
-        date_field: str = "date_taken",
+        date_field: str = "added_at",
         date_from: float | None = None,
         date_to: float | None = None,
         width_min: int | None = None,
@@ -916,7 +930,7 @@ class IndexStore:
         favorite: bool | None = None,
         collection: str | None = None,
         user_tag: str | None = None,
-        sort: str = "date_desc",
+        sort: str = "relevance",
         offset: int = 0,
         limit: int = 60,
     ) -> tuple[list[ImageEntry], int]:
@@ -1006,23 +1020,23 @@ class IndexStore:
         # ocr_text columns that would otherwise make the SELECT ambiguous.
         select_cols = ", ".join(f"images.{col.strip()}" for col in _SELECT_COLUMNS.split(","))
         base_order = {
-            # Ordered by added_at (file creation time on the NAS/filesystem),
-            # not EXIF date_taken -- an old photo copied in today should
-            # surface as "new" rather than sort by when it was originally
-            # shot. Unlike indexed_at (stamped once processing finishes),
-            # added_at doesn't drift with queue position on a bulk import.
-            "date_desc": "images.added_at DESC",
-            "date_asc": "images.added_at ASC",
+            # Ordered by last update - when the file arrived on the NAS or was
+            # last edited, whichever is later - not EXIF date_taken: an old
+            # photo copied in today should surface as new. Unlike indexed_at
+            # (stamped once processing finishes), this doesn't drift with
+            # queue position on a bulk import.
+            "relevance": f"{_UPDATED_AT_SQL} DESC",
+            "date_desc": f"{_UPDATED_AT_SQL} DESC",
+            "date_asc": f"{_UPDATED_AT_SQL} ASC",
             "name_asc": "images.filename COLLATE NOCASE ASC",
             "name_desc": "images.filename COLLATE NOCASE DESC",
             "size_desc": "images.size DESC",
             "size_asc": "images.size ASC",
-        }.get(sort, "images.added_at DESC")
+        }.get(sort, f"{_UPDATED_AT_SQL} DESC")
         order_params: list[object] = []
-        if rank_by_relevance and sort == "date_desc":
-            # "date_desc" is also the default the frontend sends when the user
-            # has picked no explicit order, so a text search leaves relevance
-            # first; any other explicit sort wins and relevance breaks ties.
+        if rank_by_relevance and sort == "relevance":
+            # "Best match": strongest text matches first, newest breaks ties.
+            # Every explicit sort wins outright and relevance breaks its ties.
             relevance = "image_fts.rank"
             if single_token:
                 needle = fts_terms[0].lower()
@@ -1058,7 +1072,7 @@ class IndexStore:
         return [_row_to_entry(row) for row in rows], total
 
     def search_semantic(self, embedding: np.ndarray, limit: int = 60) -> list[ImageEntry]:
-        """CLIP text→image search: nearest images to a query-text embedding,
+        """Text→image search: nearest images to a query-text embedding,
         ranked by cosine distance. Metadata facets do not apply (like
         find_similar, this is a pure vector ranking)."""
         vector = np.asarray(embedding, dtype=np.float32)
@@ -1081,9 +1095,9 @@ class IndexStore:
         return [_row_to_entry(row) for row in rows]
 
     def find_duplicate_groups(
-        self, threshold: float = 0.08, max_images: int = 5000, max_groups: int = 50
+        self, threshold: float = config.DUPLICATE_DISTANCE_THRESHOLD, max_images: int = 5000, max_groups: int = 50
     ) -> list[list[ImageEntry]]:
-        """Cluster visually near-identical images by CLIP cosine distance.
+        """Cluster visually near-identical images by embedding cosine distance.
 
         Each image is unioned with its <= k nearest neighbours that fall within
         ``threshold`` cosine distance (0 = identical). Only clusters of two or

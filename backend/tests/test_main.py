@@ -6,6 +6,7 @@ import time
 import zipfile
 
 import numpy as np
+import pytest
 from fastapi.testclient import TestClient
 
 
@@ -191,7 +192,7 @@ def test_search_and_object_filter_use_prepopulated_store(tmp_path, monkeypatch):
         ocr_text="NETBET", objects=["clover", "person"], mtime=0.0, size=0,
     )
     (tmp_path / "a1.jpg").write_bytes(b"fake-jpg-bytes")
-    main.store.upsert(entry, np.ones(512, dtype=np.float32))
+    main.store.upsert(entry, np.ones(main.store.embedding_dim, dtype=np.float32))
 
     client = TestClient(main.app)
     assert client.get("/objects").json() == ["clover", "person"]
@@ -216,7 +217,7 @@ def test_search_paginates_and_reports_metadata(tmp_path, monkeypatch):
             width=10, height=20, format="PNG", date_taken=float(i),
             indexed_at=100.0 + i, added_at=200.0 + i,
         )
-        main.store.upsert(entry, np.ones(512, dtype=np.float32))
+        main.store.upsert(entry, np.ones(main.store.embedding_dim, dtype=np.float32))
 
     client = TestClient(main.app)
     page = client.get("/search", params={"sort": "date_asc", "offset": 1, "limit": 1}).json()
@@ -261,7 +262,7 @@ def test_search_endpoint_applies_metadata_facets(tmp_path, monkeypatch):
         ),
     ]
     for entry in entries:
-        main.store.upsert(entry, np.ones(512, dtype=np.float32))
+        main.store.upsert(entry, np.ones(main.store.embedding_dim, dtype=np.float32))
 
     client = TestClient(main.app)
 
@@ -549,7 +550,7 @@ def test_thumbnail_serves_cached_file(tmp_path, monkeypatch):
         id="a1", path="/imgs/a.png", thumbnail_path=str(thumb_path),
         ocr_text="", objects=[], mtime=0.0, size=0,
     )
-    main.store.upsert(entry, np.ones(512, dtype=np.float32))
+    main.store.upsert(entry, np.ones(main.store.embedding_dim, dtype=np.float32))
 
     client = TestClient(main.app)
     response = client.get("/thumbnail/a1")
@@ -567,7 +568,7 @@ def test_thumbnail_returns_404_when_database_file_reference_is_stale(tmp_path, m
             id="stale", path="/imgs/a.png", thumbnail_path=str(tmp_path / "missing.jpg"),
             ocr_text="", objects=[], mtime=0.0, size=0,
         ),
-        np.ones(512, dtype=np.float32),
+        np.ones(main.store.embedding_dim, dtype=np.float32),
     )
 
     assert TestClient(main.app).get("/thumbnail/stale").status_code == 404
@@ -605,7 +606,7 @@ def test_download_endpoint_returns_original_file_as_attachment(tmp_path, monkeyp
         id="d1", path=str(original), thumbnail_path=str(tmp_path / "d1.jpg"),
         ocr_text="", objects=[], mtime=0.0, size=0,
     )
-    main.store.upsert(entry, np.ones(512, dtype=np.float32))
+    main.store.upsert(entry, np.ones(main.store.embedding_dim, dtype=np.float32))
 
     client = TestClient(main.app)
     response = client.get("/download/d1", headers={"cf-connecting-ip": "203.0.113.7"})
@@ -637,7 +638,7 @@ def test_image_endpoint_serves_original_inline(tmp_path, monkeypatch):
             id="i1", path=str(original), thumbnail_path=str(tmp_path / "i1.jpg"),
             ocr_text="", objects=[], mtime=0.0, size=0,
         ),
-        np.ones(512, dtype=np.float32),
+        np.ones(main.store.embedding_dim, dtype=np.float32),
     )
 
     client = TestClient(main.app)
@@ -658,7 +659,7 @@ def _seed_images(main, tmp_path, ids):
                 thumbnail_path=str(tmp_path / f"{image_id}.jpg"),
                 ocr_text="", objects=[], mtime=0.0, size=0,
             ),
-            np.ones(512, dtype=np.float32),
+            np.ones(main.store.embedding_dim, dtype=np.float32),
         )
 
 
@@ -734,13 +735,13 @@ def test_bulk_zip_download(tmp_path, monkeypatch):
         main.store.upsert(
             ImageEntry(id=name, path=str(original), thumbnail_path=str(tmp_path / f"{name}.jpg"),
                        ocr_text="", objects=[], mtime=0.0, size=0),
-            np.ones(512, dtype=np.float32),
+            np.ones(main.store.embedding_dim, dtype=np.float32),
         )
     # A row whose original file is gone is silently skipped, not fatal.
     main.store.upsert(
         ImageEntry(id="gone", path=str(tmp_path / "missing.png"),
                    thumbnail_path=str(tmp_path / "g.jpg"), ocr_text="", objects=[], mtime=0.0, size=0),
-        np.ones(512, dtype=np.float32),
+        np.ones(main.store.embedding_dim, dtype=np.float32),
     )
 
     client = TestClient(main.app)
@@ -794,7 +795,7 @@ def test_semantic_search_mode_uses_the_text_embedding_ranking(tmp_path, monkeypa
     main, _ = _fresh_app(tmp_path, monkeypatch)
     from app.storage import ImageEntry
 
-    vecs = {"near": [1.0] + [0.0] * 511, "far": [0.0, 1.0] + [0.0] * 510}
+    vecs = {"near": [1.0] + [0.0] * (main.store.embedding_dim - 1), "far": [0.0, 1.0] + [0.0] * (main.store.embedding_dim - 2)}
     for image_id, vec in vecs.items():
         main.store.upsert(
             ImageEntry(id=image_id, path=f"/imgs/{image_id}.png",
@@ -805,7 +806,7 @@ def test_semantic_search_mode_uses_the_text_embedding_ranking(tmp_path, monkeypa
 
     from app import embeddings
     monkeypatch.setattr(
-        embeddings, "embed_text", lambda text: np.array([1.0] + [0.0] * 511, dtype=np.float32)
+        embeddings, "embed_text", lambda text: np.array([1.0] + [0.0] * (main.store.embedding_dim - 1), dtype=np.float32)
     )
 
     client = TestClient(main.app)
@@ -824,11 +825,11 @@ def test_duplicates_endpoint_groups_near_identical_images(tmp_path, monkeypatch)
     main, _ = _fresh_app(tmp_path, monkeypatch)
     from app.storage import ImageEntry
 
-    base = np.zeros(512, dtype=np.float32)
+    base = np.zeros(main.store.embedding_dim, dtype=np.float32)
     base[0] = 1.0
     twin = base.copy()
     twin[1] = 0.001
-    other = np.zeros(512, dtype=np.float32)
+    other = np.zeros(main.store.embedding_dim, dtype=np.float32)
     other[5] = 1.0
     for image_id, vec in [("a", base), ("a_twin", twin), ("z", other)]:
         main.store.upsert(
@@ -877,7 +878,7 @@ def test_search_export_csv_and_json_stream_the_full_filtered_set(tmp_path, monke
                 ocr_text="hi", objects=["cat"], mtime=0.0, size=100 + i,
                 width=10, height=10, format="PNG", date_taken=1_700_000_000.0, indexed_at=5.0,
             ),
-            np.ones(512, dtype=np.float32),
+            np.ones(main.store.embedding_dim, dtype=np.float32),
         )
     main.store.set_favorite("e0", True)
     main.store.set_user_tags("e0", ["hero"])
@@ -908,7 +909,7 @@ def test_backup_endpoints_create_and_list_snapshots(tmp_path, monkeypatch):
     main.store.upsert(
         ImageEntry(id="a", path="/imgs/a.png", thumbnail_path=str(tmp_path / "a.jpg"),
                    ocr_text="", objects=[], mtime=0.0, size=0),
-        np.ones(512, dtype=np.float32),
+        np.ones(main.store.embedding_dim, dtype=np.float32),
     )
     main.store.save()
     client = TestClient(main.app)
@@ -947,7 +948,7 @@ def test_stats_endpoint_reports_catalog_aggregates(tmp_path, monkeypatch):
                    width=800, height=800, format="JPEG", date_taken=0.0),
     ]
     for row in rows:
-        main.store.upsert(row, np.ones(512, dtype=np.float32))
+        main.store.upsert(row, np.ones(main.store.embedding_dim, dtype=np.float32))
 
     stats = TestClient(main.app).get("/stats").json()
 
@@ -971,7 +972,7 @@ def test_download_endpoint_404_when_original_was_deleted(tmp_path, monkeypatch):
             thumbnail_path=str(tmp_path / "stale.jpg"), ocr_text="",
             objects=[], mtime=0.0, size=0,
         ),
-        np.ones(512, dtype=np.float32),
+        np.ones(main.store.embedding_dim, dtype=np.float32),
     )
 
     assert TestClient(main.app).get("/download/stale").status_code == 404
@@ -1105,3 +1106,92 @@ def test_cancel_model_download_returns_409_for_an_already_finished_job(tmp_path,
         time.sleep(0.05)
 
     assert client.post(f"/model/download/{job_id}/cancel").status_code == 409
+
+
+def _save_png(path, size=(200, 100), color=(200, 30, 30)):
+    from PIL import Image
+
+    Image.new("RGB", size, color).save(path)
+
+
+def _add_image(main, tmp_path, images_dir, image_id="img1"):
+    from app.storage import ImageEntry
+
+    path = images_dir / f"{image_id}.png"
+    _save_png(path)
+    main.store.upsert(
+        ImageEntry(id=image_id, path=str(path), thumbnail_path=str(tmp_path / f"{image_id}.jpg"),
+                   ocr_text="", objects=[], mtime=1.0, size=1),
+        np.ones(main.store.embedding_dim, dtype=np.float32) / np.sqrt(main.store.embedding_dim),
+    )
+    return path
+
+
+def test_detect_endpoint_returns_boxes_and_uses_reference_pictures(tmp_path, monkeypatch):
+    main, images_dir = _fresh_app(tmp_path, monkeypatch)
+    _add_image(main, tmp_path, images_dir)
+    from app import detector, objects as objects_mod
+
+    calls = {}
+
+    def fake_find(image, word, references, **kwargs):
+        calls.update(size=image.size, mode=image.mode, word=word, references=len(references))
+        return [{"label": word, "score": 0.9, "source": "word", "box": [0.1, 0.1, 0.5, 0.5]}]
+
+    monkeypatch.setattr(detector, "find_in_image", fake_find)
+    monkeypatch.setattr(objects_mod, "reference_embeddings", lambda tag: [np.zeros(3)] if tag == "zeus" else [])
+    monkeypatch.setattr(main.config, "RAM_CUSTOM_TAGS", ["zeus"])
+    client = TestClient(main.app)
+
+    response = client.get("/images/img1/detect", params={"q": "Zeus"})
+
+    assert response.status_code == 200
+    assert response.json()["boxes"][0]["box"] == [0.1, 0.1, 0.5, 0.5]
+    assert calls == {"size": (200, 100), "mode": "RGB", "word": "Zeus", "references": 1}
+    assert client.get("/images/missing/detect", params={"q": "x"}).status_code == 404
+    assert client.get("/images/img1/detect", params={"q": " "}).status_code == 422
+
+
+def test_add_example_saves_crop_adds_custom_tag_and_user_tag(tmp_path, monkeypatch):
+    main, images_dir = _fresh_app(tmp_path, monkeypatch)
+    _add_image(main, tmp_path, images_dir)
+    reference_dir = tmp_path / "reference_tags"
+    monkeypatch.setattr(main.config, "RAM_CUSTOM_TAG_REFERENCE_DIR", reference_dir)
+    client = TestClient(main.app)
+
+    response = client.post("/images/img1/examples", json={"tag": "  Zeus  ", "box": [0.5, 0.0, 1.0, 0.5]})
+
+    assert response.status_code == 200, response.text
+    assert response.json() == {"tag": "zeus", "examples": 1, "user_tags": ["zeus"]}
+    from PIL import Image
+
+    saved = list((reference_dir / "zeus").iterdir())
+    assert len(saved) == 1
+    with Image.open(saved[0]) as crop:
+        assert crop.size == (100, 50)
+    assert main.config.RAM_CUSTOM_TAGS == ["zeus"]
+    assert main.indexer.custom_tags == ["zeus"]
+    assert client.get("/settings").json()["ram_custom_tags"] == ["zeus"]
+
+    # A second example for the same tag doesn't duplicate the custom tag.
+    client.post("/images/img1/examples", json={"tag": "zeus", "box": [0.0, 0.0, 0.5, 0.5]})
+    assert main.config.RAM_CUSTOM_TAGS == ["zeus"]
+    assert len(list((reference_dir / "zeus").iterdir())) == 2
+
+
+@pytest.mark.parametrize("body", [
+    {"tag": "../escape", "box": [0, 0, 1, 1]},
+    {"tag": "a/b", "box": [0, 0, 1, 1]},
+    {"tag": "zeus", "box": [0.5, 0.5, 0.4, 0.9]},
+    {"tag": "zeus", "box": [0, 0, 1.5, 1]},
+    {"tag": "zeus", "box": [0, 0, 0.01, 0.01]},
+])
+def test_add_example_rejects_bad_tags_and_boxes(tmp_path, monkeypatch, body):
+    main, images_dir = _fresh_app(tmp_path, monkeypatch)
+    _add_image(main, tmp_path, images_dir)
+    monkeypatch.setattr(main.config, "RAM_CUSTOM_TAG_REFERENCE_DIR", tmp_path / "reference_tags")
+    client = TestClient(main.app)
+
+    assert client.post("/images/img1/examples", json=body).status_code == 422
+    assert not (tmp_path / "outside").exists()
+    assert main.config.RAM_CUSTOM_TAGS == []

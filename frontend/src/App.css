@@ -2380,3 +2380,97 @@
   .modal-backdrop,
   .modal { animation: none; }
 }
+
+/* Boxes over the detail preview: found words and the box being drawn. */
+.box-overlay {
+  position: absolute;
+  transform-origin: center center;
+  pointer-events: none;
+}
+.box-overlay.is-drawing {
+  pointer-events: auto;
+  cursor: crosshair;
+  touch-action: none;
+}
+.modal-preview.is-drawing {
+  cursor: crosshair;
+}
+.found-box,
+.draft-box {
+  position: absolute;
+  box-sizing: border-box;
+  border-style: solid;
+  border-radius: 3px;
+  pointer-events: none;
+}
+.found-box.is-word {
+  border-color: var(--accent);
+  box-shadow: 0 0 0 1px rgba(0, 0, 0, 0.6);
+}
+.found-box.is-example {
+  border-color: #3dd6ff;
+}
+.found-box-label {
+  position: absolute;
+  left: 0;
+  bottom: 100%;
+  transform-origin: bottom left;
+  padding: 1px 6px;
+  border-radius: 3px 3px 3px 0;
+  background: var(--accent);
+  color: var(--accent-ink);
+  font-size: 11px;
+  font-weight: 600;
+  white-space: nowrap;
+}
+.found-box.is-example .found-box-label {
+  background: #3dd6ff;
+}
+.draft-box {
+  border-color: var(--text-h);
+  border-style: dashed;
+  background: rgba(200, 255, 0, 0.08);
+}
+
+.box-tool-row {
+  display: flex;
+  gap: 8px;
+  margin-bottom: 6px;
+}
+.box-tool-row input {
+  flex: 1;
+  min-width: 0;
+  padding: 6px 10px;
+  color: var(--text-h);
+  background: var(--bg-input);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  font: inherit;
+}
+.box-tool-row input:focus {
+  border-color: var(--accent);
+  outline: none;
+  box-shadow: 0 0 0 3px var(--accent-dim);
+}
+.box-tool-status {
+  margin: 0 0 6px;
+  font-size: 12px;
+  color: var(--text-muted);
+}
+.tag-list .tag-find {
+  display: inline-flex;
+  align-items: center;
+  padding: 3px 9px;
+  background: var(--bg-input);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-pill);
+  color: var(--text-h);
+  font: inherit;
+  font-size: 12px;
+  cursor: pointer;
+}
+.tag-list .tag-find:hover,
+.tag-list .tag-find:focus-visible {
+  border-color: var(--accent);
+  background: var(--accent-dim);
+}

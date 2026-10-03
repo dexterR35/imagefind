@@ -69,8 +69,28 @@ describe("SearchFilters", () => {
         object: undefined,
         format: "png",
         dateField: "mtime",
-        dateFrom: Date.parse("2024-01-01T00:00:00Z") / 1000,
+        dateFrom: new Date("2024-01-01T00:00:00").getTime() / 1000,
       })
+    );
+  });
+
+  it("filters by date added by default, using whole local days", async () => {
+    vi.spyOn(api, "fetchObjects").mockResolvedValue([]);
+    const onChange = vi.fn();
+
+    render(<SearchFilters onChange={onChange} />);
+    await waitFor(() => expect(onChange).toHaveBeenCalled());
+
+    expect(screen.getByLabelText("Date field")).toHaveValue("added_at");
+    fireEvent.change(screen.getByLabelText("From date"), { target: { value: "2026-09-08" } });
+    fireEvent.change(screen.getByLabelText("To date"), { target: { value: "2026-09-08" } });
+
+    await waitFor(() =>
+      expect(onChange).toHaveBeenLastCalledWith(expect.objectContaining({
+        dateField: "added_at",
+        dateFrom: new Date(2026, 8, 8, 0, 0, 0).getTime() / 1000,
+        dateTo: new Date(2026, 8, 8, 23, 59, 59).getTime() / 1000,
+      }))
     );
   });
 
@@ -107,7 +127,7 @@ describe("SearchFilters", () => {
           format: "png",
           orientation: "landscape",
           dateField: "mtime",
-          dateFrom: Date.parse("2024-01-01T00:00:00Z") / 1000,
+          dateFrom: new Date("2024-01-01T00:00:00").getTime() / 1000,
         }}
       />,
     );

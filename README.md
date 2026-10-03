@@ -16,11 +16,16 @@ For how `npm start` is wired and every command, see
 ## Features
 
 - Search filenames, folder paths, OCR text, object tags, and custom tags.
-- Optional **Fuzzy** mode ranks by visual meaning (CLIP text-to-image) instead
+- Optional **Fuzzy** mode ranks by visual meaning (SigLIP 2 text-to-image) instead
   of literal words.
 - Narrow results with filters: exact object tag, format, orientation, date
-  range (capture / modified / indexed), favorites, collection, and your tags.
+  range (added / modified / capture / indexed), favorites, collection, and your tags.
 - Find visually similar images with one click.
+- **Find in image**: type a word (or click a recognized object) in the detail
+  view and boxes show where it is (OWLv2, ~600 MB, loaded on first use).
+- **Teach a word**: draw a box around something, name it, and that crop
+  becomes a reference example for a custom tag, so it is found on other
+  images too, even when small.
 - Star favorites, add your own per-image tags and notes, and group images into
   named collections. Curation is stored in the index and survives a reindex.
 - Select multiple images for bulk favorite, bulk tagging, add-to-collection, or
@@ -31,7 +36,7 @@ For how `npm start` is wired and every command, see
 - Every search (text, filters, sort, view, page) lives in the URL, so a result
   set is shareable and survives reload.
 - Card grid or table view; a detail view with a zoom/pan full-resolution preview.
-- Sort by date, filename, or file size.
+- Sort by best match, last updated (added or edited), filename, or file size.
 - Watch the selected folder for added, changed, moved, and deleted images.
 - Reconcile the NAS periodically in case a filesystem event was missed.
 - Keep completed indexing work when a long reindex is stopped.
@@ -240,18 +245,18 @@ inside a longer word.
 
 A **★ Favorites** toggle sits next to the search box, and **More filters**
 expands the rest: exact object tag, format, orientation (landscape / portrait /
-square), a from/to date range against one of capture date, file mtime, or index
-time, collection, and your own tags. Every filter is optional and they all
+square), a from/to date range against one of date added (default), file mtime, capture
+date, or index time, collection, and your own tags. Every filter is optional and they all
 combine with **AND**, with each other and with the text box, so searching
 `bonus` with object `person` returns only images matching both conditions.
 
 **Exact / Fuzzy** by the search box switches the engine. **Exact** (the default)
-is the literal trigram/tag search above. **Fuzzy** embeds your words with CLIP
+is the literal trigram/tag search above. **Fuzzy** embeds your words with SigLIP 2
 and returns the images whose visual meaning is closest; it needs query text,
 ignores the other filters and pagination, and can be confidently wrong — use it
 to cast a wide net, then narrow with Exact.
 
-**Find Similar** is related: it uses a selected image's CLIP embedding rather
+**Find Similar** is related: it uses a selected image's embedding rather
 than typed text to find visually related images. It is a transient view and,
 unlike a normal search, does not change the URL.
 
@@ -286,8 +291,8 @@ Find Similar.
 ## Duplicates, stats, backups, and export
 
 - **Duplicate finder** (overlapping-squares button) scans the first ~5,000
-  images and clusters ones that are visually near-identical (CLIP cosine
-  distance ≤ ~0.08 — resizes, re-exports, near-crops). ImageFind never deletes
+  images and clusters ones that are visually near-identical (cosine
+  distance ≤ 0.035 — resizes, re-exports, near-crops). ImageFind never deletes
   files; it just shows you what to clean up on disk.
 - **Library stats** (bar-chart button) reads straight from the index: total
   images and disk size, indexed-date range, counts by format and by year taken,
@@ -308,17 +313,17 @@ Find Similar.
 | Component | Purpose |
 |---|---|
 | RAM++ with Swin-L | Automatic object and scene tags (near-universal tags such as `photo` and `white background` are dropped; see `RAM_TAG_DENYLIST`) |
-| OpenCLIP ViT-B/32 (`openai`) | 512-dimensional image embeddings for Find Similar, Fuzzy text search, the duplicate finder, and custom-tag matching |
+| SigLIP 2 ViT-B/16 (`webli`, via OpenCLIP) | 768-dimensional image embeddings for Find Similar, Fuzzy text search, the duplicate finder, and custom-tag matching |
 | EasyOCR | Text extraction from image pixels |
 | SQLite FTS5 (trigram) | Filename, path, OCR, and tag text search, with bm25 relevance ranking |
-| sqlite-vec | Cosine nearest-neighbor search over CLIP embeddings |
+| sqlite-vec | Cosine nearest-neighbor search over the image embeddings |
 | Watchdog | Realtime local/NAS filesystem events |
 
 Each image is decoded once and read by every stage; EXIF orientation is applied
 so rotated photos are catalogued the way they display.
 
 The RAM++ checkpoint is downloaded from Hugging Face by the Settings panel and
-stored at `backend/pretrained/ram_plus_swin_large_14m.pth`. OpenCLIP and EasyOCR
+stored at `backend/pretrained/ram_plus_swin_large_14m.pth`. SigLIP 2 (~1.5 GB) and EasyOCR
 download their required model files on first use.
 
 ## Local data

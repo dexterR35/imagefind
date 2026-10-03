@@ -210,8 +210,11 @@ def test_search_explicit_sort_overrides_relevance(tmp_path):
         (_entry("strong", ocr_text="clover clover clover", added_at=1.0), [1.0, 0.0]),
     ])
 
+    result, _ = search(store, text="clover")
+    assert [e.id for e in result] == ["strong", "weak"]  # default "relevance": best match first
+
     result, _ = search(store, text="clover", sort="date_desc")
-    assert [e.id for e in result] == ["strong", "weak"]  # default: relevance first
+    assert [e.id for e in result] == ["weak", "strong"]  # explicit newest first: strictly by date
 
     result, _ = search(store, text="clover", sort="date_asc")
     assert [e.id for e in result] == ["strong", "weak"]  # explicit date_asc: strong added earlier
@@ -320,6 +323,35 @@ def test_search_sorts_by_date_desc_by_default(tmp_path):
     ])
     result, _ = search(store)
     assert [e.id for e in result] == ["new", "mid", "old"]
+    result, _ = search(store, sort="date_desc")
+    assert [e.id for e in result] == ["new", "mid", "old"]
+
+
+def test_search_date_sort_uses_last_update_of_added_or_modified(tmp_path):
+    # "Last updated" = whichever is later of arriving on the NAS (added_at)
+    # and being edited in place (mtime). A row not yet backfilled (added_at 0)
+    # still sorts by its mtime instead of sinking to 1970.
+    store = _store_with(tmp_path, [
+        (_entry("copied_in", added_at=30.0, mtime=5.0), [1.0, 0.0]),
+        (_entry("edited", added_at=10.0, mtime=40.0), [1.0, 0.0]),
+        (_entry("untouched", added_at=20.0, mtime=20.0), [1.0, 0.0]),
+        (_entry("not_backfilled", added_at=0.0, mtime=25.0), [1.0, 0.0]),
+    ])
+    result, _ = search(store, sort="date_desc")
+    assert [e.id for e in result] == ["edited", "copied_in", "not_backfilled", "untouched"]
+    result, _ = search(store, sort="date_asc")
+    assert [e.id for e in result] == ["untouched", "not_backfilled", "copied_in", "edited"]
+
+
+def test_search_date_filter_defaults_to_added_at(tmp_path):
+    store = _store_with(tmp_path, [
+        (_entry("added_recently", date_taken=1.0, added_at=500.0), [1.0, 0.0]),
+        (_entry("taken_recently", date_taken=500.0, added_at=1.0), [1.0, 0.0]),
+    ])
+    result, _ = search(store, date_from=400.0)
+    assert [e.id for e in result] == ["added_recently"]
+    result, _ = search(store, date_field="date_taken", date_from=400.0)
+    assert [e.id for e in result] == ["taken_recently"]
 
 
 def test_search_sorts_by_name_asc(tmp_path):

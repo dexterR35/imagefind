@@ -19,30 +19,35 @@ const DEBOUNCE_MS = 300;
 // work when the optional pillow-heif package is installed on the server.
 const FORMATS = ["png", "jpg", "webp", "bmp", "gif", "tiff", "avif", "heic"];
 const DATE_FIELDS: { value: DateField; label: string }[] = [
-  { value: "date_taken", label: "Date taken" },
-  { value: "mtime", label: "Modified" },
   { value: "added_at", label: "Added" },
+  { value: "mtime", label: "Modified" },
+  { value: "date_taken", label: "Date taken" },
   { value: "indexed_at", label: "Indexed" },
 ];
+const DEFAULT_DATE_FIELD: DateField = "added_at";
 const ORIENTATIONS: { value: Orientation; label: string }[] = [
   { value: "landscape", label: "Landscape" },
   { value: "portrait", label: "Portrait" },
   { value: "square", label: "Square" },
 ];
 
-// "YYYY-MM-DD" from <input type="date"> to a UTC unix timestamp. `endOfDay`
-// pushes it to 23:59:59 so a "to" bound includes the whole day.
+// "YYYY-MM-DD" from <input type="date"> to a unix timestamp at the start (or,
+// with `endOfDay`, the last second) of that day in the viewer's local time -
+// the same days the grid's date headings use. UTC midnight would shift the
+// range by the timezone offset and drop images added late or early in a day.
 function dateToEpoch(value: string, endOfDay: boolean): number | undefined {
   if (!value) return undefined;
-  const ms = Date.parse(`${value}T00:00:00Z`);
+  const ms = new Date(`${value}T${endOfDay ? "23:59:59" : "00:00:00"}`).getTime();
   if (Number.isNaN(ms)) return undefined;
-  return Math.floor(ms / 1000) + (endOfDay ? 86_399 : 0);
+  return Math.floor(ms / 1000);
 }
 
 // Inverse, for seeding the date inputs from a shared URL.
 function epochToDateInput(seconds: number | undefined): string {
   if (seconds === undefined || !Number.isFinite(seconds)) return "";
-  return new Date(seconds * 1000).toISOString().slice(0, 10);
+  const d = new Date(seconds * 1000);
+  const pad = (n: number) => String(n).padStart(2, "0");
+  return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`;
 }
 
 export function SearchFilters({ onChange, initialFilters, collections = [], userTags = [] }: Props) {
@@ -58,7 +63,7 @@ export function SearchFilters({ onChange, initialFilters, collections = [], user
   const [userTag, setUserTag] = useState<string | undefined>(initialFilters?.userTag);
   const [semantic, setSemantic] = useState<boolean>(initialFilters?.mode === "semantic");
   const [dateField, setDateField] = useState<DateField>(
-    initialFilters?.dateField ?? "date_taken",
+    initialFilters?.dateField ?? DEFAULT_DATE_FIELD,
   );
   const [dateFrom, setDateFrom] = useState(() => epochToDateInput(initialFilters?.dateFrom));
   const [dateTo, setDateTo] = useState(() => epochToDateInput(initialFilters?.dateTo));
@@ -177,7 +182,7 @@ export function SearchFilters({ onChange, initialFilters, collections = [], user
           <button
             type="button"
             aria-pressed={semantic}
-            title="Rank by visual meaning (CLIP), ignoring the other filters"
+            title="Rank by visual meaning (SigLIP 2), ignoring the other filters"
             onClick={() => setSemantic(true)}
           >
             Fuzzy

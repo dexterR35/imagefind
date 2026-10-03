@@ -22,7 +22,7 @@ _load_lock = threading.Lock()
 # the process-wide model while a watcher thread is using it could make another
 # thread load a second 3 GB copy before the first one has actually died.
 _inference_lock = threading.Lock()
-_tag_embedding_cache: dict[str, np.ndarray] = {}
+_tag_embedding_cache: dict[str, tuple[np.ndarray, list[np.ndarray]]] = {}
 _tag_cache_lock = threading.Lock()
 _REFERENCE_IMAGE_EXTENSIONS = {".png", ".jpg", ".jpeg", ".webp", ".bmp"}
 
@@ -115,7 +115,7 @@ def ensure_ram_ready() -> None:
 def unload_ram_model() -> None:
     """Release RAM++ and PyTorch's now-unused CUDA cache.
 
-    CLIP and EasyOCR have their own process-wide models and deliberately stay
+    The embedding model and EasyOCR have their own process-wide models and deliberately stay
     loaded; this only drops the large tagger that is not needed for search
     while the indexer is idle.
     """
@@ -213,39 +213,59 @@ def _load_reference_embeddings(tag: str) -> list[np.ndarray]:
     return vectors
 
 
-def _get_tag_embedding(tag: str) -> np.ndarray:
-    # Blends the bare text embedding with any reference-image embeddings found in
-    # RAM_CUSTOM_TAG_REFERENCE_DIR/<tag>/ into a single averaged, re-normalized
-    # "prototype" vector — a few real example photos anchor a specific named
-    # entity (e.g. "zeus") far better than the word alone. With no reference
-    # images present, this is identical to the old text-only behavior.
+def _get_tag_targets(tag: str) -> tuple[np.ndarray, list[np.ndarray]]:
+    """The tag's text embedding plus any reference-image embeddings found in
+    RAM_CUSTOM_TAG_REFERENCE_DIR/<tag>/ - a few real example pictures anchor a
+    specific named entity (e.g. "zeus") far better than the word alone.
+
+    They are kept apart, not averaged: image-to-image cosines run several
+    times higher than text-to-image ones (~0.55 for unrelated icon sheets vs.
+    ~0.08 for a matching word), so a blended prototype pushed every image over
+    the text threshold the moment a single reference picture existed."""
     with _tag_cache_lock:
         cached = _tag_embedding_cache.get(tag)
     if cached is not None:
         return cached
-    vectors = [embeddings.embed_text(tag), *_load_reference_embeddings(tag)]
-    centroid = np.mean(vectors, axis=0).astype(np.float32)
-    centroid = centroid / np.linalg.norm(centroid)
+    targets = (embeddings.embed_text(tag), _load_reference_embeddings(tag))
     with _tag_cache_lock:
-        _tag_embedding_cache[tag] = centroid
-    return centroid
+        _tag_embedding_cache[tag] = targets
+    return targets
+
+
+def reference_embeddings(tag: str) -> list[np.ndarray]:
+    """Embeddings of the tag's reference pictures (cached), [] if it has none."""
+    return _get_tag_targets(tag)[1]
 
 
 def detect_custom_tags(
-    image_embedding: np.ndarray, custom_tags: list[str], threshold: float | None = None
+    image_embedding: np.ndarray,
+    custom_tags: list[str],
+    threshold: float | None = None,
+    reference_threshold: float | None = None,
+    use_references: bool = True,
 ) -> list[str]:
-    # Not RAM++'s own open-set mode (that needs a separate CLIP package and
-    # swaps out the whole tag vocabulary rather than adding to it) — this
-    # reuses the CLIP model already loaded for text search in embeddings.py,
-    # matching each custom word against the image embedding that's already
-    # computed for the similarity index, so there's no extra image encoding
-    # cost per image, only one small text embedding per distinct tag (cached).
+    """Custom tags whose word matches the image (cosine >= threshold) or whose
+    reference pictures look like it (cosine >= reference_threshold with any
+    of them; skipped with use_references=False, when the indexer matches the
+    references against objects inside the image instead). Reuses the image embedding already computed for the similarity
+    index, so the only extra cost is one text embedding per tag (cached).
+
+    Not RAM++'s own open-set mode, which needs a separate CLIP package and
+    swaps out the whole tag vocabulary rather than adding to it."""
     if threshold is None:
         threshold = config.RAM_CUSTOM_TAG_THRESHOLD
+    if reference_threshold is None:
+        reference_threshold = config.RAM_CUSTOM_TAG_REFERENCE_THRESHOLD
     if not custom_tags:
         return []
-    matched = [
-        tag for tag in custom_tags
-        if embeddings.cosine_similarity(image_embedding, _get_tag_embedding(tag)) >= threshold
-    ]
+    matched = []
+    for tag in custom_tags:
+        text, references = _get_tag_targets(tag)
+        if not use_references:
+            references = []
+        if embeddings.cosine_similarity(image_embedding, text) >= threshold or any(
+            embeddings.cosine_similarity(image_embedding, reference) >= reference_threshold
+            for reference in references
+        ):
+            matched.append(tag)
     return sorted(set(matched))

@@ -203,7 +203,7 @@ describe("App", () => {
     fireEvent.click(screen.getByText("Next"));
     await screen.findByAltText("last.png");
     expect(searchSpy).toHaveBeenLastCalledWith({}, {
-      sort: "date_desc", offset: 60, limit: 60, signal: expect.anything(),
+      sort: "relevance", offset: 60, limit: 60, signal: expect.anything(),
     });
 
     fireEvent.change(screen.getByLabelText("Sort by"), { target: { value: "name_asc" } });

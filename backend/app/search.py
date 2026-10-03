@@ -1,5 +1,6 @@
 import numpy as np
 
+from . import config
 from .storage import ImageEntry, IndexStore
 
 
@@ -10,7 +11,7 @@ def search(
     fmt: str | None = None,
     size_min: int | None = None,
     size_max: int | None = None,
-    date_field: str = "date_taken",
+    date_field: str = "added_at",
     date_from: float | None = None,
     date_to: float | None = None,
     width_min: int | None = None,
@@ -21,7 +22,7 @@ def search(
     favorite: bool | None = None,
     collection: str | None = None,
     user_tag: str | None = None,
-    sort: str = "date_desc",
+    sort: str = "relevance",
     offset: int = 0,
     limit: int = 60,
 ) -> tuple[list[ImageEntry], int]:
@@ -52,12 +53,12 @@ def search(
 def search_semantic(
     store: IndexStore, query_embedding: np.ndarray, limit: int = 60
 ) -> list[ImageEntry]:
-    """CLIP text→image ranking. The caller supplies the query-text embedding."""
+    """Text→image embedding ranking. The caller supplies the query-text embedding."""
     return store.search_semantic(query_embedding, limit=limit)
 
 
 def find_duplicate_groups(
-    store: IndexStore, threshold: float = 0.08, max_images: int = 5000
+    store: IndexStore, threshold: float = config.DUPLICATE_DISTANCE_THRESHOLD, max_images: int = 5000
 ) -> list[list[ImageEntry]]:
     return store.find_duplicate_groups(threshold=threshold, max_images=max_images)
 

@@ -36,6 +36,15 @@ describe("ReindexProgress", () => {
     await waitFor(() => expect(onRunningChange).toHaveBeenCalledWith(true));
   });
 
+  it("says whether the run is on the GPU or the CPU", async () => {
+    vi.spyOn(api, "fetchCurrentReindex").mockResolvedValue(status({ device: "cuda" }));
+    vi.spyOn(api, "fetchReindexStatus").mockResolvedValue(status({ device: "cuda" }));
+
+    render(<ReindexProgress />);
+
+    expect(await screen.findByText(/· GPU/)).toBeInTheDocument();
+  });
+
   it("polls to completion, then reports it", async () => {
     vi.spyOn(api, "fetchCurrentReindex").mockResolvedValue(status());
     vi.spyOn(api, "fetchReindexStatus")

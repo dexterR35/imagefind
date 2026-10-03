@@ -7,6 +7,9 @@ from app import objects as objects_mod
 from app.indexer import Indexer, ReindexJob
 from app.storage import ImageEntry, IndexStore
 
+# Several tests run the real pipeline, so the store must match the model.
+DIM = config.EMBEDDING_DIM
+
 
 @pytest.fixture(autouse=True)
 def _skip_real_ram_load(monkeypatch):
@@ -35,7 +38,7 @@ def _fake_process_image(index_dir):
             width=64, height=64, format="PNG", date_taken=stat.st_mtime, indexed_at=1.0,
             added_at=stat.st_mtime,
         )
-        return entry, np.zeros(512, dtype=np.float32)
+        return entry, np.zeros(DIM, dtype=np.float32)
 
     return process
 
@@ -52,7 +55,7 @@ def test_process_image_captures_dimensions_format_and_falls_back_date_taken(tmp_
     expected_mtime = img_path.stat().st_mtime
 
     index_dir = tmp_path / "index"
-    store = IndexStore(index_dir, embedding_dim=512)
+    store = IndexStore(index_dir, embedding_dim=DIM)
     store.load()
     indexer = Indexer(images_dir, index_dir, store)
 
@@ -69,10 +72,10 @@ def test_process_image_removes_temporary_thumbnail_after_pipeline_failure(tmp_pa
     images_dir = tmp_path / "images"
     _make_images(images_dir, count=1)
     index_dir = tmp_path / "index"
-    store = IndexStore(index_dir, embedding_dim=512)
+    store = IndexStore(index_dir, embedding_dim=DIM)
     store.load()
     indexer = Indexer(images_dir, index_dir, store)
-    monkeypatch.setattr("app.indexer.embeddings.embed_image", lambda image: np.zeros(512, dtype=np.float32))
+    monkeypatch.setattr("app.indexer.embeddings.embed_image", lambda image: np.zeros(DIM, dtype=np.float32))
     monkeypatch.setattr(
         "app.indexer.ocr.extract_text",
         lambda path, *, image=None: (_ for _ in ()).throw(RuntimeError("OCR failed")),
@@ -97,14 +100,14 @@ def test_cleanup_orphan_thumbnails_preserves_referenced_cache(tmp_path):
     for path in (referenced, orphan, abandoned_temp, unrelated):
         path.write_bytes(b"cache")
 
-    store = IndexStore(index_dir, embedding_dim=512)
+    store = IndexStore(index_dir, embedding_dim=DIM)
     store.load()
     store.upsert(
         ImageEntry(
             id="keep", path=str(images_dir / "keep.png"), thumbnail_path=str(referenced),
             ocr_text="", objects=[], mtime=0.0, size=0,
         ),
-        np.zeros(512, dtype=np.float32),
+        np.zeros(DIM, dtype=np.float32),
     )
 
     removed = Indexer(images_dir, index_dir, store).cleanup_orphan_thumbnails()
@@ -121,7 +124,7 @@ def test_run_reindex_processes_new_and_skips_unchanged(tmp_path, monkeypatch):
     _make_images(images_dir)
 
     index_dir = tmp_path / "index"
-    store = IndexStore(index_dir, embedding_dim=512)
+    store = IndexStore(index_dir, embedding_dim=DIM)
     store.load()
     indexer = Indexer(images_dir, index_dir, store)
 
@@ -146,11 +149,79 @@ def test_run_reindex_processes_new_and_skips_unchanged(tmp_path, monkeypatch):
     assert calls == []
 
 
+@pytest.mark.parametrize("mode,gpu,expected", [
+    ("auto", True, True), ("auto", False, False),
+    ("on", False, True), ("off", True, False),
+])
+def test_example_detection_follows_the_gpu_in_auto_mode(tmp_path, monkeypatch, mode, gpu, expected):
+    monkeypatch.setattr(config, "INDEX_EXAMPLE_DETECTION", mode)
+    monkeypatch.setattr("app.indexer.torch.cuda.is_available", lambda: gpu)
+    store = IndexStore(tmp_path / "index", embedding_dim=DIM)
+    indexer = Indexer(tmp_path, tmp_path / "index", store)
+
+    assert indexer._current_settings().example_detection is expected
+
+
+def test_process_image_adds_custom_tags_found_inside_the_image(tmp_path, monkeypatch):
+    images_dir = tmp_path / "images"
+    _make_images(images_dir, count=1)
+    index_dir = tmp_path / "index"
+    store = IndexStore(index_dir, embedding_dim=DIM)
+    store.load()
+    indexer = Indexer(images_dir, index_dir, store, custom_tags=["zeus", "crown", "coin"])
+    from app import detector, ocr
+
+    monkeypatch.setattr("app.indexer.embeddings.embed_image", lambda image: np.zeros(DIM, dtype=np.float32))
+    monkeypatch.setattr(ocr, "extract_text", lambda path, image=None: "")
+    monkeypatch.setattr(objects_mod, "detect_ram_objects", lambda path, conf=None, image=None: ["casino"])
+    # The whole image already matches "coin"; the other two need a closer look.
+    whole_image_references = []
+    monkeypatch.setattr(
+        objects_mod, "detect_custom_tags",
+        lambda emb, tags, threshold, use_references: whole_image_references.append(use_references) or ["coin"],
+    )
+    monkeypatch.setattr(objects_mod, "reference_embeddings", lambda tag: [np.ones(3)] if tag == "zeus" else [])
+    asked = {}
+
+    def fake_found(image, references_by_tag):
+        asked.update({tag: len(refs) for tag, refs in references_by_tag.items()})
+        return ["zeus"]
+
+    monkeypatch.setattr(detector, "tags_found_by_example", fake_found)
+    settings = indexer._current_settings()
+
+    settings.example_detection = False
+    entry, _ = indexer.process_image(images_dir / "img000.png", settings)
+    assert entry.objects == ["casino", "coin"]
+    assert asked == {}
+
+    settings.example_detection = True
+    entry, _ = indexer.process_image(images_dir / "img000.png", settings)
+    assert entry.objects == ["casino", "coin", "zeus"]
+    assert asked == {"zeus": 1, "crown": 0}  # "coin" was already matched
+    # References are compared with the whole image only when crops are not.
+    assert whole_image_references == [True, False]
+
+
+def test_run_reindex_records_the_device(tmp_path, monkeypatch):
+    images_dir = tmp_path / "images"
+    images_dir.mkdir()
+    store = IndexStore(tmp_path / "index", embedding_dim=DIM)
+    store.load()
+    indexer = Indexer(images_dir, tmp_path / "index", store)
+    monkeypatch.setattr("app.indexer.torch.cuda.is_available", lambda: False)
+    job = ReindexJob(id="job")
+
+    indexer.run_reindex(job)
+
+    assert job.device == "cpu"
+
+
 def test_run_reindex_unloads_ram_model_when_finished(tmp_path, monkeypatch):
     images_dir = tmp_path / "images"
     _make_images(images_dir, count=1)
     index_dir = tmp_path / "index"
-    store = IndexStore(index_dir, embedding_dim=512)
+    store = IndexStore(index_dir, embedding_dim=DIM)
     store.load()
     indexer = Indexer(images_dir, index_dir, store)
     monkeypatch.setattr(indexer, "process_image", _fake_process_image(index_dir))
@@ -171,7 +242,7 @@ def test_run_reindex_skips_corrupt_image_without_aborting(tmp_path):
     (images_dir / "broken.png").write_bytes(b"not a real image")
 
     index_dir = tmp_path / "index"
-    store = IndexStore(index_dir, embedding_dim=512)
+    store = IndexStore(index_dir, embedding_dim=DIM)
     store.load()
     indexer = Indexer(images_dir, index_dir, store)
 
@@ -190,7 +261,7 @@ def test_run_reindex_records_per_file_failures_with_paths(tmp_path):
     (images_dir / "broken.png").write_bytes(b"not a real image")
 
     index_dir = tmp_path / "index"
-    store = IndexStore(index_dir, embedding_dim=512)
+    store = IndexStore(index_dir, embedding_dim=DIM)
     store.load()
     indexer = Indexer(images_dir, index_dir, store)
 
@@ -210,7 +281,7 @@ def test_run_reindex_survives_unreadable_subdir_and_skips_prune(tmp_path):
     _make_images(locked, count=1)
 
     index_dir = tmp_path / "index"
-    store = IndexStore(index_dir, embedding_dim=512)
+    store = IndexStore(index_dir, embedding_dim=DIM)
     store.load()
     indexer = Indexer(images_dir, index_dir, store)
 
@@ -243,7 +314,7 @@ def test_run_reindex_prunes_entries_for_deleted_files(tmp_path):
     _make_images(images_dir)
 
     index_dir = tmp_path / "index"
-    store = IndexStore(index_dir, embedding_dim=512)
+    store = IndexStore(index_dir, embedding_dim=DIM)
     store.load()
     indexer = Indexer(images_dir, index_dir, store)
 
@@ -267,7 +338,7 @@ def test_reconciliation_confirms_missed_delete_twice_before_pruning(tmp_path, mo
     images_dir = tmp_path / "images"
     _make_images(images_dir, count=1)
     index_dir = tmp_path / "index"
-    store = IndexStore(index_dir, embedding_dim=512)
+    store = IndexStore(index_dir, embedding_dim=DIM)
     store.load()
     indexer = Indexer(images_dir, index_dir, store)
     monkeypatch.setattr(indexer, "process_image", _fake_process_image(index_dir))
@@ -287,7 +358,7 @@ def test_no_change_reconciliation_does_not_load_ram(tmp_path, monkeypatch):
     images_dir = tmp_path / "images"
     _make_images(images_dir, count=1)
     index_dir = tmp_path / "index"
-    store = IndexStore(index_dir, embedding_dim=512)
+    store = IndexStore(index_dir, embedding_dim=DIM)
     store.load()
     indexer = Indexer(images_dir, index_dir, store)
     monkeypatch.setattr(indexer, "process_image", _fake_process_image(index_dir))
@@ -310,7 +381,7 @@ def test_run_reindex_aborts_without_pruning_when_images_dir_is_unreachable(tmp_p
     _make_images(images_dir)
 
     index_dir = tmp_path / "index"
-    store = IndexStore(index_dir, embedding_dim=512)
+    store = IndexStore(index_dir, embedding_dim=DIM)
     store.load()
     indexer = Indexer(images_dir, index_dir, store)
     monkeypatch.setattr(indexer, "process_image", _fake_process_image(index_dir))
@@ -335,7 +406,7 @@ def test_run_reindex_prunes_files_deleted_during_the_scan(tmp_path, monkeypatch)
     _make_images(images_dir, count=3)
 
     index_dir = tmp_path / "index"
-    store = IndexStore(index_dir, embedding_dim=512)
+    store = IndexStore(index_dir, embedding_dim=DIM)
     store.load()
     indexer = Indexer(images_dir, index_dir, store)
 
@@ -374,7 +445,7 @@ def test_run_reindex_force_reprocesses_unchanged_files(tmp_path, monkeypatch):
     _make_images(images_dir)
 
     index_dir = tmp_path / "index"
-    store = IndexStore(index_dir, embedding_dim=512)
+    store = IndexStore(index_dir, embedding_dim=DIM)
     store.load()
     indexer = Indexer(images_dir, index_dir, store)
 
@@ -407,7 +478,7 @@ def test_run_reindex_saves_periodically_not_just_at_the_end(tmp_path, monkeypatc
     _make_images(images_dir, count=125)
 
     index_dir = tmp_path / "index"
-    store = IndexStore(index_dir, embedding_dim=512)
+    store = IndexStore(index_dir, embedding_dim=DIM)
     store.load()
     indexer = Indexer(images_dir, index_dir, store)
 
@@ -438,7 +509,7 @@ def test_run_reindex_snapshots_settings_once_at_start(tmp_path, monkeypatch):
     _make_images(images_dir, count=1)
 
     index_dir = tmp_path / "index"
-    store = IndexStore(index_dir, embedding_dim=512)
+    store = IndexStore(index_dir, embedding_dim=DIM)
     store.load()
     indexer = Indexer(images_dir, index_dir, store)
 
@@ -467,7 +538,7 @@ def test_run_reindex_snapshots_custom_tags_once_at_start(tmp_path, monkeypatch):
     _make_images(images_dir, count=1)
 
     index_dir = tmp_path / "index"
-    store = IndexStore(index_dir, embedding_dim=512)
+    store = IndexStore(index_dir, embedding_dim=DIM)
     store.load()
     indexer = Indexer(images_dir, index_dir, store, custom_tags=["zeus"])
 
@@ -493,7 +564,7 @@ def test_run_reindex_clears_custom_tag_embedding_cache_at_start(tmp_path, monkey
     _make_images(images_dir, count=1)
 
     index_dir = tmp_path / "index"
-    store = IndexStore(index_dir, embedding_dim=512)
+    store = IndexStore(index_dir, embedding_dim=DIM)
     store.load()
     indexer = Indexer(images_dir, index_dir, store)
 
@@ -513,7 +584,7 @@ def test_run_reindex_fails_fast_without_processing_any_images_when_ram_not_ready
     _make_images(images_dir, count=3)
 
     index_dir = tmp_path / "index"
-    store = IndexStore(index_dir, embedding_dim=512)
+    store = IndexStore(index_dir, embedding_dim=DIM)
     store.load()
     indexer = Indexer(images_dir, index_dir, store)
 
@@ -543,7 +614,7 @@ def test_run_reindex_stops_when_cancelled_and_keeps_partial_progress(tmp_path, m
     _make_images(images_dir, count=3)
 
     index_dir = tmp_path / "index"
-    store = IndexStore(index_dir, embedding_dim=512)
+    store = IndexStore(index_dir, embedding_dim=DIM)
     store.load()
     indexer = Indexer(images_dir, index_dir, store)
 

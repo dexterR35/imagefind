@@ -51,7 +51,7 @@ For each supported image (`.png`, `.jpg`, `.jpeg`, `.webp`, `.bmp`, `.gif`,
 1. Reads the file **once** and applies EXIF rotation so a sideways phone photo is
    catalogued the way it displays.
 2. Writes a ≤320px **thumbnail** (JPEG) into `backend/.index/thumbnails/`.
-3. Computes the **CLIP embedding** (512 numbers) for similarity search.
+3. Computes the **SigLIP 2 embedding** (768 numbers) for similarity search.
 4. Runs **OCR** to pull out any printed text.
 5. Runs **RAM++** to get object/scene tags; generic tags like `photo` /
    `illustration` / `white background` are dropped
@@ -78,7 +78,7 @@ scan never triggers deletion of existing entries.
 | Model | What it produces | Feeds which search | Runs |
 |---|---|---|---|
 | **RAM++** (Recognize Anything Plus, Swin-L backbone) | Open-vocabulary **object & scene tags** — `cat`, `coin`, `clover`, `beach`, `person`, `pot of gold` … no vocabulary to configure | Main search box (tag text) and the **Object** filter | During indexing only. The ~3 GB checkpoint is installed from Settings and unloaded when indexing is idle. |
-| **OpenCLIP ViT-B/32** (`openai` weights) | A **512-d image embedding** per image; also text embeddings on demand | **Find Similar** (image↔image cosine nearest-neighbor) and **custom-tag** matching (image↔text) | Embedding: during indexing. Text side: when a custom tag is evaluated. Model stays loaded. |
+| **SigLIP 2 ViT-B/16** (`webli` weights, via OpenCLIP) | A **768-d image embedding** per image; also text embeddings on demand | **Find Similar** (image↔image), **Fuzzy** search and **custom-tag** matching (image↔text), the duplicate finder | Embedding: during indexing. Text side: per Fuzzy query or custom tag. Model stays loaded. ~1.5 GB, downloaded on first use. |
 | **EasyOCR** (English) | **Text read from the pixels** of the image | Main search box (OCR text) | During indexing only. Model stays loaded. |
 
 Supporting infrastructure (not models):
@@ -86,13 +86,13 @@ Supporting infrastructure (not models):
 | Component | Role |
 |---|---|
 | **SQLite FTS5** (trigram tokenizer) | Fast substring/partial text search over filename, path, OCR text, and tags; bm25 relevance ranking |
-| **sqlite-vec** (`vec0` virtual table) | Cosine nearest-neighbor over the CLIP embeddings, for Find Similar |
+| **sqlite-vec** (`vec0` virtual table) | Cosine nearest-neighbor over the image embeddings, for Find Similar, Fuzzy and duplicates |
 | **Watchdog** | Real-time filesystem events (add / change / move / delete) |
 
-### Why CLIP is *not* used for normal text search
+### Why the embedding model is *not* used for normal text search
 
 Typing `clover` searches your tags and OCR text literally. It does **not** do a
-CLIP text→image semantic match, because that tends to surface confident-looking
+text→image semantic match, because that tends to surface confident-looking
 but wrong guesses (a baseball photo for "clover"). Semantic matching is reserved
 for **Find Similar**, which compares a real image you picked.
 
@@ -137,7 +137,7 @@ AND** — with each other, the Favorites toggle, and the search box.
 | **Object** | an **exact tag match** (`label = 'cat'`), not a substring | Use it when a loose text match for `cat` would also hit `catalog.png` or a `.../vacation/` folder. |
 | **Format** | `png`, `jpg`, `webp`, `bmp` | Exact match on the recorded format. `jpg` and `jpeg` are treated as the same thing. |
 | **Orientation** | **Landscape** (wider than tall), **Portrait** (taller than wide), or **Square** | Compares stored pixel width/height. Images with unknown dimensions match none of the three. |
-| **Date range** | a **from** / **to** day range against one of three fields you pick: **Date taken** (EXIF capture date), **Modified** (file mtime), or **Indexed** (when ImageFind catalogued it) | Days are interpreted in **UTC**; the *to* day is inclusive. Images missing the chosen date (e.g. no EXIF capture date) are excluded once a bound is set. |
+| **Date range** | a **from** / **to** day range against one of the fields you pick: **Added** (default — when the file appeared on the disk/NAS, its creation time), **Modified** (file mtime), **Date taken** (EXIF capture date), or **Indexed** (when ImageFind catalogued it) | Days are in your **local time zone**, matching the grid's day headings; the *to* day is inclusive. Images missing the chosen date (e.g. no EXIF capture date) are excluded once a bound is set. |
 
 The dates are debounced in the browser like the text box, so typing a range
 doesn't fire a request per keystroke. (The API also accepts file-size and pixel
@@ -168,10 +168,12 @@ applied. Columns: id, path, filename, format, dimensions, size, dates
 
 ### Sorting
 
-Newest / oldest (capture date), name A–Z / Z–A, largest / smallest file.
-Default is newest first — and with a text query on that default, relevance wins
-and date is the tie-breaker. Pick any other sort and it takes over, with
-relevance as the tie-breaker.
+**Best match** (default), newest / oldest, name A–Z / Z–A, largest / smallest
+file. Newest first orders by *last update*: when the file was added to the
+disk/NAS or last edited, whichever is later, so a freshly copied-in old photo
+and a just-edited file both come first. Best match ranks text hits by
+relevance (newest breaks ties) and without a text query is simply newest
+first. Every other sort is applied strictly, with relevance as tie-breaker.
 
 ### Favorites, tags, notes & collections
 
@@ -228,7 +230,7 @@ screen (one page of results at a time).
 
 The **Exact / Fuzzy** toggle by the search box switches the query engine. **Exact**
 is the default literal trigram/tag search described above. **Fuzzy** embeds your
-typed words with CLIP and returns the images whose *visual meaning* is closest —
+typed words with SigLIP 2 and returns the images whose *visual meaning* is closest —
 so "sunset over water" can surface an untitled, untagged photo. Fuzzy match:
 
 - needs query text; it ignores the other filters and pagination (like Find
@@ -236,9 +238,35 @@ so "sunset over water" can surface an untitled, untagged photo. Fuzzy match:
 - can be confidently wrong ("clover" may pull a green baseball field). Use it to
   cast a wide net, then narrow with Exact.
 
+### Find in image and Teach a word
+
+Both live in the detail view's side panel.
+
+**Find in image** draws boxes where a word appears. Type it and press Find,
+or click any recognized-object chip. The word is matched by **OWLv2**, an
+open-vocabulary detector (~600 MB, downloaded and loaded on the first search,
+then a few seconds per search on CPU). If the word is a custom tag with
+reference pictures, likely objects are also cropped and compared with those
+pictures, which finds even a small instance on a busy sheet. Green boxes match
+the word, blue ones look like a reference picture. Cut-offs:
+`DETECT_TEXT_THRESHOLD` (0.30) and `DETECT_EXAMPLE_THRESHOLD` (0.75).
+
+**Teach a word**: click **Draw a box**, drag over the thing, type what it is
+and click **Save example**. That crop is saved to
+`backend/reference_tags/<word>/`, the word is added to your custom tags, and
+this image gets it as one of your tags. **Find in image** uses the new example
+straight away. Click **Reindex** in Settings to tag the other matching images.
+
+During a reindex every model runs on the GPU when one is found (the progress
+bar shows **GPU** or **CPU**). With a GPU, custom tags' example pictures are
+also matched against the objects inside each image, so a small instance on a
+busy sheet gets the tag; on CPU only whole images are compared. Override with
+`INDEX_EXAMPLE_DETECTION=on|off` (default `auto`).
+Teaching is available only from the local app, not through the tunnel.
+
 ### Find Similar
 
-Open an image, click **Find Similar**. It uses that image's CLIP embedding to
+Open an image, click **Find Similar**. It uses that image's embedding to
 return up to 20 visually related images by cosine distance (itself excluded).
 This is a separate view — no text, filters, or pagination apply to it.
 
@@ -348,7 +376,7 @@ read straight from the index — no reindex needed.
 ### Duplicate finder
 
 The **overlapping-squares button** in the header scans the first ~5,000 images
-and clusters ones that are visually near-identical (CLIP cosine distance ≤ ~0.08
+and clusters ones that are visually near-identical (cosine distance ≤ 0.035
 — resizes, re-exports, near-crops). It shows each cluster as a strip of
 thumbnails with filename and size; click one to open it. ImageFind never deletes
 files, so use it to spot what to clean up on disk (or to favorite/collection the
@@ -368,8 +396,8 @@ local-only action (not available through the tunnel).
 ## 8. Custom tags
 
 Custom tags extend RAM++'s automatic tags with words *you* choose. Each is
-matched by **CLIP cosine similarity** between the image embedding and the tag's
-text embedding; a match ≥ `RAM_CUSTOM_TAG_THRESHOLD` (default 0.22) adds the tag
+matched by **cosine similarity** between the image embedding and the tag's
+text embedding; a match ≥ `RAM_CUSTOM_TAG_THRESHOLD` (default 0.06) adds the tag
 to that image. Matched custom tags are stored exactly like RAM++ tags, so they
 are searchable in the box and selectable in the Object filter.
 
@@ -392,7 +420,7 @@ separators or `..`.
   indexing pipeline is already the retrieval half.
 - **Semantic text search is opt-in.** The default **Exact** mode matches the
   literal tag/word; `clover` does not mean "things that evoke clovers." The
-  **Fuzzy** toggle turns on CLIP text→image ranking for people who want it, with
+  **Fuzzy** toggle turns on SigLIP 2 text→image ranking for people who want it, with
   its false positives — it is not the default and does not affect Exact search.
 - **Trigram substring matching.** A 3+ char term can match inside a longer word
   (`cat` inside `communication`, `500` inside `1500`). Relevance ranking and the

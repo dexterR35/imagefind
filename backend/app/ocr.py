@@ -34,7 +34,7 @@ def extract_text(image_path: Path, *, image: Image.Image | None = None) -> str:
     else:
         with Image.open(image_path) as opened:
             # Honour EXIF orientation so rotated phone photos are read the right
-            # way up, matching how the thumbnail and CLIP/RAM++ inputs see them.
+            # way up, matching how the thumbnail, embedding and RAM++ inputs see them.
             opened = ImageOps.exif_transpose(opened) or opened
             grayscale = np.asarray(opened.convert("L")).copy()
     results = _get_reader().readtext(grayscale, detail=0)

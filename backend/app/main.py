@@ -23,7 +23,7 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field, field_validator
 from starlette.background import BackgroundTask
 
-SortOption = Literal["date_desc", "date_asc", "name_asc", "name_desc", "size_desc", "size_asc"]
+SortOption = Literal["relevance", "date_desc", "date_asc", "name_asc", "name_desc", "size_desc", "size_asc"]
 
 from . import config
 from .auth import AuthSession, AuthStore, MAX_PASSWORD_BYTES
@@ -60,7 +60,7 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-store = IndexStore(config.INDEX_DIR)
+store = IndexStore(config.INDEX_DIR, embedding_dim=config.EMBEDDING_DIM)
 store.load()
 indexer = Indexer(config.IMAGES_DIR, config.INDEX_DIR, store, config.RAM_CUSTOM_TAGS)
 jobs: dict[str, ReindexJob] = {}
@@ -502,7 +502,7 @@ def search_query(
     format: str | None = Query(None, max_length=16),
     size_min: int | None = Query(None, ge=0, le=1_000_000_000_000),
     size_max: int | None = Query(None, ge=0, le=1_000_000_000_000),
-    date_field: DateField = "date_taken",
+    date_field: DateField = "added_at",
     date_from: float | None = Query(None, ge=0, le=100_000_000_000),
     date_to: float | None = Query(None, ge=0, le=100_000_000_000),
     width_min: int | None = Query(None, ge=0, le=1_000_000),
@@ -513,7 +513,7 @@ def search_query(
     favorite: bool | None = None,
     collection: str | None = Query(None, max_length=64),
     user_tag: str | None = Query(None, max_length=80),
-    sort: SortOption = "date_desc",
+    sort: SortOption = "relevance",
 ) -> SearchQuery:
     return SearchQuery(
         text=_sanitize_search_value(text, "text"),
@@ -574,7 +574,7 @@ def search_endpoint(
 ):
     _enforce_search_rate_limit(request)
     if mode == "semantic" and query.text:
-        # CLIP text→image ranking: one fixed nearest-neighbour set, no facets,
+        # Text→image embedding ranking: one fixed nearest-neighbour set, no facets,
         # no paging (like Find Similar) — so the client's page-size `limit` and
         # `offset` don't apply.
         from . import embeddings
@@ -590,7 +590,7 @@ def search_endpoint(
 @app.get("/duplicates")
 def duplicates_endpoint(
     request: Request,
-    threshold: float = Query(0.08, ge=0.0, le=1.0),
+    threshold: float = Query(config.DUPLICATE_DISTANCE_THRESHOLD, ge=0.0, le=1.0),
     max_images: int = Query(5000, ge=2, le=20_000),
 ):
     _enforce_search_rate_limit(request)
@@ -745,6 +745,7 @@ def _reindex_job_payload(job: ReindexJob) -> dict:
         "processed": job.processed, "total": job.total, "failed": job.failed,
         "done": job.done, "error": job.error, "cancelled": job.cancelled,
         "failures": job.failures,
+        "device": job.device,
         "started_at": job.started_at,
         "elapsed_seconds": max(0.0, (job.finished_at or time.time()) - job.started_at),
     }
@@ -1129,9 +1130,13 @@ class SettingsUpdate(BaseModel):
         if value is None:
             return value
         for tag in value:
-            if "/" in tag or "\\" in tag or ".." in tag:
-                raise ValueError(f"invalid custom tag {tag!r}: must not contain path separators")
+            _reject_path_like_tag(tag)
         return value
+
+
+def _reject_path_like_tag(tag: str) -> None:
+    if "/" in tag or "\\" in tag or ".." in tag:
+        raise ValueError(f"invalid custom tag {tag!r}: must not contain path separators")
 
 
 def _settings_dict() -> dict:
@@ -1255,6 +1260,103 @@ def update_settings(request: Request, update: SettingsUpdate):
             config.RAM_CUSTOM_TAGS = next_tags
             indexer.custom_tags = next_tags
         return _settings_dict()
+
+
+def _open_original_rgb(image_id: str):
+    """(entry, display-oriented RGBA original) or 404."""
+    from PIL import Image, ImageOps
+
+    entry = store.get(image_id)
+    if entry is None:
+        raise HTTPException(status_code=404, detail="image not found")
+    original = Path(entry.path)
+    if not original.is_file():
+        raise HTTPException(status_code=404, detail="original image file not found")
+    with Image.open(original) as raw:
+        oriented = ImageOps.exif_transpose(raw) or raw
+        return entry, oriented.convert("RGBA")
+
+
+@app.get("/images/{image_id}/detect")
+def detect_endpoint(request: Request, image_id: str, q: str = Query(..., min_length=1, max_length=60)):
+    """Boxes showing where `q` appears in the image: OWLv2 for the word, plus
+    the tag's reference pictures when it has any (see detector.py)."""
+    _enforce_search_rate_limit(request)
+    from . import detector, objects as objects_mod
+    from .image_utils import flatten_to_rgb
+
+    word = q.strip()
+    if not word:
+        raise HTTPException(status_code=422, detail="q must not be blank")
+    _, image = _open_original_rgb(image_id)
+    # Reference folders are named after the custom tag; match it ignoring case.
+    tag = next((t for t in config.RAM_CUSTOM_TAGS if t.lower() == word.lower()), word.lower())
+    try:
+        _reject_path_like_tag(tag)
+        references = objects_mod.reference_embeddings(tag)
+    except ValueError:
+        references = []
+    return {"boxes": detector.find_in_image(flatten_to_rgb(image), word, references)}
+
+
+class ExampleCreate(BaseModel):
+    tag: str = Field(min_length=1, max_length=60)
+    # [x0, y0, x1, y1] as fractions of the image's width and height.
+    box: list[float] = Field(min_length=4, max_length=4)
+
+    @field_validator("tag")
+    @classmethod
+    def _clean_tag(cls, value: str) -> str:
+        value = " ".join(value.split()).lower()
+        if not value:
+            raise ValueError("tag must not be blank")
+        _reject_path_like_tag(value)
+        return value
+
+    @field_validator("box")
+    @classmethod
+    def _check_box(cls, value: list[float]) -> list[float]:
+        x0, y0, x1, y1 = value
+        if not (0 <= x0 < x1 <= 1 and 0 <= y0 < y1 <= 1):
+            raise ValueError("box must be [x0, y0, x1, y1] with 0 <= x0 < x1 <= 1 and 0 <= y0 < y1 <= 1")
+        return value
+
+
+MIN_EXAMPLE_PX = 16
+
+
+@app.post("/images/{image_id}/examples")
+def add_example_endpoint(request: Request, image_id: str, body: ExampleCreate):
+    """Teach a word by example: save the boxed part of this image as a
+    reference picture for the custom tag, make sure the tag is a custom tag,
+    and give this image the tag (as a user tag, so a reindex keeps it)."""
+    _require_local_admin(request)
+    from . import objects as objects_mod
+
+    entry, image = _open_original_rgb(image_id)
+    width, height = image.size
+    x0, y0, x1, y1 = body.box
+    crop_box = (round(x0 * width), round(y0 * height), round(x1 * width), round(y1 * height))
+    if crop_box[2] - crop_box[0] < MIN_EXAMPLE_PX or crop_box[3] - crop_box[1] < MIN_EXAMPLE_PX:
+        raise HTTPException(status_code=422, detail=f"box must be at least {MIN_EXAMPLE_PX}px on each side")
+
+    with _settings_lock:
+        tag = next((t for t in config.RAM_CUSTOM_TAGS if t.lower() == body.tag), body.tag)
+        tag_dir = (config.RAM_CUSTOM_TAG_REFERENCE_DIR / tag).resolve()
+        if config.RAM_CUSTOM_TAG_REFERENCE_DIR.resolve() not in tag_dir.parents:
+            raise HTTPException(status_code=422, detail="invalid tag")
+        tag_dir.mkdir(parents=True, exist_ok=True)
+        image.crop(crop_box).save(tag_dir / f"{image_id[:12]}-{uuid.uuid4().hex[:8]}.png")
+        if tag not in config.RAM_CUSTOM_TAGS:
+            next_tags = [*config.RAM_CUSTOM_TAGS, tag]
+            config.save_settings(config.IMAGES_DIR, config.RAM_CONFIDENCE, next_tags)
+            config.RAM_CUSTOM_TAGS = next_tags
+            indexer.custom_tags = next_tags
+    objects_mod.clear_custom_tag_cache()
+    annotations = store.get_annotations([image_id]).get(image_id, {})
+    user_tags = store.set_user_tags(image_id, [*annotations.get("user_tags", []), tag])
+    examples = sum(1 for p in tag_dir.iterdir() if p.suffix.lower() in {".png", ".jpg", ".jpeg", ".webp", ".bmp"})
+    return {"tag": tag, "examples": examples, "user_tags": user_tags}
 
 
 FRONTEND_DIST_DIR = Path(__file__).resolve().parents[2] / "frontend" / "dist"

@@ -1,5 +1,10 @@
 import { useCallback, useEffect, useRef, useState } from "react";
-import { downloadUrl, imageUrl, type Collection, type ImageResult } from "./api";
+import {
+  addExample, detectInImage, downloadUrl, imageUrl,
+  type Box, type Collection, type DetectedBox, type ImageResult,
+} from "./api";
+import { BoxOverlay } from "./BoxOverlay";
+import { BoxTools, type FindStatus } from "./BoxTools";
 import { FavoriteButton } from "./FavoriteButton";
 import { TagEditor } from "./TagEditor";
 
@@ -55,6 +60,15 @@ export function ImageModal({
   const [offset, setOffset] = useState({ x: 0, y: 0 });
   const [dragging, setDragging] = useState(false);
   const [fullLoaded, setFullLoaded] = useState(false);
+  const imgRef = useRef<HTMLImageElement>(null);
+  const [imgRect, setImgRect] = useState<{ left: number; top: number; width: number; height: number } | null>(null);
+  const [boxes, setBoxes] = useState<DetectedBox[]>([]);
+  const [findStatus, setFindStatus] = useState<FindStatus>({ kind: "idle" });
+  const [drawing, setDrawing] = useState(false);
+  const [draft, setDraft] = useState<Box | null>(null);
+  const [savingExample, setSavingExample] = useState(false);
+  const [teachMessage, setTeachMessage] = useState<string | null>(null);
+  const findAbortRef = useRef<AbortController | null>(null);
   const dragRef = useRef<{ pointerId: number; startX: number; startY: number; originX: number; originY: number } | null>(null);
 
   useEffect(() => {
@@ -70,7 +84,68 @@ export function ImageModal({
     setScale(1);
     setOffset({ x: 0, y: 0 });
     setFullLoaded(false);
+    findAbortRef.current?.abort();
+    setBoxes([]);
+    setFindStatus({ kind: "idle" });
+    setDrawing(false);
+    setDraft(null);
+    setTeachMessage(null);
   }, [image.id]);
+
+  useEffect(() => () => findAbortRef.current?.abort(), []);
+
+  // The overlay mirrors the image's untransformed layout box; the zoom/pan
+  // transform is applied to both identically.
+  const measureImage = useCallback(() => {
+    const img = imgRef.current;
+    if (!img || !img.offsetWidth) return;
+    setImgRect({ left: img.offsetLeft, top: img.offsetTop, width: img.offsetWidth, height: img.offsetHeight });
+  }, []);
+
+  useEffect(() => {
+    const node = previewRef.current;
+    if (!node || typeof ResizeObserver === "undefined") return undefined;
+    const observer = new ResizeObserver(measureImage);
+    observer.observe(node);
+    return () => observer.disconnect();
+  }, [measureImage]);
+
+  const findWord = useCallback((word: string) => {
+    findAbortRef.current?.abort();
+    const controller = new AbortController();
+    findAbortRef.current = controller;
+    setFindStatus({ kind: "searching", word });
+    detectInImage(image.id, word, controller.signal)
+      .then((found) => {
+        setBoxes(found);
+        setFindStatus({ kind: "done", word, count: found.length });
+      })
+      .catch((err: unknown) => {
+        if (controller.signal.aborted) return;
+        setFindStatus({ kind: "error", message: `Find failed: ${err instanceof Error ? err.message : String(err)}` });
+      });
+  }, [image.id]);
+
+  const teach = useCallback((word: string) => {
+    if (!draft) return;
+    setSavingExample(true);
+    setTeachMessage(null);
+    addExample(image.id, word, draft)
+      .then((saved) => {
+        setBoxes([{ label: saved.tag, score: 1, source: "example", box: draft }]);
+        setDraft(null);
+        setDrawing(false);
+        setTeachMessage(
+          `Saved example ${saved.examples} of “${saved.tag}” and tagged this image. ` +
+          "Click Reindex in Settings to find it in other images.",
+        );
+        onTagsChange?.(image.id, saved.user_tags);
+      })
+      .catch((err: unknown) => {
+        setTeachMessage(`Could not save: ${err instanceof Error ? err.message : String(err)}`);
+      })
+      .finally(() => setSavingExample(false));
+  }, [draft, image.id, onTagsChange]);
 
   // Zoom toward an anchor point measured from the preview centre. `anchor`
   // {x,y} of {0,0} zooms toward the centre (used by the buttons/keys).
@@ -133,7 +208,12 @@ export function ImageModal({
       }
       switch (event.key) {
         case "Escape":
-          onClose();
+          if (drawing) {
+            setDrawing(false);
+            setDraft(null);
+          } else {
+            onClose();
+          }
           break;
         case "ArrowLeft":
           onPrev?.();
@@ -160,10 +240,10 @@ export function ImageModal({
     };
     window.addEventListener("keydown", onKeyDown);
     return () => window.removeEventListener("keydown", onKeyDown);
-  }, [onClose, onPrev, onNext, zoomBy, resetView]);
+  }, [onClose, onPrev, onNext, zoomBy, resetView, drawing]);
 
   const onPointerDown = (event: React.PointerEvent<HTMLDivElement>) => {
-    if (scale === 1) return;
+    if (scale === 1 || drawing) return;
     dragRef.current = {
       pointerId: event.pointerId,
       startX: event.clientX,
@@ -195,6 +275,7 @@ export function ImageModal({
   };
 
   const onDoubleClick = (event: React.MouseEvent<HTMLDivElement>) => {
+    if (drawing) return;
     const rect = event.currentTarget.getBoundingClientRect();
     if (scale > 1) {
       resetView();
@@ -207,6 +288,8 @@ export function ImageModal({
   };
 
   const zoomed = scale > 1;
+  const viewTransform = `translate(${offset.x}px, ${offset.y}px) scale(${scale})`;
+  const transition = dragging ? "none" : "transform 120ms ease";
   const zoomPercent = Math.round(scale * 100);
 
   return (
@@ -231,7 +314,7 @@ export function ImageModal({
           <div className="modal-preview-wrap">
             <div
               ref={previewRef}
-              className={`modal-preview${zoomed ? " is-zoomed" : ""}`}
+              className={`modal-preview${zoomed ? " is-zoomed" : ""}${drawing ? " is-drawing" : ""}`}
               onPointerDown={onPointerDown}
               onPointerMove={onPointerMove}
               onPointerUp={endDrag}
@@ -248,15 +331,24 @@ export function ImageModal({
                 />
               )}
               <img
+                ref={imgRef}
                 src={imageUrl(image.id)}
                 alt={filename}
                 draggable={false}
-                onLoad={() => setFullLoaded(true)}
-                style={{
-                  transform: `translate(${offset.x}px, ${offset.y}px) scale(${scale})`,
-                  transition: dragging ? "none" : "transform 120ms ease",
-                }}
+                onLoad={() => { setFullLoaded(true); measureImage(); }}
+                style={{ transform: viewTransform, transition }}
               />
+              {fullLoaded && imgRect && (boxes.length > 0 || drawing || draft) && (
+                <BoxOverlay
+                  rect={imgRect}
+                  transform={viewTransform}
+                  scale={scale}
+                  boxes={boxes}
+                  drawing={drawing}
+                  draft={draft}
+                  onDraftChange={setDraft}
+                />
+              )}
               {onPrev && (
                 <button
                   type="button"
@@ -312,6 +404,18 @@ export function ImageModal({
                 </select>
               </div>
             )}
+            <BoxTools
+              findStatus={findStatus}
+              onFind={findWord}
+              onClearBoxes={() => { setBoxes([]); setFindStatus({ kind: "idle" }); }}
+              hasBoxes={boxes.length > 0}
+              drawing={drawing}
+              onToggleDrawing={() => { setDrawing((on) => !on); setDraft(null); setTeachMessage(null); }}
+              draft={draft}
+              saving={savingExample}
+              teachMessage={teachMessage}
+              onTeach={teach}
+            />
             <section className="meta-section">
               <h3>Image details</h3>
               <dl className="metadata-list">
@@ -327,7 +431,19 @@ export function ImageModal({
             <section className="meta-section">
               <h3>Recognized objects</h3>
               <div className="tag-list">
-                {image.objects.length > 0 ? image.objects.map((object) => <span key={object}>{object}</span>) : <p>None detected</p>}
+                {image.objects.length > 0
+                  ? image.objects.map((object) => (
+                    <button
+                      type="button"
+                      key={object}
+                      className="tag-find"
+                      title={`Show where “${object}” is`}
+                      onClick={() => findWord(object)}
+                    >
+                      {object}
+                    </button>
+                  ))
+                  : <p>None detected</p>}
               </div>
             </section>
             {image.ocr_text && (

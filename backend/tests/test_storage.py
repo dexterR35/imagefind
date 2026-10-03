@@ -28,7 +28,7 @@ def test_upsert_save_load_roundtrip(tmp_path):
     assert reloaded.get("a1").ocr_text == "NETBET"
     assert reloaded.get_embedding("a1").tolist() == [1.0, 0.0, 0.0, 0.0]
     assert reloaded.get_by_path("/imgs/a.png").id == "a1"
-    assert reloaded._conn.execute("PRAGMA user_version").fetchone()[0] == 6
+    assert reloaded._conn.execute("PRAGMA user_version").fetchone()[0] == 7
 
 
 def test_upsert_save_load_roundtrip_preserves_new_metadata_fields(tmp_path):
@@ -117,22 +117,14 @@ def test_needs_reindex_backfills_metadata_for_an_unchanged_legacy_row(tmp_path):
     assert store.needs_reindex(img_path) is True
 
 
-def test_needs_reindex_backfills_added_at_for_an_otherwise_complete_row(tmp_path):
-    img_path = tmp_path / "photo.png"
-    img_path.write_bytes(b"fake-image-bytes")
-    stat = img_path.stat()
-    store = IndexStore(tmp_path / "idx", embedding_dim=4)
+def test_date_sort_uses_the_updated_at_index(tmp_path):
+    store = IndexStore(tmp_path, embedding_dim=4)
     store.load()
-    store.upsert(
-        _entry(
-            path=str(img_path), mtime=stat.st_mtime, size=stat.st_size,
-            width=10, height=10, format="PNG", date_taken=stat.st_mtime, indexed_at=1.0,
-            # added_at left at its 0.0 default, as pre-migration rows have it.
-        ),
-        np.zeros(4, dtype=np.float32),
-    )
-
-    assert store.needs_reindex(img_path) is True
+    plan = store._conn.execute(
+        "EXPLAIN QUERY PLAN SELECT id FROM images "
+        "ORDER BY max(images.added_at, images.mtime) DESC, images.id ASC LIMIT 10"
+    ).fetchall()
+    assert any("images_updated_idx" in row[-1] for row in plan)
 
 
 def test_needs_reindex_true_when_file_changes(tmp_path):
@@ -538,3 +530,17 @@ def test_upsert_keeps_large_catalog_in_sqlite_without_an_in_memory_buffer(tmp_pa
     reloaded.load()
     assert reloaded.embeddings.shape == (n, 4)
     assert reloaded.get_embedding("e750").tolist() == [750.0, 0.0, 0.0, 1.0]
+
+
+def test_changing_embedding_dimension_drops_old_rows_for_a_fresh_reindex(tmp_path):
+    old = IndexStore(tmp_path, embedding_dim=2)
+    old.load()
+    old.upsert(_entry(), np.array([1.0, 0.0], dtype=np.float32))
+    old.save()
+    old.close()
+
+    new = IndexStore(tmp_path, embedding_dim=3)
+    new.load()
+    assert new.count() == 0
+    new.upsert(_entry(), np.array([1.0, 0.0, 0.0], dtype=np.float32))
+    assert new.count() == 1

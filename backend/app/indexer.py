@@ -7,6 +7,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 import numpy as np
+import torch
 from PIL import Image, ImageOps
 
 from . import config
@@ -51,6 +52,8 @@ class ReindexJob:
     # the true total; this list is the first MAX_TRACKED_FAILURES of them, with
     # enough detail for the UI to tell the user which files need attention.
     failures: list[dict] = field(default_factory=list)
+    # "cuda" or "cpu": where the models ran, found when the run starts.
+    device: str = ""
     # Wall-clock start, so a client that reconnects mid-run (a reloaded or
     # reopened tab) can still show elapsed time and estimate what is left.
     started_at: float = field(default_factory=time.time)
@@ -73,6 +76,9 @@ class ReindexSettings:
     ram_confidence: float | None
     custom_tags: list[str]
     custom_tag_threshold: float
+    # Look for custom tags' reference pictures inside each image; see
+    # config.INDEX_EXAMPLE_DETECTION.
+    example_detection: bool = False
 
 
 class Indexer:
@@ -88,10 +94,12 @@ class Indexer:
         self._last_reconcile_missing: set[str] = set()
 
     def _current_settings(self) -> ReindexSettings:
+        mode = config.INDEX_EXAMPLE_DETECTION
         return ReindexSettings(
             ram_confidence=config.RAM_CONFIDENCE,
             custom_tags=self.custom_tags,
             custom_tag_threshold=config.RAM_CUSTOM_TAG_THRESHOLD,
+            example_detection=mode == "on" or (mode == "auto" and torch.cuda.is_available()),
         )
 
     def process_image(self, path: Path, settings: ReindexSettings) -> tuple[ImageEntry, np.ndarray]:
@@ -102,7 +110,7 @@ class Indexer:
         thumb_path = self.index_dir / "thumbnails" / f"{image_id}.jpg"
         temporary_thumb = thumb_path.with_suffix(".jpg.tmp")
         try:
-            # Decode the original exactly once. Thumbnailing, CLIP, OCR and
+            # Decode the original exactly once. Thumbnailing, embedding, OCR and
             # RAM++ share the same display-ready in-memory rendition.
             with Image.open(path) as raw:
                 # .format and EXIF must be read before any convert()/transpose,
@@ -125,9 +133,21 @@ class Indexer:
             if settings.custom_tags:
                 object_labels |= set(
                     objects_mod.detect_custom_tags(
-                        embedding, settings.custom_tags, settings.custom_tag_threshold
+                        embedding, settings.custom_tags, settings.custom_tag_threshold,
+                        # With example detection the references are matched
+                        # against crops below, which is far more precise than
+                        # against the whole image.
+                        use_references=not settings.example_detection,
                     )
                 )
+            if settings.example_detection and settings.custom_tags:
+                from . import detector
+
+                unmatched = {
+                    tag: objects_mod.reference_embeddings(tag)
+                    for tag in settings.custom_tags if tag not in object_labels
+                }
+                object_labels |= set(detector.tags_found_by_example(base_rgb, unmatched))
             object_labels = sorted(object_labels)
 
             entry = ImageEntry(
@@ -136,13 +156,10 @@ class Indexer:
                 mtime=stat.st_mtime, size=stat.st_size,
                 width=width, height=height, format=img_format,
                 date_taken=date_taken, indexed_at=time.time(),
-                # File creation time, i.e. when it actually appeared on this
-                # filesystem/NAS share - unlike indexed_at (stamped once
-                # processing finishes), this doesn't drift with queue position
-                # or how long a bulk import takes to grind through.
-                # st_birthtime (macOS/BSD) is true creation time; st_ctime is
-                # creation time on Windows, metadata-change time on Linux.
-                added_at=getattr(stat, "st_birthtime", stat.st_ctime),
+                # When it actually appeared on this filesystem/NAS share -
+                # unlike indexed_at (stamped once processing finishes), this
+                # doesn't drift with queue position on a bulk import.
+                added_at=image_utils.file_added_time(path, stat),
             )
             os.replace(temporary_thumb, thumb_path)
             return entry, embedding
@@ -258,6 +275,14 @@ class Indexer:
     ) -> None:
         try:
             settings = self._current_settings()
+            # Every model picks the GPU by itself when there is one; record
+            # which it was so the progress bar can say so.
+            job.device = "cuda" if torch.cuda.is_available() else "cpu"
+            logger.info(
+                "reindex: running on %s; custom-tag example detection %s",
+                "GPU" if job.device == "cuda" else "CPU",
+                "on" if settings.example_detection else "off",
+            )
             # Every reindex re-embeds custom tags from scratch, so adding or
             # changing reference images for a tag between runs actually takes
             # effect instead of silently reusing a stale cached embedding.

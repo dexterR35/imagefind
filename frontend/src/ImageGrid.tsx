@@ -1,4 +1,4 @@
-import type { ImageResult } from "./api";
+import { updatedAt, type ImageResult } from "./api";
 import { ImageCard } from "./ImageCard";
 import { ImageTable } from "./ImageTable";
 
@@ -11,18 +11,17 @@ interface Props {
   onToggleFavorite?: (id: string, next: boolean) => void;
   selectedIds?: Set<string>;
   onToggleSelect?: (id: string) => void;
-  // Split the grid into day-by-day sections, keyed by added_at (the file's
-  // creation time, i.e. when it appeared on the NAS) so freshly-added files
-  // group as "new" regardless of the photo's original EXIF date. Only
-  // meaningful when the results are actually ordered by added_at (see App.tsx).
+  // Split the grid into day-by-day sections, keyed by updatedAt (when the file
+  // appeared on the NAS or was last edited) so freshly-added files group as
+  // "new" regardless of the photo's original EXIF date. Only meaningful when
+  // the results are actually ordered by that date (see App.tsx).
   groupByDate?: boolean;
 }
 
 const UNKNOWN_DATE_KEY = "unknown";
 
-// Local day key ("2026-09-07") from a unix-seconds timestamp. Images whose
-// added_at was never populated (pre-migration rows, still 0 until the next
-// reindex backfills it) group together instead of rendering as Jan 1 1970.
+// Local day key ("2026-09-07") from a unix-seconds timestamp. A zero
+// timestamp groups under "Unknown date" instead of rendering as Jan 1 1970.
 function dayKey(seconds: number): string {
   if (!seconds) return UNKNOWN_DATE_KEY;
   const d = new Date(seconds * 1000);
@@ -41,12 +40,13 @@ function dayLabel(seconds: number): string {
 function groupByDay(images: ImageResult[]): { key: string; label: string; images: ImageResult[] }[] {
   const groups: { key: string; label: string; images: ImageResult[] }[] = [];
   for (const img of images) {
-    const key = dayKey(img.added_at);
+    const updated = updatedAt(img);
+    const key = dayKey(updated);
     const last = groups[groups.length - 1];
     if (last && last.key === key) {
       last.images.push(img);
     } else {
-      groups.push({ key, label: dayLabel(img.added_at), images: [img] });
+      groups.push({ key, label: dayLabel(updated), images: [img] });
     }
   }
   return groups;
@@ -71,7 +71,6 @@ export function ImageGrid({
   }
 
   const cardProps = (img: ImageResult) => ({
-    key: img.id,
     image: img,
     onClick: onSelect,
     onToggleFavorite,
@@ -86,7 +85,7 @@ export function ImageGrid({
           <section className="image-grid-group" key={group.key}>
             <h2 className="image-grid-date">{group.label}</h2>
             <div className="image-grid">
-              {group.images.map((img) => <ImageCard {...cardProps(img)} />)}
+              {group.images.map((img) => <ImageCard key={img.id} {...cardProps(img)} />)}
             </div>
           </section>
         ))}
@@ -96,7 +95,7 @@ export function ImageGrid({
 
   return (
     <div className="image-grid">
-      {images.map((img) => <ImageCard {...cardProps(img)} />)}
+      {images.map((img) => <ImageCard key={img.id} {...cardProps(img)} />)}
     </div>
   );
 }

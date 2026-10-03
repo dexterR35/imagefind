@@ -18,6 +18,7 @@ import {
   setImageNote,
   setImageTags,
   SORT_OPTIONS,
+  DEFAULT_SORT,
   type AuthSessionStatus,
   type Collection,
   type ImageResult,
@@ -53,7 +54,7 @@ function parseLocation(): UrlState {
   const pageRaw = Number(params.get("page"));
   return {
     filters: searchParamsToFilters(params),
-    sort: SORT_OPTIONS.includes(sortRaw as SortOption) ? (sortRaw as SortOption) : "date_desc",
+    sort: SORT_OPTIONS.includes(sortRaw as SortOption) ? (sortRaw as SortOption) : DEFAULT_SORT,
     view: params.get("view") === "table" ? "table" : "cards",
     page: Number.isInteger(pageRaw) && pageRaw >= 1 ? pageRaw : 1,
   };
@@ -101,7 +102,7 @@ function Gallery({ onLogout }: { onLogout: () => void }) {
   useEffect(() => {
     if (showingSimilar) return;
     const params = filtersToSearchParams(filters);
-    if (sort !== "date_desc") params.set("sort", sort);
+    if (sort !== DEFAULT_SORT) params.set("sort", sort);
     if (view !== "cards") params.set("view", view);
     if (page > 1) params.set("page", String(page));
     const qs = params.toString();
@@ -293,6 +294,11 @@ function Gallery({ onLogout }: { onLogout: () => void }) {
     ? images.findIndex((img) => img.id === selectedInGrid.id)
     : -1;
   const isSemantic = filters.mode === "semantic";
+  // Best match only reorders by relevance when a 3+ letter word reaches the
+  // full-text index (backend fts_terms); otherwise it is newest first too.
+  const isDateOrdered =
+    sort === "date_desc" || sort === "date_asc" ||
+    (sort === "relevance" && !(filters.text ?? "").split(/\s+/).some((term) => term.length >= 3));
 
   return (
     <div className="app">
@@ -368,6 +374,7 @@ function Gallery({ onLogout }: { onLogout: () => void }) {
           <label className="sort-control">
             <span>Sort by</span>
             <select value={sort} onChange={(event) => handleSortChange(event.target.value as SortOption)}>
+              <option value="relevance">Best match</option>
               <option value="date_desc">Newest first</option>
               <option value="date_asc">Oldest first</option>
               <option value="name_asc">Name A–Z</option>
@@ -390,7 +397,7 @@ function Gallery({ onLogout }: { onLogout: () => void }) {
           onToggleFavorite={handleToggleFavorite}
           selectedIds={selectedIds}
           onToggleSelect={toggleSelect}
-          groupByDate={!showingSimilar && !isSemantic && (sort === "date_desc" || sort === "date_asc")}
+          groupByDate={!showingSimilar && !isSemantic && isDateOrdered}
         />
       )}
       {!showingSimilar && !isSemantic && (
