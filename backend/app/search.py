@@ -1,0 +1,70 @@
+import numpy as np
+
+from . import config
+from .storage import ImageEntry, IndexStore
+
+
+def search(
+    store: IndexStore,
+    text: str | None = None,
+    obj: str | None = None,
+    fmt: str | None = None,
+    size_min: int | None = None,
+    size_max: int | None = None,
+    date_field: str = "added_at",
+    date_from: float | None = None,
+    date_to: float | None = None,
+    width_min: int | None = None,
+    width_max: int | None = None,
+    height_min: int | None = None,
+    height_max: int | None = None,
+    orientation: str | None = None,
+    favorite: bool | None = None,
+    collection: str | None = None,
+    user_tag: str | None = None,
+    sort: str = "relevance",
+    offset: int = 0,
+    limit: int = 60,
+) -> tuple[list[ImageEntry], int]:
+    """Run filtering, sorting, counting, and pagination in SQLite."""
+    return store.search(
+        text=text,
+        obj=obj,
+        fmt=fmt,
+        size_min=size_min,
+        size_max=size_max,
+        date_field=date_field,
+        date_from=date_from,
+        date_to=date_to,
+        width_min=width_min,
+        width_max=width_max,
+        height_min=height_min,
+        height_max=height_max,
+        orientation=orientation,
+        favorite=favorite,
+        collection=collection,
+        user_tag=user_tag,
+        sort=sort,
+        offset=offset,
+        limit=limit,
+    )
+
+
+def search_semantic(
+    store: IndexStore, query_embedding: np.ndarray, limit: int = 60
+) -> list[ImageEntry]:
+    """Text→image embedding ranking. The caller supplies the query-text embedding."""
+    return store.search_semantic(query_embedding, limit=limit)
+
+
+def find_duplicate_groups(
+    store: IndexStore, threshold: float = config.DUPLICATE_DISTANCE_THRESHOLD, max_images: int = 5000
+) -> list[list[ImageEntry]]:
+    return store.find_duplicate_groups(threshold=threshold, max_images=max_images)
+
+
+def find_similar(
+    store: IndexStore, image_id: str, limit: int = 20
+) -> list[ImageEntry] | None:
+    """Run cosine-nearest-neighbor search in SQLite via sqlite-vec."""
+    return store.find_similar(image_id, limit=limit)

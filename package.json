@@ -1,0 +1,21 @@
+{
+  "name": "imagefind",
+  "private": true,
+  "scripts": {
+    "prestart": "npm run build:frontend",
+    "start": "npm run start:backend",
+    "build:frontend": "npm --prefix frontend run build",
+    "setup:backend": "node scripts/setup-backend.js",
+    "auth:set-password": "node scripts/manage-auth.js set-password",
+    "auth:status": "node scripts/manage-auth.js status",
+    "auth:revoke-sessions": "node scripts/manage-auth.js revoke-sessions",
+    "start:backend": "node scripts/start-backend.js",
+    "start:frontend": "cd frontend && npm run dev",
+    "prestart:tunnel": "npm run build:frontend",
+    "start:tunnel": "concurrently --kill-others -n backend,tunnel -c blue,magenta \"npm:start:backend\" \"npm:_tunnel\"",
+    "_tunnel": "node scripts/start-tunnel.js"
+  },
+  "devDependencies": {
+    "concurrently": "^9.0.0"
+  }
+}
